@@ -102,6 +102,14 @@ class Server:
                 self._subscribers.append(conn)
             return
 
+        if cmd == "status":
+            try:
+                conn.sendall((json.dumps(self._session.snapshot()) + "\n").encode())
+            except OSError:
+                pass
+            conn.close()
+            return
+
         try:
             self._session.command(cmd, request.get("arg"))
         except Exception:

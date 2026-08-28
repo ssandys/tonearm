@@ -1,0 +1,15 @@
+[Unit]
+Description=tonearm — Roon bridge for the Omarchy shell bar
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.config/omarchy/plugins/ssandys.tonearm/scripts/tonearmd
+Restart=on-failure
+RestartSec=3
+# The socket lives here; systemd creates and cleans it up.
+RuntimeDirectory=tonearm
+RuntimeDirectoryMode=0700
+
+[Install]
+WantedBy=default.target
