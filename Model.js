@@ -246,6 +246,19 @@ function nextRetryDelay(attempt) {
   return ms > 30000 ? 30000 : ms
 }
 
+// The bar button and (later) the popup both need a sized image URL against
+// the Core's own HTTP port. Pure and node-testable like the rest of this
+// file; Panel.qml is the first consumer.
+function artUrl(state, px) {
+  if (!state || !state.core || !state.core.host) return ""
+  var np = nowPlayingOf(state)
+  if (!np || !np.image_key) return ""
+  var size = px || 256
+  return "http://" + state.core.host + ":" + (state.core.http_port || 9330) +
+         "/api/image/" + np.image_key +
+         "?scale=fit&width=" + size + "&height=" + size
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     THEME_ACCENT: THEME_ACCENT,
@@ -268,6 +281,7 @@ if (typeof module !== "undefined") {
     barState: barState,
     tooltipText: tooltipText,
     zoneList: zoneList,
-    nextRetryDelay: nextRetryDelay
+    nextRetryDelay: nextRetryDelay,
+    artUrl: artUrl
   }
 }
