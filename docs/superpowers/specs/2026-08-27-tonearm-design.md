@@ -52,8 +52,13 @@ connection. Cover art in QML is a plain `Image { source: url }`. Not fully close
 a real `image_key` is in hand, which needs pairing.
 
 **`roonapi`'s dependency metadata is over-declared.** It names `requests`, `six`,
-`ifaddr` and `websocket-client`; across all five source files it imports **only**
-`websocket`. `websocket-client` is already present in system Python.
+`ifaddr` and `websocket-client`. Its only **required** third-party import is
+`websocket`, which is already present in system Python. `roonapisocket.py:10`
+also imports `simplejson`, but inside a `try`/`except` with a fallback to stdlib
+`json`, so it is optional and adds no dependency. (An earlier draft of this
+document said "imports only `websocket`" — that came from a grep anchored at
+line start, which missed every indented import inside a `try` block. The
+conclusion stands; the wording did not.)
 
 **`Quickshell/ColorQuantizer` exists** and takes a `source` URL, returning a `colors`
 palette with `depth` and `rescaleSize` controls. This is what makes the visual
@@ -293,6 +298,16 @@ by wall-clock position, so a long-running zone does not outrank one you just sta
 
 This is the exact sequence that located `yavin`; step 1 fails on this network and steps
 2–3 succeed. Result persists to `~/.config/tonearm/config.json`, the token beside it.
+
+**Step 2 must not derive "the local /24" from a routing trick.** The obvious
+implementation — open a UDP socket, `connect()` to an arbitrary address, and read
+back `getsockname()` — returns the **Tailscale** address on this machine, not the
+LAN address. Measured: it yields `100.94.206.126`, because `ip route get` for any
+off-link destination resolves via `tailscale0 table 52` while an exit node is
+active. The scan would then sweep `100.94.206.0/24` and silently find nothing.
+Enumerate interface addresses directly instead. This is a second, independent
+environmental hazard from the multicast filtering above, and it is invisible
+until an exit node happens to be enabled.
 
 ### 7.3 Pairing
 
