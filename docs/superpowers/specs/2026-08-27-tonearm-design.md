@@ -517,6 +517,34 @@ co-location, and `stappmus.audio` is precedent for a daemon shipping inside a
 plugin. Revisit only if the daemon acquires consumers that have nothing to do with
 the bar.
 
+### A third idea: a product icon in the bar
+
+Replace the bar's state glyph with an icon that identifies *tonearm* rather than
+playback state. Two candidates already present in VictorMono Nerd Font, both of
+which render cleanly at bar size and were checked against the theme:
+
+    U+0EFBD  fa-record_vinyl    a record with a centre label
+    U+F0025  md-album
+    U+0EDE9  fa-compact_disc
+
+**What it would fix.** Two things, one of them a tradeoff already knowingly
+accepted. First, §7.5 records that removing the cover-art badge left the widget
+visually indistinguishable from its eighteen monochrome neighbours until you learn
+its position; a record icon restores that distinctiveness without the
+unreadable-at-10px problem the art had. Second, it sidesteps a small ambiguity
+noticed in use: the bar is a **status indicator** (paused ⇒ pause bars) while the
+popup's button is an **action** (paused ⇒ offers play), so the same two glyphs
+mean opposite things a hundred pixels apart. Both readings are individually
+conventional and the ambiguity was judged not worth fixing on its own — but a
+product icon removes it as a side effect.
+
+**What it would cost.** The bar stops showing play/paused at a glance. That state
+would live only in the tooltip and the popup, unless it is carried some other way
+— colour, a small overlay, or an opacity change between playing and idle. Decide
+that deliberately rather than discovering it after the swap: the severity colouring
+(`ok`/`warn`/`error`) must survive regardless, since the failure states in §7.4
+depend on it.
+
 ### The cheap thing to do now
 
 **Treat the socket as a real interface rather than an internal detail.** The
