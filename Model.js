@@ -427,17 +427,41 @@ function nextRetryDelay(attempt) {
   return ms > 30000 ? 30000 : ms
 }
 
-// The bar button and (later) the popup both need a sized image URL against
-// the Core's own HTTP port. Pure and node-testable like the rest of this
-// file; Panel.qml is the first consumer.
-function artUrl(state, px) {
-  if (!state || !state.core || !state.core.host) return ""
-  var np = nowPlayingOf(state)
-  if (!np || !np.image_key) return ""
+// Extracted so browse rows and now-playing share one URL builder. Row art is
+// loaded by the widget straight from the Core (spec 4.4): a plain Image can
+// read these URLs -- only ColorQuantizer cannot -- so caching 100 images per
+// page in the daemon would be pure waste.
+function imageUrl(core, imageKey, px) {
+  if (!core || !core.host) return ""
+  if (!imageKey) return ""
   var size = px || 256
-  return "http://" + state.core.host + ":" + (state.core.http_port || 9330) +
-         "/api/image/" + np.image_key +
+  return "http://" + core.host + ":" + (core.http_port || 9330) +
+         "/api/image/" + imageKey +
          "?scale=fit&width=" + size + "&height=" + size
+}
+
+function artUrl(state, px) {
+  if (!state) return ""
+  var np = nowPlayingOf(state)
+  return imageUrl(state.core, np && np.image_key, px)
+}
+
+function rowArtUrl(state, row, px) {
+  if (!state || !row) return ""
+  return imageUrl(state.core, row.image_key, px)
+}
+
+// Clamped, never wrapping. Wrapping in a short list makes Down feel like it
+// jumped to the top by accident; clamping is what every list in the shell does.
+// A count of 0 keeps the cursor at -1 ("nothing selected") rather than 0,
+// which would select a row that is not there.
+function moveCursor(current, delta, count) {
+  if (!count || count <= 0) return -1
+  var next = (current === undefined || current === null || current < 0)
+    ? 0 : current + delta
+  if (next < 0) return 0
+  if (next > count - 1) return count - 1
+  return next
 }
 
 if (typeof module !== "undefined") {
@@ -470,6 +494,9 @@ if (typeof module !== "undefined") {
     volumeFraction: volumeFraction,
     volumeFromFraction: volumeFromFraction,
     nextRetryDelay: nextRetryDelay,
-    artUrl: artUrl
+    artUrl: artUrl,
+    imageUrl: imageUrl,
+    rowArtUrl: rowArtUrl,
+    moveCursor: moveCursor
   }
 }
