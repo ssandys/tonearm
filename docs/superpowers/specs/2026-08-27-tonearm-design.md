@@ -518,6 +518,17 @@ support to the vendored library. **A repo split does not fix it** — it is a
 concurrency problem inside the daemon, and it is the first thing to design before
 either feature ships.
 
+> **CORRECTION (2026-08-28): the paragraph above is wrong, and measurement says so.**
+> `multi_session_key` needs neither serialisation nor a vendored-library change.
+> `browse_browse(opts)` is a pass-through (`roonapi.py:479` hands its dict verbatim to
+> `_request`), so the key reaches the Core unaltered. Verified against `yavin`: session
+> A held its position at `Library` while session B independently reset to `Explore`.
+> Two consumers do **not** clobber each other. See
+> `2026-08-28-tonearm-browse-design.md` §2.3.
+>
+> This paragraph is left standing rather than rewritten because it is a useful record
+> of a conclusion reached from reading code instead of running it.
+
 Note also that §10's reason for excluding browse still stands: it is
 session-stateful and not addressable, and it is the bulk of roon-tui's
 913-line state machine. Search is the expensive feature, not the cheap one.
