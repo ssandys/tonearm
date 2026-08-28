@@ -2449,6 +2449,21 @@ which also needs the daemon to return rows for an offset without resetting the
 cursor — `page` already does exactly that.
 ```
 
+- [ ] **Step 4b: Fix one wrong comment in `Service.qml`**
+
+The `browse` RPC block's lead comment says the Process is "created here and
+destroyed in `onExited`". It is destroyed in `onRunningChanged`; no `onExited`
+handler exists in that component. Correct the comment to name
+`onRunningChanged`.
+
+This is not a nit. The detailed comment a few lines below explains *why* the
+drain must not be `onExited` — a failed spawn never emits it, so the callback
+would never run and the pane would freeze. A maintainer who reads the wrong
+lead comment, checks it, finds it false, and concludes the whole block is stale
+could "fix" the drain back to `onExited` and reintroduce exactly that freeze.
+This project has been bitten once already by a comment describing a mechanism
+that did not exist.
+
 - [ ] **Step 5: Run the full suite and validate the plugin**
 
 ```bash
