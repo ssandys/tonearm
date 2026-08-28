@@ -19,3 +19,30 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+--------------------------------------------------------------------------------
+
+## Dependencies
+
+The MIT license above covers tonearm's own code. It does not cover the
+following, which are used as-is and keep their own licenses:
+
+### Vendored: roonapi 0.1.6
+
+`scripts/vendor/roonapi/` is a vendored, unmodified copy of `roonapi` 0.1.6
+from https://github.com/pavoni/pyroon, licensed **Apache License 2.0**. Its
+own license text is retained in place at `scripts/vendor/roonapi/LICENSE` and
+must not be altered. See `scripts/vendor/README.md` for why it is vendored
+rather than installed as a system package, and how to refresh it.
+
+### Runtime system dependencies
+
+tonearm's daemon (`tonearmd`) requires two Python packages be present on the
+system interpreter, installed separately (see `README.md`):
+
+- `python-dbus-next` (MPRIS/D-Bus integration)
+- `python-websocket-client` (the Roon MOO protocol transport, also a
+  dependency of the vendored `roonapi`)
+
+Neither is bundled with this repository; both are ordinary Arch/Omarchy
+packages installed via `omarchy pkg add`.
