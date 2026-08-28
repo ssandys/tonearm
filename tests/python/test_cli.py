@@ -1,4 +1,5 @@
 import os
+import select
 import socket
 import subprocess
 import sys
@@ -111,6 +112,82 @@ class TestStatusVerb(unittest.TestCase):
 
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(proc.stdout, b'{"v":1,"status":"ok"}\n')
+
+
+class TestSubscribeIsUnbuffered(unittest.TestCase):
+    """scripts/tonearmctl:56-61 flushes stdout after every `subscribe` line so
+    QML's SplitParser -- which reads line by line -- sees each state update
+    as it happens, instead of batched into a silent burst whenever Python's
+    own stdout buffer happens to fill or the process exits. Nothing exercised
+    a live multi-line stream before this test existed: deleting the
+    `.flush()` call left the whole suite green.
+
+    The stub below sequences two lines with a threading.Event and holds the
+    second one until the test has proven the first is already sitting on the
+    child's stdout pipe (checked via a non-blocking `select()`, not just
+    "eventually read it"). That "arrived before the next was ever sent"
+    ordering is reachable only if tonearmctl flushed line 1 through rather
+    than buffering it. A test that merely asserted both lines show up after
+    the daemon disconnects would pass with buffering fully intact and prove
+    nothing -- see the fix report for empirical confirmation (flush()
+    commented out -> this test fails; restored -> it passes).
+    """
+
+    def _stub_socket_path(self, tmp):
+        # Mirrors tonearm_lib.server.runtime_dir()/socket_path(): <base>/tonearm/sock.
+        directory = os.path.join(tmp, "tonearm")
+        os.makedirs(directory)
+        return os.path.join(directory, "sock")
+
+    def test_each_line_arrives_before_the_next_is_sent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sock_path = self._stub_socket_path(tmp)
+            srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            srv.bind(sock_path)
+            srv.listen(1)
+
+            first_read = threading.Event()   # set once line 1 is off the child's stdout
+            second_sent = threading.Event()  # set once the stub has written line 2
+
+            def stub():
+                conn, _ = srv.accept()
+                conn.makefile("r").readline()  # drain the subscribe request
+                conn.sendall(b'{"seq":1}\n')
+                # Gate: never send line 2 until the test proves line 1 already
+                # reached the child's stdout -- see the class docstring.
+                if first_read.wait(5):
+                    conn.sendall(b'{"seq":2}\n')
+                    second_sent.set()
+                conn.close()  # EOF ends tonearmctl's read loop
+
+            thread = threading.Thread(target=stub, daemon=True)
+            thread.start()
+
+            env = dict(os.environ)
+            env["XDG_RUNTIME_DIR"] = tmp
+            proc = subprocess.Popen([CTL, "subscribe"], env=env,
+                                     stdout=subprocess.PIPE, text=True)
+            try:
+                ready, _, _ = select.select([proc.stdout], [], [], 5)
+                self.assertTrue(ready, "line 1 never reached stdout within 5s "
+                                        "-- is flush() missing?")
+                self.assertEqual(proc.stdout.readline(), '{"seq":1}\n')
+                first_read.set()
+
+                self.assertTrue(second_sent.wait(5), "stub never sent line 2")
+
+                ready, _, _ = select.select([proc.stdout], [], [], 5)
+                self.assertTrue(ready, "line 2 never reached stdout within 5s "
+                                        "-- is flush() missing?")
+                self.assertEqual(proc.stdout.readline(), '{"seq":2}\n')
+
+                self.assertEqual(proc.wait(timeout=5), 3)  # daemon closed on us
+            finally:
+                proc.kill()
+                proc.wait()
+                proc.stdout.close()
+                srv.close()
+                thread.join(5)
 
 
 if __name__ == "__main__":
