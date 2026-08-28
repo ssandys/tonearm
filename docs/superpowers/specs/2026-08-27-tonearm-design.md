@@ -31,7 +31,7 @@ Everything below was measured on this machine on 2026-08-27, not inferred.
 | Quickshell | 0.3.1 (Arch) |
 | System Python | 3.14.7 at `/usr/bin/python` |
 | Roon Core | **`yavin`** — ROCK appliance, Roon 2.71 build 1683, `192.168.50.118` |
-| Core ports | `9150` MOO/WS · `9330` HTTP images · `55000` HTTPS · `9003` SOOD |
+| Core ports | **`9330` MOO/WS *and* HTTP images** · `9003` SOOD · `55000` HTTPS (403) · `9150` advertised but dead |
 
 ### 2.1 The corrections that shaped this design
 
@@ -46,10 +46,31 @@ are load-bearing here and are not re-litigated in this document.
 The AP filters multicast. **`RoonDiscovery` will not find this Core**, so the host is
 configuration, not a discovery result. See §7.2 for the fallback that does work.
 
-**The album-art shortcut holds.** The Core advertises `http_port 9330` in its own SOOD
-response, and `:9330/api/image/<bogus>` returns a routed 404 rather than refusing the
-connection. Cover art in QML is a plain `Image { source: url }`. Not fully closed until
-a real `image_key` is in hand, which needs pairing.
+**The album-art shortcut is CONFIRMED, not merely plausible.** After pairing, real
+`image_key`s were fetched over plain HTTP: `GET :9330/api/image/<key>?scale=fit&width=256&height=256`
+returned `200`, `image/jpeg`, a valid 256×256 baseline JPEG of the actual cover, with
+no authentication. Cover art in QML is a plain `Image { source: url }`.
+
+**The MOO WebSocket is on port 9330, NOT the 9150 that SOOD advertises.** This is the
+single most expensive finding of the build, and it is why the extension never appeared
+in Roon Remote for the first several attempts. Measured with raw WebSocket upgrade
+requests against Roon 2.71 (build 1683):
+
+| Endpoint | Result |
+|---|---|
+| `ws://host:9150/api` | TCP connects, then **no handshake response at all** — hangs |
+| `ws://host:9330/api` | **`HTTP/1.1 101 Switching Protocols`** |
+| `wss://host:55000/api` | `403 Forbidden` |
+
+`roonapi` 0.1.6 dials SOOD's `tcp_port` (9150). On this Roon version that port accepts
+TCP but never answers, so `RoonApi.__init__` blocks forever with `blocking_init=True`,
+the registration request is never delivered, and the Core therefore has no extension to
+show — presenting to the user as "no extensions discovered" with no error anywhere.
+Registration over 9330 succeeded immediately and returned a token.
+
+**`tonearmd` must therefore dial `http_port` for MOO, falling back to `tcp_port`** for
+older Cores where the advertised port is the live one. Do not trust SOOD's `tcp_port`
+alone, and never let a connect attempt block unboundedly — the failure is silent.
 
 **`roonapi`'s dependency metadata is over-declared.** It names `requests`, `six`,
 `ifaddr` and `websocket-client`. Its only **required** third-party import is
