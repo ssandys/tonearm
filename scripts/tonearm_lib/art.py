@@ -19,11 +19,13 @@ and reported as `None`, never raised.
 
 from __future__ import annotations
 
+import http.client
 import logging
 import os
 import re
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 
 LOG = logging.getLogger("tonearmd.art")
@@ -52,15 +54,23 @@ def path_for(cache_dir: str, image_key: str) -> str:
     return os.path.join(cache_dir, _safe_name(image_key))
 
 
+def _image_url(host: str, http_port: int, image_key: str) -> str:
+    # image_key is untrusted (it comes from the Core); percent-encode it
+    # rather than interpolating it raw, the same caution _safe_name already
+    # applies on the filesystem side.
+    return "http://%s:%d/api/image/%s?scale=fit&width=64&height=64" % (
+        host, http_port, urllib.parse.quote(image_key, safe=""))
+
+
 def fetch(host: str, http_port: int, image_key: str, dest: str) -> bool:
     """Fetch a 64px copy of `image_key`'s art into `dest`.
 
     Returns whether it succeeded. Never raises: a network error, a timeout,
-    or a non-2xx response all end in a logged warning and `False`, so a bad
-    fetch degrades to `art_path: null` instead of taking the daemon down.
+    a non-2xx response, or a malformed/truncated body all end in a logged
+    warning and `False`, so a bad fetch degrades to `art_path: null` instead
+    of taking the daemon down.
     """
-    url = "http://%s:%d/api/image/%s?scale=fit&width=64&height=64" % (
-        host, http_port, image_key)
+    url = _image_url(host, http_port, image_key)
     try:
         os.makedirs(os.path.dirname(dest), mode=0o700, exist_ok=True)
         with urllib.request.urlopen(url, timeout=FETCH_TIMEOUT) as response:
@@ -70,7 +80,12 @@ def fetch(host: str, http_port: int, image_key: str, dest: str) -> bool:
             handle.write(data)
         os.replace(tmp, dest)  # atomic: a concurrent reader never sees a partial file
         return True
-    except (OSError, urllib.error.URLError, ValueError):
+    except (OSError, urllib.error.URLError, http.client.HTTPException, ValueError):
+        # OSError/URLError cover network failures and non-2xx responses;
+        # http.client.HTTPException (e.g. IncompleteRead on a truncated
+        # body) is a *sibling* of OSError, not a subclass of it, so it needs
+        # naming explicitly or it would slip past this handler and crash the
+        # fetch thread.
         LOG.warning("art fetch failed for %s", image_key, exc_info=True)
         return False
 
@@ -113,6 +128,13 @@ class Cache:
         self._on_ready = on_ready
         self._lock = threading.Lock()
         self._last_key: str | None = None
+        # Created eagerly, not lazily inside fetch(): Task 13's unit sets
+        # RuntimeDirectory=tonearm, and systemd removes that whole directory
+        # every time the service stops. A daemon that starts and stays
+        # connecting/unpaired/unreachable for its entire run -- or whose
+        # followed zone never has art -- would otherwise never create art/
+        # at all, since fetch() is the only other place that calls makedirs.
+        os.makedirs(self._dir, mode=0o700, exist_ok=True)
         # Set only so tests can join() a fetch deterministically instead of
         # polling for the destination file, which proves the file landed but
         # not that this thread's trailing _prune() has also finished poking
@@ -160,22 +182,55 @@ class CachingSession:
     subscriber and every broadcast alike -- goes through this one method,
     so both see the same art_path logic without server.py needing to know
     art exists at all.
+
+    Before this wrapper existed, `RoonSession.snapshot()` (and the
+    `_zones()` -> `Arbiter.observe()`/`select()` call inside it) was only
+    ever entered from one thread: the Roon event callback, serially, via
+    `_publish()`. tonearmd's wiring changes that -- every `subscribe`
+    spawns a `server.py` handler thread that calls `.snapshot()`, and a
+    completed background art fetch triggers another one via `on_ready` --
+    so `Arbiter`'s unlocked `_last_state`/`_started_at`/`_counter` can now
+    be mutated by more than one thread at once. `snapshot()` below
+    serializes every call that reaches `RoonSession` *through this
+    wrapper*, which is every call tonearmd's own wiring makes.
+
+    What this does NOT cover: `RoonSession._publish()` calls `self.snapshot()`
+    directly, inside core.py, before it ever reaches `on_change` -- that call
+    bypasses this wrapper entirely and cannot be brought under this lock
+    without editing core.py (out of scope; merged and reviewed). It remains
+    exactly as serial as it was before this wrapper existed (Roon's own
+    callback thread processes events one at a time), so it does not race
+    ITSELF, but it is not mutually exclusive with a concurrent call arriving
+    through this wrapper. Also not covered: `command()` is deliberately left
+    unlocked here, even though `RoonSession.command()` can itself call
+    `_zones()` -- locking it would nest this wrapper's lock *outside*
+    server.py's `Server._lock` on the "zone pin/unpin" path (command ->
+    `_command_locked` -> `_publish()` -> `on_change` -> a nested
+    `snapshot()` call while still holding this lock), while server.py's
+    subscribe handler nests them the other way (`Server._lock` outer, this
+    lock inner) -- two threads taking the same two locks in opposite orders
+    is a textbook deadlock. `RoonSession.command()` already serializes
+    against itself via its own internal lock; a command racing a snapshot()
+    read is a narrower, pre-existing-shaped gap than the multi-subscriber
+    hazard this class was written to close.
     """
 
     def __init__(self, session, cache: Cache) -> None:
         self._session = session
         self._cache = cache
+        self._lock = threading.Lock()
 
     def snapshot(self) -> dict:
-        payload = self._session.snapshot()
-        zone = payload.get("zone")
-        core = payload.get("core")
-        if zone and core:
-            np = zone.get("now_playing")
-            if np is not None:
-                np["art_path"] = self._cache.get(
-                    core.get("host"), core.get("http_port"), np.get("image_key"))
-        return payload
+        with self._lock:
+            payload = self._session.snapshot()
+            zone = payload.get("zone")
+            core = payload.get("core")
+            if zone and core:
+                np = zone.get("now_playing")
+                if np is not None:
+                    np["art_path"] = self._cache.get(
+                        core.get("host"), core.get("http_port"), np.get("image_key"))
+            return payload
 
     def command(self, verb: str, arg=None) -> None:
         self._session.command(verb, arg)

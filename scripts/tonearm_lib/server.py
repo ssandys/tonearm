@@ -81,12 +81,24 @@ class Server:
         if cmd == "subscribe":
             # Send current state at once: for a paused zone the next Roon event
             # may never come, and the widget would render nothing until it did.
-            try:
-                conn.sendall((json.dumps(self._session.snapshot()) + "\n").encode())
-            except OSError:
-                conn.close()
-                return
+            #
+            # The reply and the subscriber registration happen under the SAME
+            # lock broadcast() takes, and as one atomic unit -- not "send,
+            # then separately register". Splitting them left a gap: a
+            # broadcast landing between "reply sent" and "conn appended"
+            # would iterate self._subscribers without this conn in it yet,
+            # silently dropping the new subscriber's first update (and, since
+            # broadcast()'s own sendall()s would otherwise be unsynchronized
+            # with this one, risking two threads writing to the same socket
+            # at once). Locking across both closes both: broadcast() cannot
+            # run at all until this conn is either fully registered or the
+            # handshake has failed and closed it.
             with self._lock:
+                try:
+                    conn.sendall((json.dumps(self._session.snapshot()) + "\n").encode())
+                except OSError:
+                    conn.close()
+                    return
                 self._subscribers.append(conn)
             return
 

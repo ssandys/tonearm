@@ -55,6 +55,48 @@ class TestServer(unittest.TestCase):
         self.assertEqual(json.loads(line)["status"], "ok")
         sock.close()
 
+    def test_a_broadcast_racing_a_subscribe_handshake_is_never_lost(self):
+        # Regression: the original design sent the initial reply before
+        # registering the connection in self._subscribers. A broadcast
+        # landing in that gap would iterate the subscriber list without
+        # this connection in it yet and silently drop it -- readline() for
+        # the "real" first update would then hang until socket timeout, no
+        # error anywhere. Force the race deterministically (via a snapshot()
+        # that blocks until told to proceed) rather than hoping timing
+        # exposes it.
+        entered_snapshot = threading.Event()
+        release_snapshot = threading.Event()
+        real_snapshot = self.session.snapshot
+
+        def blocking_snapshot():
+            entered_snapshot.set()
+            release_snapshot.wait(3)
+            return real_snapshot()
+
+        self.session.snapshot = blocking_snapshot
+
+        sock = self._connect()
+        sock.sendall(b'{"cmd":"subscribe"}\n')
+
+        self.assertTrue(entered_snapshot.wait(3), "handler never reached snapshot()")
+
+        # Racer blocks on Server._lock until the handshake (reply + register)
+        # finishes -- that is the property under test.
+        racer = threading.Thread(
+            target=self.srv.broadcast, args=({"v": 1, "status": "racing"},))
+        racer.start()
+
+        release_snapshot.set()
+        racer.join(3)
+        self.assertFalse(racer.is_alive(), "broadcast() never returned")
+
+        reader = sock.makefile("r")
+        first = json.loads(reader.readline())
+        second = json.loads(reader.readline())
+        self.assertEqual(first["status"], "ok")       # the initial snapshot
+        self.assertEqual(second["status"], "racing")  # the racing broadcast, not lost
+        sock.close()
+
     def test_broadcast_reaches_every_subscriber(self):
         a, b = self._connect(), self._connect()
         for sock in (a, b):

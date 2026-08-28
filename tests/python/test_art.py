@@ -11,6 +11,7 @@ path, never a rendering decision.
 
 from __future__ import annotations
 
+import http.client
 import http.server
 import os
 import sys
@@ -18,6 +19,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "scripts")))
@@ -81,6 +83,34 @@ class TestFetch(ArtServerTestCase):
         self.assertFalse(ok)
         self.assertFalse(os.path.exists(dest))
 
+    def test_a_truncated_body_reports_failure_rather_than_raising(self):
+        # http.client.HTTPException (e.g. IncompleteRead) is a sibling of
+        # OSError, not a subclass of it -- an except clause that only names
+        # OSError/URLError/ValueError lets it straight through and crashes
+        # the fetch thread instead of degrading to art_path: null.
+        dest = os.path.join(self.tmp.name, "art", "abc123.jpg")
+        truncated = http.client.IncompleteRead(partial=b"", expected=100)
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=truncated):
+            ok = art.fetch(self.host, self.port, "abc123", dest)
+        self.assertFalse(ok)
+        self.assertFalse(os.path.exists(dest))
+
+
+class TestImageUrl(unittest.TestCase):
+    def test_image_key_is_percent_encoded(self):
+        # image_key comes from the Core and is untrusted; it must not be
+        # interpolated into the URL raw, mirroring the caution _safe_name
+        # already applies on the filesystem side.
+        url = art._image_url("host", 9330, "a b/c?d")
+        self.assertEqual(
+            url, "http://host:9330/api/image/a%20b%2Fc%3Fd?scale=fit&width=64&height=64")
+
+    def test_an_ordinary_key_round_trips_unchanged(self):
+        url = art._image_url("192.168.50.118", 9330, "abc123")
+        self.assertEqual(
+            url,
+            "http://192.168.50.118:9330/api/image/abc123?scale=fit&width=64&height=64")
+
 
 class TestCache(ArtServerTestCase):
     def _cache(self, on_ready=None):
@@ -96,6 +126,19 @@ class TestCache(ArtServerTestCase):
         if thread is not None:
             thread.join(3)
             self.assertFalse(thread.is_alive(), "background fetch never finished")
+
+    def test_the_art_directory_is_created_eagerly(self):
+        # Task 13's unit sets RuntimeDirectory=tonearm, and systemd deletes
+        # that whole directory every time the service stops. If art/ were
+        # only ever created lazily inside fetch(), a daemon that starts and
+        # stays connecting/unpaired/unreachable -- or whose followed zone
+        # never has art -- would never create it for that entire run. None
+        # of the other TestCache tests catch this: they all go through
+        # get()/fetch(), which would create it as a side effect regardless.
+        art_dir = os.path.join(self.tmp.name, "art")
+        self.assertFalse(os.path.isdir(art_dir))
+        self._cache()
+        self.assertTrue(os.path.isdir(art_dir))
 
     def test_no_image_key_returns_none(self):
         cache = self._cache()
@@ -212,6 +255,58 @@ class TestCachingSession(ArtServerTestCase):
 
     def _cache(self):
         return art.Cache(self.tmp.name)
+
+
+class TestCachingSessionSerialization(unittest.TestCase):
+    """Before art.CachingSession existed, RoonSession.snapshot() (and the
+    Arbiter mutations inside it) was only ever entered from one thread, the
+    Roon event callback. tonearmd's wiring adds two more: a server.py
+    handler thread per `subscribe`, and the art cache's on_ready-triggered
+    rebroadcast. This proves CachingSession.snapshot() actually serializes
+    concurrent callers rather than merely happening to look correct.
+    """
+
+    class _CountingSession:
+        """Detects overlapping snapshot() calls: tracks how many are
+        simultaneously inside the method, and the highest count observed.
+        A real overlap would show peak_concurrent > 1; the sleep widens the
+        window so a missing lock would reliably be caught, not so the
+        result depends on timing -- a correct lock makes peak_concurrent
+        == 1 no matter how the sleep or thread count are tuned.
+        """
+
+        def __init__(self):
+            self._lock = threading.Lock()
+            self._active = 0
+            self.peak_concurrent = 0
+
+        def snapshot(self):
+            with self._lock:
+                self._active += 1
+                self.peak_concurrent = max(self.peak_concurrent, self._active)
+            time.sleep(0.05)
+            with self._lock:
+                self._active -= 1
+            return {"v": 1, "status": "ok", "core": None, "zone": None, "zones": []}
+
+        def command(self, verb, arg=None):
+            pass
+
+    def test_concurrent_snapshot_calls_never_overlap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = self._CountingSession()
+            wrapped = art.CachingSession(session, art.Cache(tmp))
+
+            threads = [threading.Thread(target=wrapped.snapshot) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(3)
+
+            self.assertEqual(
+                session.peak_concurrent, 1,
+                "two snapshot() calls overlapped -- CachingSession is not "
+                "serializing access to the wrapped session")
 
 
 if __name__ == "__main__":
