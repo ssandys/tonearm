@@ -2139,7 +2139,7 @@ Item {
       text: "‹  " + root.path.join("  ›  ")
       color: Color.muted
       font.family: root.fontFamily
-      font.pixelSize: Style.font.small
+      font.pixelSize: Style.font.caption
       elide: Text.ElideRight
     }
 
@@ -2149,7 +2149,7 @@ Item {
       text: root.errorText
       color: Model.COLOR_ERROR
       font.family: root.fontFamily
-      font.pixelSize: Style.font.small
+      font.pixelSize: Style.font.caption
       wrapMode: Text.WordWrap
     }
 
@@ -2160,7 +2160,7 @@ Item {
       text: "No results"
       color: Color.muted
       font.family: root.fontFamily
-      font.pixelSize: Style.font.small
+      font.pixelSize: Style.font.caption
     }
 
     ListView {
@@ -2177,7 +2177,9 @@ Item {
       delegate: Rectangle {
         width: list.width
         height: Style.space(38)
-        color: index === root.cursor ? Color.surfaceVariant : "transparent"
+        // Util.alpha(Color.foreground, 0.08) is the shell's own selected-row
+        // colour (Ui/ConfirmDialog.qml:15). Color.surfaceVariant does NOT exist.
+        color: index === root.cursor ? Util.alpha(Color.foreground, 0.08) : "transparent"
         radius: Style.space(4)
 
         Row {
@@ -2226,7 +2228,7 @@ Item {
               text: modelData.subtitle
               color: Color.muted
               font.family: root.fontFamily
-              font.pixelSize: Style.font.small
+              font.pixelSize: Style.font.caption
               elide: Text.ElideRight
             }
           }
@@ -2247,15 +2249,28 @@ Item {
 Run: `./bin/test`
 Expected: `qml syntax` passes.
 
-- [ ] **Step 3: Check every `Style` and `Color` role used actually exists**
+- [ ] **Step 3: Confirm every `Style` and `Color` role used actually resolves**
 
-Run:
+These were verified against the live shell before this plan was dispatched, and
+two were wrong in an earlier draft: `Color.surfaceVariant` does not exist, and
+the size token is `caption`, not `small`. The corrected set is:
+
+| Used | Verified as |
+|---|---|
+| `Util.alpha(Color.foreground, 0.08)` | `Ui/ConfirmDialog.qml:15` uses exactly this for a selected row. `Util` is a `qs.Commons` singleton (`Commons/qmldir:5`). |
+| `Color.foreground`, `Color.muted` | Top-level roles in `Commons/Color.qml`. |
+| `Style.font.body`, `Style.font.caption` | Both in live use across this repo's own `Panel.qml`. |
+| `Style.space(N)` | In live use at `Panel.qml:200`. |
+
+Re-run the check anyway and confirm, because `qmllint` cannot see this class of
+error and it is how six MVP defects reached review:
 
 ```bash
-grep -rn "surfaceVariant\|font\.small\|font\.body" /usr/share/omarchy/shell/Commons/ | head
+grep -rnE "property color (foreground|muted)" /usr/share/omarchy/shell/Commons/Color.qml
+grep -rhoE "Style\.font\.[a-zA-Z]+" /home/sean/Src/tonearm/*.qml | sort -u
 ```
 
-Expected: each role resolves. **If any does not, substitute a role that does and record the substitution in the report.** Six defects in the MVP came from QML written against roles that do not exist; `qmllint` cannot see this class of error.
+**If any role does not resolve, substitute one that does and record it in the report.**
 
 - [ ] **Step 4: Commit**
 
