@@ -203,7 +203,28 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      onCloseRequested: root.close()
+      // Gate on the pane's own editing flag, not on activeFocus: that is the
+      // pattern the shell's own network panel uses for its passphrase field
+      // (plugins/panels/network/Panel.qml:996, `blocked: root.passwordSsid !== ""`).
+      // Unblocked while typing, every letter would be swallowed as a shortcut.
+      blocked: browsePane.editing
+
+      onMoveRequested: function (dx, dy) { browsePane.handleMove(dx, dy) }
+      onActivateRequested: browsePane.handleActivate()
+
+      // Esc backs out one level and only closes at the top (spec 7.2). One
+      // stray Esc must not discard a whole navigation.
+      onCloseRequested: { if (!browsePane.handleBack()) root.close() }
+
+      onTextKey: function (text) {
+        if (text === "q") { browsePane.handleQueue(); return }
+        if (text === "/") { browsePane.focusSearch(); return }
+        // Any other printable key starts a search with that character, so
+        // typing goes straight into the field without a preparatory keystroke.
+        if (text && text.length === 1 && text >= " ") {
+          browsePane.focusSearch()
+        }
+      }
     }
 
     Column {
@@ -546,6 +567,21 @@ Panel {
             }
           }
         }
+      }
+
+      PanelSeparator {
+        width: parent.width
+        visible: browsePane.rowCount > 0 || browsePane.editing
+      }
+
+      BrowsePane {
+        id: browsePane
+        width: parent.width
+        service: service
+        state: root.st
+        fontFamily: root.fontFamily
+        onPlayStarted: root.close()
+        onCloseRequested: root.close()
       }
     }
   }
