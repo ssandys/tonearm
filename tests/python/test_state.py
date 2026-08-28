@@ -36,9 +36,16 @@ class TestNormalizeZone(unittest.TestCase):
         self.assertEqual(np["image_key"], "a1b2c3")
 
     def test_volume_comes_from_the_first_output(self):
+        # The fixture's second output ("o2") deliberately has a different
+        # value, min, max and muted state -- min=-80, max=0, value=-20,
+        # muted=True -- so if _volume_of ever read the wrong output (e.g.
+        # outputs[-1] instead of outputs[0]) every one of these assertions
+        # would fail. max=70 is also deliberately not `max`'s implementation
+        # default of 100, so a stub that only returns defaults cannot pass
+        # this either.
         vol = state.normalize_zone(self.raw)["volume"]
         self.assertEqual(vol["value"], 62)
-        self.assertEqual(vol["max"], 100)
+        self.assertEqual(vol["max"], 70)
         self.assertFalse(vol["muted"])
 
     def test_a_zone_with_no_outputs_has_no_volume(self):
@@ -46,10 +53,23 @@ class TestNormalizeZone(unittest.TestCase):
         self.assertIsNone(state.normalize_zone(raw)["volume"])
 
     def test_a_fixed_volume_output_reports_none(self):
-        # Many streamers expose type "incremental" or no volume object at all;
-        # rendering a slider for those would be a lie.
+        # A fixed-volume output has no volume object at all; rendering a
+        # slider for it would be a lie. See
+        # test_an_incremental_volume_output_reports_none for the other
+        # shape a volume-less output takes.
         raw = json.loads(json.dumps(self.raw))
         del raw["outputs"][0]["volume"]
+        self.assertIsNone(state.normalize_zone(raw)["volume"])
+
+    def test_an_incremental_volume_output_reports_none(self):
+        # Many streamers expose type "incremental": relative up/down steps
+        # only, with no absolute value/min/max to read or set. Previously
+        # only the "no volume object at all" case (above) was excluded, so
+        # this fell through to a fabricated {"value": 0, "min": 0, "max":
+        # 100} -- a slider parked at zero for a zone whose volume this can
+        # neither read nor set.
+        raw = json.loads(json.dumps(self.raw))
+        raw["outputs"][0]["volume"] = {"type": "incremental", "is_muted": False}
         self.assertIsNone(state.normalize_zone(raw)["volume"])
 
     def test_a_stopped_zone_has_no_now_playing(self):

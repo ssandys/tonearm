@@ -2,9 +2,9 @@
 
 This module is mostly I/O. Everything decidable without a Core lives in
 state.py and zones.py, which is why most of this file has no unit tests --
-verify it against yavin. `_seeded_api()` is the one exception: a pure,
-Core-independent attribute-isolation helper, and it has a regression test in
-tests/python/test_core.py.
+verify it against yavin. `_seeded_api()` and `_connect_timeout()` are the
+exceptions: pure, Core-independent decisions with no I/O of their own, and
+both have regression tests in tests/python/test_core.py.
 """
 
 from __future__ import annotations
@@ -31,13 +31,35 @@ APPINFO = {
 }
 
 # Seconds to wait for one port to answer the MOO/WS handshake before giving
-# up on it. Measured against yavin (Roon 2.71 build 1683): the SOOD-advertised
-# tcp_port (9150) accepts a TCP connection and then never answers the
-# WebSocket upgrade -- a silent hang, not an error. RoonApi's own
-# blocking_init has no ceiling on that wait, so without a bound here
-# RoonApi.__init__ blocks forever and the daemon looks "healthy" while doing
-# nothing. See docs/superpowers/specs/2026-08-27-tonearm-design.md S2.1.
+# up on it, when a token is ALREADY known (a paired reconnect). Measured
+# against yavin (Roon 2.71 build 1683): the SOOD-advertised tcp_port (9150)
+# accepts a TCP connection and then never answers the WebSocket upgrade -- a
+# silent hang, not an error. RoonApi's own blocking_init has no ceiling on
+# that wait, so without a bound here RoonApi.__init__ blocks forever and the
+# daemon looks "healthy" while doing nothing. See
+# docs/superpowers/specs/2026-08-27-tonearm-design.md S2.1.
+#
+# This bound is deliberately short: a paired Core that does not answer
+# quickly is either down or not yet reachable (a boot-ordering race), and
+# `start()` exits so systemd's `Restart=on-failure` can retry rather than
+# blocking this thread for minutes on a Core that is genuinely absent. See
+# PAIRING_TIMEOUT for the other case this constant used to (incorrectly)
+# also cover.
 CONNECT_TIMEOUT = 10.0
+
+# Seconds to wait for one port to answer, when NO token is known yet (first
+# run, unpaired). `RoonApi.__init__(blocking_init=True)` does not return
+# until the Core answers `registry/register`, and Roon does not answer that
+# until a human opens Roon Remote -> Settings -> Extensions and clicks
+# Enable by hand -- an action the README's own install steps put AFTER
+# starting the service. Reusing CONNECT_TIMEOUT here was the bug: a 10s
+# budget guards the silent-hang hazard above, but it also silently ate the
+# entire pairing window, so `_connect` gave up long before any human could
+# plausibly have clicked anything. This budget only needs to be "long enough
+# for a person to switch apps and tap a button", not unbounded -- it still
+# protects against the same 9150 silent-hang hazard, just on a timescale a
+# first-run pairing actually needs.
+PAIRING_TIMEOUT = 240.0
 
 # Seconds to wait, after signalling a timed-out attempt to give up, for it to
 # actually finish before moving on to the next candidate port regardless.
@@ -91,14 +113,20 @@ def _seeded_api() -> RoonApi:
 
     `_zones` and `_outputs` are mutable CLASS-level defaults in the vendored
     library (roonapi.py:52-53), not instance attributes. Until an instance
-    reassigns them itself -- which RoonApi.__init__ only does once `ready`
-    is confirmed, or not at all if it never gets that far -- any write to
+    reassigns them itself -- which RoonApi.__init__ does as soon as its
+    blocking wait loop exits (whether because `ready` became True, the
+    normal case, or because `stop()` set `_exit` on a timed-out attempt) and
+    `self.token` is truthy (roonapi.py:809-813) -- any write to
     `self._zones[...]` from anywhere lands in the ONE dict every instance
-    shares. With a single connection attempt per process that was invisible;
-    with port fallback, a timed-out-and-abandoned attempt and a fresh
-    attempt for the next port can briefly coexist, and if the abandoned one
-    ever reaches registration late, its subscription could write into the
-    dict the new instance is also relying on.
+    shares. That gate is on `self.token` alone, not on `ready`, so this
+    reassignment also runs for an abandoned, timed-out instance whenever a
+    token was already known (a paired reconnect) -- it is not limited to
+    instances that actually finished registering. With a single connection
+    attempt per process that was invisible; with port fallback, a
+    timed-out-and-abandoned attempt and a fresh attempt for the next port
+    can briefly coexist, and if the abandoned one ever reaches registration
+    late, its subscription could write into the dict the new instance is
+    also relying on.
 
     Assigning fresh instance dicts here -- via `RoonApi.__new__`, before
     `__init__` (and therefore `_server_setup()`, which starts the
@@ -115,6 +143,23 @@ def _seeded_api() -> RoonApi:
     api._zones = {}
     api._outputs = {}
     return api
+
+
+def _connect_timeout(token) -> float:
+    """How long one candidate port's connect attempt is allowed to run.
+
+    A pure decision, Core-independent and deliberately factored out so it
+    has its own regression test (test_core.py) rather than being buried
+    inline in `_connect`, where only a live-yavin check would exercise it.
+
+    No token yet means first run: RoonApi blocks until a human clicks
+    Enable in Roon Remote, which needs a realistic window (PAIRING_TIMEOUT).
+    A token already on disk means this Core has answered before: fail fast
+    (CONNECT_TIMEOUT) and let `start()` exit so systemd's `Restart=on-failure`
+    retries, rather than blocking this thread for minutes on a Core that is
+    genuinely down or not yet reachable (boot ordering).
+    """
+    return PAIRING_TIMEOUT if token is None else CONNECT_TIMEOUT
 
 
 class RoonSession:
@@ -157,16 +202,28 @@ class RoonSession:
         `_on_state_change()`, roonapisocket.py/roonapi.py) as zones are
         added, updated or removed -- entirely outside anything this class
         (or `CachingSession`'s lock, in server.py's caller) controls. A zone
-        being added or removed changes the dict's size, so a caller here can
-        be mid-iteration when that happens: `list(...values())` then raises
-        `RuntimeError: dictionary changed size during iteration`, which
-        nothing downstream catches -- it would escape through `snapshot()`
-        and kill whichever connection thread in server.py was reading state
-        at that instant.
+        being added or removed changes the dict's size, so IN PRINCIPLE a
+        caller here could be mid-iteration when that happens: `list(...
+        values())` would then raise `RuntimeError: dictionary changed size
+        during iteration`, which nothing downstream catches -- it would
+        escape through `snapshot()` and kill whichever connection thread in
+        server.py was reading state at that instant.
 
-        One retry closes this in practice: the window is a handful of
-        microseconds around a single dict mutation, and landing in it twice
-        in a row does not happen. If it somehow does anyway, an empty
+        Nuance worth recording so nobody "proves" this guard unnecessary and
+        removes it: on a normal GIL-enabled CPython, `list(d.values())` is
+        one uninterrupted C call and cannot actually raise mid-materialisation
+        -- measured at 4,548+ reads under sustained size-changing mutation
+        from a real background thread, zero errors, while a Python-level loop
+        over the same dict raised after 3 iterations. This is NOT a bug
+        reproducible today; the retry below is forward-looking insurance for
+        a free-threaded (PEP 703) build, or any future refactor that splits
+        this read across a bytecode boundary (e.g. a generator or explicit
+        loop instead of `list(...values())`), either of which would let the
+        window this guards against actually open up.
+
+        One retry closes it if it ever does: the window would be a handful
+        of microseconds around a single dict mutation, and landing in it
+        twice in a row would not happen. If it somehow did anyway, an empty
         listing is what `self._api` being unset already produces elsewhere
         in this class -- a graceful "nothing to report" rather than a crash.
         """
@@ -184,12 +241,38 @@ class RoonSession:
             LOG.exception("publish failed")
 
     def start(self) -> None:
+        """Discover (if needed), pair or reconnect, and subscribe.
+
+        `start()` is called exactly once per process (scripts/tonearmd). It
+        does not loop or retry internally: on either failure path below it
+        publishes the honest terminal status and then calls `sys.exit(1)`,
+        letting the process die and the systemd unit's own
+        `Restart=on-failure` / `RestartSec=3` (systemd/tonearmd.service)
+        restart it from scratch a few seconds later.
+
+        This is the cheapest correct option, and preferred here over an
+        internal retry loop for two reasons: systemd already implements
+        backoff/restart-accounting correctly and is going to be watching
+        this unit regardless, so a second implementation inside the process
+        would be pure duplication; and a hung connect attempt that could
+        never be cleanly cancelled (see STOP_GRACE) is safest resolved by
+        the OS tearing down the whole process rather than by this code
+        trying to loop around it forever in place. The cost is a ~3s gap
+        with no daemon at all between attempts, which is immaterial next to
+        the multi-minute pairing window this is largely in service of.
+
+        Both failure points below ("no Core found" and "no Core answered")
+        are instances of the same underlying problem -- the Core was not
+        reachable *yet*, whether because the network/Core is still booting
+        or because a human has not clicked Enable in Roon Remote yet -- so
+        both retry the same way.
+        """
         if not self._cfg.get("host"):
             cores = sood.discover()
             if not cores:
                 self._status = "unreachable"
                 self._publish()
-                return
+                sys.exit(1)
             core = cores[0]
             LOG.info("discovered %s at %s via %s",
                      core["name"], core["host"], core["via"])
@@ -199,7 +282,7 @@ class RoonSession:
         token = config.load_token()
         if token is None:
             # First run: RoonApi blocks until the extension is enabled by hand
-            # in Roon Remote -> Settings -> Extensions.
+            # in Roon Remote -> Settings -> Extensions. See PAIRING_TIMEOUT.
             self._status = "unpaired"
             self._publish()
 
@@ -207,7 +290,7 @@ class RoonSession:
         if self._api is None:
             self._status = "unreachable"
             self._publish()
-            return
+            sys.exit(1)
 
         if self._api.token:
             config.save_token(self._api.token)
@@ -234,31 +317,34 @@ class RoonSession:
         return ports
 
     def _connect(self, token) -> RoonApi | None:
-        """Try each candidate port in turn, each bounded by CONNECT_TIMEOUT.
+        """Try each candidate port in turn, each bounded by `_connect_timeout(token)`.
         Returns a ready RoonApi, or None if nothing answered on any port.
 
-        Ports are tried strictly one at a time. `_try_port` waits (bounded
-        by STOP_GRACE) for a timed-out attempt to unwind before returning,
-        so a second RoonApi instance is rarely even alive at the same time
-        as the first -- but that is no longer what keeps this safe. Every
-        instance `_try_port` creates gets its own private `_zones`/
-        `_outputs` from `_seeded_api()` before anything else can touch them,
-        so even on the rare occasion two do overlap, neither can corrupt the
-        other's state. See `_seeded_api()`'s and STOP_GRACE's comments.
+        The per-port budget depends on whether we already hold a token: see
+        `_connect_timeout()`. Ports are tried strictly one at a time.
+        `_try_port` waits (bounded by STOP_GRACE) for a timed-out attempt to
+        unwind before returning, so a second RoonApi instance is rarely even
+        alive at the same time as the first -- but that is no longer what
+        keeps this safe. Every instance `_try_port` creates gets its own
+        private `_zones`/`_outputs` from `_seeded_api()` before anything
+        else can touch them, so even on the rare occasion two do overlap,
+        neither can corrupt the other's state. See `_seeded_api()`'s and
+        STOP_GRACE's comments.
         """
         host = self._cfg["host"]
         ports = self._candidate_ports()
+        timeout = _connect_timeout(token)
         for port in ports:
-            api = self._try_port(host, port, token)
+            api = self._try_port(host, port, token, timeout)
             if api is not None:
                 return api
         LOG.error("no MOO response from %s on any of %s (%.0fs each)",
-                  host, ports, CONNECT_TIMEOUT)
+                  host, ports, timeout)
         return None
 
     @staticmethod
-    def _try_port(host: str, port: int, token) -> RoonApi | None:
-        """Connect on one port, bounded by CONNECT_TIMEOUT.
+    def _try_port(host: str, port: int, token, timeout: float) -> RoonApi | None:
+        """Connect on one port, bounded by `timeout` (see `_connect_timeout`).
 
         This deliberately does NOT use RoonApi(..., blocking_init=False) to
         get a bound. That looked like the obvious approach, but when a token
@@ -306,17 +392,19 @@ class RoonSession:
 
         thread = threading.Thread(target=init, daemon=True)
         thread.start()
-        thread.join(CONNECT_TIMEOUT)
+        thread.join(timeout)
 
         if thread.is_alive():
             # Silent hang: TCP connected but the WebSocket handshake never
             # answered -- exactly what the SOOD-advertised tcp_port does on
-            # this Roon version. Signal the stuck init to give up, then wait
-            # (bounded) to actually confirm it has, before returning -- this
-            # is thread/socket-leak hygiene, not a correctness guard (that is
-            # `_seeded_api()`'s job). See STOP_GRACE's comment for what this
-            # join does and does not clean up.
-            LOG.warning("no response from %s:%s within %.0fs", host, port, CONNECT_TIMEOUT)
+            # this Roon version -- OR (when `timeout` is PAIRING_TIMEOUT) a
+            # human simply has not clicked Enable in Roon Remote yet. Signal
+            # the stuck init to give up, then wait (bounded) to actually
+            # confirm it has, before returning -- this is thread/socket-leak
+            # hygiene, not a correctness guard (that is `_seeded_api()`'s
+            # job). See STOP_GRACE's comment for what this join does and
+            # does not clean up.
+            LOG.warning("no response from %s:%s within %.0fs", host, port, timeout)
             try:
                 api.stop()
             except Exception:
@@ -373,12 +461,25 @@ class RoonSession:
         elif verb == "seek":
             self._api.seek(zid, int(arg), "absolute")
         elif verb == "volume":
-            # state.py exposes the output's raw min/max/value scale (not a
-            # 0-100 percent), so the raw setter -- not change_volume_percent
-            # -- is the one that matches what the widget's slider shows.
-            for output in (self._api.zones.get(zid, {}).get("outputs") or []):
-                self._api.change_volume_raw(output["output_id"], int(arg), "absolute")
+            # state.py's _volume_of reports outputs[0]'s raw min/max/value
+            # scale (not a 0-100 percent), and only outputs[0]'s -- so the
+            # widget's slider is always outputs[0]'s scale, never an
+            # average or any other output's. The write must target the same
+            # single output the read came from: in a grouped zone, outputs
+            # can have different volume ranges (e.g. a -80..0 dB streamer
+            # and a 0..100 amp in one group), and applying one output's
+            # absolute value to another's scale would be wrong on its face,
+            # not just imprecise. It would also silently discard the user's
+            # deliberate per-output balance across the group. change_volume_raw
+            # (not change_volume_percent) matches what the widget's slider shows.
+            outputs = self._api.zones.get(zid, {}).get("outputs") or []
+            if outputs:
+                self._api.change_volume_raw(outputs[0]["output_id"], int(arg), "absolute")
         elif verb in ("mute", "unmute"):
+            # Unlike volume, mute/unmute deliberately applies to every output
+            # in the zone, not just outputs[0]: muting the whole zone (not
+            # just the output whose volume happens to be displayed) is the
+            # reading a user expects from one mute control for a grouped zone.
             for output in (self._api.zones.get(zid, {}).get("outputs") or []):
                 self._api.mute(output["output_id"], verb == "mute")
         else:

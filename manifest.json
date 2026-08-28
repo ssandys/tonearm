@@ -17,16 +17,12 @@
     "defaults": {
       "accentFromArt": true,
       "artSizePx": 118,
-      "showVolume": true,
-      "notifyCoreUnreachable": true,
-      "notifyZoneChange": false
+      "showVolume": true
     },
     "schema": [
       { "key": "accentFromArt", "type": "boolean", "label": "Tint the seek bar with the album's color", "defaultValue": true },
       { "key": "artSizePx", "type": "integer", "label": "Album art size in the popup (pixels)", "min": 96, "max": 256, "step": 8, "defaultValue": 118 },
-      { "key": "showVolume", "type": "boolean", "label": "Show the volume slider", "defaultValue": true },
-      { "key": "notifyCoreUnreachable", "type": "boolean", "label": "Notify when the Roon Core becomes unreachable", "defaultValue": true },
-      { "key": "notifyZoneChange", "type": "boolean", "label": "Notify when the followed zone changes", "defaultValue": false }
+      { "key": "showVolume", "type": "boolean", "label": "Show the volume slider", "defaultValue": true }
     ]
   }
 }

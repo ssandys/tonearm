@@ -26,11 +26,36 @@ import sys
 import tempfile
 import types
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "scripts")))
 
 from tonearm_lib import config, core
+
+
+class TestConnectTimeout(unittest.TestCase):
+    """`_connect_timeout()` picks the per-port connect budget: a long one
+    (PAIRING_TIMEOUT) when no token is known yet, so a human has real time
+    to click Enable in Roon Remote, and a short one (CONNECT_TIMEOUT) once a
+    token exists, so a genuinely down/unreachable paired Core fails fast and
+    lets `start()`'s `sys.exit(1)` + systemd `Restart=on-failure` retry loop
+    take over rather than blocking this thread for minutes. See Critical 1
+    of the final review.
+    """
+
+    def test_no_token_gets_the_long_pairing_budget(self):
+        self.assertEqual(core._connect_timeout(None), core.PAIRING_TIMEOUT)
+
+    def test_an_existing_token_gets_the_short_reconnect_budget(self):
+        self.assertEqual(core._connect_timeout("abc123"), core.CONNECT_TIMEOUT)
+
+    def test_the_pairing_budget_is_actually_longer(self):
+        # Pins the relationship, not just the two branches independently --
+        # a fixture where both constants happened to be equal would let a
+        # branch-inversion bug (returning CONNECT_TIMEOUT for None) slip
+        # through the two tests above.
+        self.assertGreater(core.PAIRING_TIMEOUT, core.CONNECT_TIMEOUT)
 
 
 class TestSeededApi(unittest.TestCase):
@@ -150,6 +175,65 @@ class TestRawZones(unittest.TestCase):
     # above exists, which is worse than no test at all. The two tests
     # above instead prove the fix's own logic directly: a RuntimeError,
     # however it arises, is retried and never escapes.
+
+
+class TestStartRetriesByExiting(unittest.TestCase):
+    """`start()` used to return permanently on a failed connection --
+    Critical 1 of the final review. It now publishes the honest terminal
+    status and calls `sys.exit(1)`, so the process dies and systemd's
+    `Restart=on-failure` / `RestartSec=3` (systemd/tonearmd.service) retries
+    from scratch a few seconds later, rather than leaving a daemon that
+    looks alive (socket answering) but can never pair or reconnect. These
+    exercise that decision directly, with no network involved: `sood.discover`
+    and `RoonSession._connect` are the two I/O seams, and both are stubbed.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._prev_config_home = os.environ.get("XDG_CONFIG_HOME")
+        os.environ["XDG_CONFIG_HOME"] = self.tmp.name
+        config.reset_paths()
+        self.addCleanup(self._restore_config_home)
+
+    def _restore_config_home(self):
+        if self._prev_config_home is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = self._prev_config_home
+        config.reset_paths()
+
+    def test_no_core_discovered_exits_1_and_publishes_unreachable(self):
+        published = []
+        session = core.RoonSession(published.append)
+        with unittest.mock.patch.object(core.sood, "discover", return_value=[]):
+            with self.assertRaises(SystemExit) as ctx:
+                session.start()
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertEqual(session.status, "unreachable")
+        self.assertEqual(published[-1]["status"], "unreachable")
+
+    def test_connect_failing_on_every_port_exits_1_and_publishes_unreachable(self):
+        published = []
+        session = core.RoonSession(published.append)
+        session._cfg["host"] = "192.168.50.118"  # host known: skip discovery
+        with unittest.mock.patch.object(core.RoonSession, "_connect", return_value=None):
+            with self.assertRaises(SystemExit) as ctx:
+                session.start()
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertEqual(session.status, "unreachable")
+        self.assertEqual(published[-1]["status"], "unreachable")
+
+    def test_a_successful_connect_does_not_exit(self):
+        published = []
+        session = core.RoonSession(published.append)
+        session._cfg["host"] = "192.168.50.118"
+        fake_api = types.SimpleNamespace(
+            token=None, zones={}, register_state_callback=lambda cb: None)
+        with unittest.mock.patch.object(core.RoonSession, "_connect", return_value=fake_api):
+            session.start()  # must return normally, not exit
+        self.assertEqual(session.status, "ok")
+        self.assertEqual(published[-1]["status"], "ok")
 
 
 if __name__ == "__main__":

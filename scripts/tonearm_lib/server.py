@@ -93,6 +93,18 @@ class Server:
             # at once). Locking across both closes both: broadcast() cannot
             # run at all until this conn is either fully registered or the
             # handshake has failed and closed it.
+            #
+            # `sendall()` under this lock (here and in broadcast()) is an
+            # accepted, deliberate trade-off -- see this class's module
+            # docstring -- not an oversight. Worth noting separately: this
+            # handshake is the LONGER of the two holds on self._lock, not the
+            # shorter one. broadcast()'s sendall() writes bytes that are
+            # already fully serialized before the lock is taken. Here,
+            # `self._session.snapshot()` runs INSIDE the lock: zone
+            # arbitration and (via CachingSession) an art-cache lookup, THEN
+            # serialization, THEN the sendall(). A slow snapshot() -- or a
+            # slow peer's sendall() -- blocks every other subscribe and every
+            # broadcast for its entire duration, not just the write.
             with self._lock:
                 try:
                     conn.sendall((json.dumps(self._session.snapshot()) + "\n").encode())

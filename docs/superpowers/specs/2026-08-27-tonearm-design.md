@@ -196,13 +196,16 @@ subscribe                 stream state until killed
 discover · status         setup-time; status backs setup.sh --check
 ```
 
-There is no `pair` verb. Pairing needs no command: `RoonApi` blocks until the
-extension is enabled by hand in Roon Remote, so the daemon simply reports
-`status: "unpaired"` until it succeeds.
+There is no `pair` verb. Pairing needs no command: on first run (no token
+saved yet) `RoonApi` blocks until the extension is enabled by hand in Roon
+Remote, so the daemon reports `status: "unpaired"` while it waits. That
+wait is bounded, not unbounded -- see §7.3 for the window and what happens
+if it elapses before a human gets there.
 
 Exit codes from `tonearmctl`: `0` ok, `2` usage, `3` daemon not running.
-`Service.qml` distinguishes a dead daemon from a bad invocation by that code and
-backs off rather than respawning in a tight loop.
+`Service.qml` backs off (`Model.nextRetryDelay`) rather than respawning in a
+tight loop; the drain signal is `onRunningChanged`, unconditionally, not a
+read of this exit code.
 
 ---
 
@@ -336,6 +339,26 @@ until an exit node happens to be enabled.
 A one-time manual step. First run registers the extension; it is enabled by hand in
 Roon Remote → Settings → Extensions; the token then persists. Until that happens
 `status` is `unpaired` and the tooltip says so.
+
+Each connection attempt gives a human a bounded but realistic window to do
+this: `core.py`'s `PAIRING_TIMEOUT` (several minutes, not the few seconds a
+Core takes to simply answer a socket) governs how long `RoonApi` is allowed
+to block waiting for the extension to be enabled. This replaced an earlier
+version of this design where the connect timeout guarding a different,
+unrelated hazard (a dead port that accepts a TCP connection and then never
+answers -- §2.1) was reused here too, silently eating almost all of the
+pairing window before a human could plausibly have clicked anything.
+
+If a window elapses before pairing happens, the daemon publishes
+`status: "unreachable"` and exits (`sys.exit(1)`); systemd's
+`Restart=on-failure` / `RestartSec=3` (`systemd/tonearmd.service`) starts it
+again a few seconds later, opening a fresh window. So a user who follows the
+README's install order -- start the service, then go enable the extension in
+Roon Remote -- ends up paired even if that takes them a few minutes, without
+needing to restart the service by hand. The same exit-and-let-systemd-retry
+behavior also covers a Core that boots slower than this machine: a paired
+reconnect that fails is not a permanent dead end either, it is picked up on
+the next restart once the Core is actually up.
 
 ### 7.4 Failure states
 

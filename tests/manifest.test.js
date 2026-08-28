@@ -24,6 +24,26 @@ test("every schema key has a matching default", () => {
   }
 })
 
+test("every schema key is actually read by Panel.qml", () => {
+  // The highest-value test added in the final review: manifest.json's
+  // barWidget.schema/defaults previously declared notifyCoreUnreachable and
+  // notifyZoneChange -- two settings toggles the shell rendered -- that
+  // nothing in the codebase ever read. Panel.qml is the only consumer of
+  // settings (Service.qml and Model.js hold no `root.setting(` calls), so a
+  // schema key that never appears there as `root.setting("<key>"` is dead:
+  // shipped in the UI, doing nothing. Checked textually rather than by
+  // executing QML, matching how bin/test's own qmllint pass treats these
+  // files -- there is no QML runtime in this test environment.
+  const panel = fs.readFileSync(path.join(ROOT, "Panel.qml"), "utf8")
+  for (const entry of manifest.barWidget.schema) {
+    assert.ok(
+      panel.includes(`root.setting("${entry.key}"`),
+      `schema key ${entry.key} is declared but Panel.qml never reads it ` +
+      `via root.setting("${entry.key}", ...) -- either wire it up or remove it`
+    )
+  }
+})
+
 test("dev scripts stay plugin-agnostic", () => {
   // bin/dev and bin/dev-watch are copied byte-identical between plugins and
   // derive identity from manifest.json. A hardcoded id here breaks that.
