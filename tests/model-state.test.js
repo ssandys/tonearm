@@ -83,6 +83,21 @@ test("tooltip explains each fault in words", () => {
     "Nothing playing · yavin")
 })
 
+test("connecting is normal startup, not a failure -- never reads as unreachable", () => {
+  // The daemon is actively reaching for the Core. This is the ordinary first
+  // second or two of every boot, not a fault, and must say something distinct
+  // from "Roon Core unreachable" or a healthy startup reads as broken.
+  const withCore = M.tooltipText({ status: "connecting", core: CORE, zone: null })
+  assert.notStrictEqual(withCore, "Roon Core unreachable")
+  assert.strictEqual(withCore, "Connecting to yavin…")
+
+  // connecting is exactly the state where the Core may not be resolved yet,
+  // so core can legitimately be absent -- must not assume it exists.
+  const noCore = M.tooltipText({ status: "connecting", core: null, zone: null })
+  assert.notStrictEqual(noCore, "Roon Core unreachable")
+  assert.strictEqual(noCore, "Connecting to Roon…")
+})
+
 test("zoneList puts the pinned zone first and is otherwise stable by name", () => {
   const st = { status: "ok", zone: { id: "z2", pinned: true },
                zones: [ { id: "z3", name: "Kitchen", state: "stopped" },

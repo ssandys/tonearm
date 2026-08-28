@@ -144,7 +144,7 @@ var GLYPH_FAULT   = String.fromCodePoint(0xf0026)   // nf-md-alert
 // Color.red or Color.yellow to bind to. headway carries its own for the same
 // reason. Chosen against the theme's own red and yellow.
 var COLOR_ERROR = "#c38b7b"
-var COLOR_WARN  = "#6B5E73"
+var COLOR_WARN  = "#6b5e73"
 
 // Read with hasOwnProperty only. A bare STATUS_SEVERITY[key] walks the
 // prototype chain, so a status of "constructor" or "toString" would return a
@@ -194,6 +194,12 @@ function tooltipText(state) {
   var severity = severityFor(state.status)
   if (state.status === "unpaired") {
     return "Enable tonearm in Roon → Settings → Extensions"
+  }
+  if (state.status === "connecting") {
+    // The daemon's normal startup state, reaching for the Core, which may not
+    // even be resolved yet -- this is not a failure and must not read as one.
+    var connectingName = (state.core && state.core.name) ? state.core.name : "Roon"
+    return "Connecting to " + connectingName + "…"
   }
   if (severity !== "ok") return "Roon Core unreachable"
 
