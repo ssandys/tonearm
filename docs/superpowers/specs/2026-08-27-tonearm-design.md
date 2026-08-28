@@ -162,7 +162,8 @@ sidesteps both: nothing is reassigned, and `onRunningChanged` is the drain signa
              "volume": { "value": 62, "min": 0, "max": 100, "step": 1, "muted": false },
              "position": 271, "length": 585,
              "now_playing": { "title": "Blue Train", "artist": "John Coltrane",
-                              "album": "Blue Train", "image_key": "a1b2…" } },
+                              "album": "Blue Train", "image_key": "a1b2…",
+                              "art_path": "/run/user/1000/tonearm/art/a1b2….jpg" } },
   "zones": [ { "id": "1601…", "name": "Living Room", "state": "playing" },
              { "id": "77c2…", "name": "Study",       "state": "stopped" } ] }
 ```
@@ -360,11 +361,37 @@ Roon connection the MPRIS name is withdrawn rather than left advertising a stale
 Popup chrome, text, transport buttons and zone rows all come from `colors.toml`.
 Exactly one element takes its color from the cover: the seek fill.
 
-The accent pipeline is `ColorQuantizer { source: Model.artUrl(state, 64) }` →
-`Model.pickAccent(quantizer.colors, background)`. Extraction is a C++ primitive;
-the *decision* — which entry, and the contrast floor against `#0c0b0c` — is a pure
-function taking an array of colors and returning a hex string, testable without a
-shell, a Core or an image. Covers that clear no entry fall back to the theme accent.
+The accent pipeline is `ColorQuantizer` → `Model.pickAccent(quantizer.colors,
+background)`. Extraction is a C++ primitive; the *decision* — which entry, and the
+contrast floor against `#0c0b0c` — is a pure function taking an array of colors and
+returning a hex string, testable without a shell, a Core or an image. Covers that
+clear no entry fall back to the theme accent.
+
+**`ColorQuantizer` cannot load a remote URL.** Measured in a live Quickshell
+probe: pointed at `http://<core>:9330/api/image/<key>` it emits **zero** colors;
+pointed at the identical bytes as a local `file://` it emits eight. A plain
+`Image` loads the same remote URL fine (`status: Ready`, 256×256) — so this
+affects only the accent extraction, not the art display.
+
+Left unfixed, direction C would silently do nothing: `pickAccent` would receive an
+empty array on every track and always return the theme accent, presenting as "the
+feature was never implemented" with no error anywhere.
+
+**Therefore `tonearmd` caches a small copy of the cover** to
+`$XDG_RUNTIME_DIR/tonearm/art/<image_key>.jpg` when the track changes, and the
+payload carries `art_path` (nullable) beside `image_key`. The widget then uses:
+
+- `Image.source` → the **remote** `:9330` URL, at display resolution
+- `ColorQuantizer.source` → `file://` + `art_path`, a 64px copy
+
+This keeps the daemon owning I/O and the widget owning rendering: the daemon
+emits a *path*, never a rendering decision. `art_path` is null when there is no
+art or the fetch failed, and the widget falls back to the theme accent — the same
+path a low-contrast cover already takes.
+
+Also measured: `String(color)` from `ColorQuantizer` yields `#rrggbb` (7 chars)
+with alpha 1.0, not the `#aarrggbb` that `normalizeHex` also tolerates. The
+defensive alpha-stripping is harmless and stays.
 
 The bar module is a fixed-width art thumbnail plus play state, with no text. Title and
 artist live in `tooltipText()`. The right-hand bar section already carries 18 widgets;
