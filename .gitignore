@@ -1,3 +1,7 @@
 .superpowers/
 __pycache__/
 *.pyc
+
+# Agent worktrees live here. They are real checkouts of this repo, so an
+# unguarded `git add -A` would commit whole copies of the tree into itself.
+.claude/
