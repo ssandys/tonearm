@@ -58,11 +58,9 @@ Panel {
   // A fixed- or incremental-volume output reports no volume object at all;
   // null here (not a zeroed-out slider) is what tells the volume row to hide.
   readonly property var volume: root.hasZone ? root.zone.volume : null
-  readonly property real volumeFraction: {
-    var v = root.volume
-    if (!v || v.max === v.min) return 0
-    return (v.value - v.min) / (v.max - v.min)
-  }
+  // Real arithmetic with a genuine edge case (v.max === v.min), moved into
+  // Model.js and node-tested rather than living only in a QML binding.
+  readonly property real volumeFraction: Model.volumeFraction(root.volume)
 
   readonly property int artPx: root.setting("artSizePx", 118)
   readonly property bool useArtAccent: root.setting("accentFromArt", true)
@@ -307,7 +305,16 @@ Panel {
               anchors.margins: -Style.space(8)
               enabled: root.length > 0
               onClicked: function (mouse) {
-                var frac = Math.max(0, Math.min(1, mouse.x / seekTrack.width))
+                // mouse.x is relative to THIS MouseArea's origin, not
+                // seekTrack's: the negative margin above expands the
+                // MouseArea Style.space(8) past the track on every side, so
+                // its origin sits that far before the track's visual left
+                // edge. Subtract the margin back out, or a click at the
+                // visual start of the bar reports mouse.x as the margin
+                // width instead of 0 -- a several-second offset that only
+                // shows up as "clicking near the beginning doesn't go to
+                // the beginning."
+                var frac = Math.max(0, Math.min(1, (mouse.x - Style.space(8)) / seekTrack.width))
                 service.send("seek", Math.floor(frac * root.length))
               }
             }
@@ -412,6 +419,11 @@ Panel {
           color: root.fgFaint
           font.family: root.fontFamily
           font.pixelSize: Style.font.subtitle
+          // Row only manages x and leaves children top-aligned by default --
+          // same fix already applied to the transport row's side glyphs
+          // above, needed here too since this row's tallest child is the
+          // volTrack Rectangle's own height plus the neighboring Text metrics.
+          anchors.verticalCenter: parent.verticalCenter
           MouseArea {
             anchors.fill: parent
             anchors.margins: -Style.space(4)
@@ -444,9 +456,12 @@ Panel {
             anchors.fill: parent
             anchors.margins: -Style.space(8)
             onClicked: function (mouse) {
-              var frac = Math.max(0, Math.min(1, mouse.x / volTrack.width))
-              var v = root.volume
-              service.send("volume", Math.round(v.min + frac * (v.max - v.min)))
+              // Same coordinate-frame correction as the seek MouseArea above:
+              // mouse.x is relative to this MouseArea's own origin, which the
+              // negative margin puts Style.space(8) before volTrack's left
+              // edge.
+              var frac = Math.max(0, Math.min(1, (mouse.x - Style.space(8)) / volTrack.width))
+              service.send("volume", Model.volumeFromFraction(root.volume, frac))
             }
           }
         }
@@ -456,6 +471,7 @@ Panel {
           color: root.fgFaint
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
+          anchors.verticalCenter: parent.verticalCenter
         }
       }
 
@@ -512,8 +528,7 @@ Panel {
               anchors.right: parent.right
               anchors.rightMargin: Style.space(8)
               anchors.verticalCenter: parent.verticalCenter
-              text: root.zone && root.zone.pinned
-                    && root.zone.id === zoneRow.modelData.id ? "pinned" : ""
+              text: Model.isZonePinned(root.zone, zoneRow.modelData.id) ? "pinned" : ""
               color: root.fgFaint
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -522,8 +537,7 @@ Panel {
             MouseArea {
               anchors.fill: parent
               onClicked: {
-                var pinnedHere = root.zone && root.zone.pinned
-                                 && root.zone.id === zoneRow.modelData.id
+                var pinnedHere = Model.isZonePinned(root.zone, zoneRow.modelData.id)
                 // Clicking the already-pinned zone unpins it, so auto-follow
                 // is reachable without a second control.
                 if (pinnedHere) service.send("zone", "unpin")

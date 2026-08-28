@@ -146,6 +146,16 @@ test("zoneList tolerates a missing zones array", () => {
   assert.deepStrictEqual(M.zoneList(null), [])
 })
 
+test("isZonePinned is true only for the pinned zone's own id", () => {
+  assert.strictEqual(M.isZonePinned({ id: "z1", pinned: true }, "z1"), true)
+  assert.strictEqual(M.isZonePinned({ id: "z1", pinned: true }, "z2"), false)
+  assert.strictEqual(M.isZonePinned({ id: "z1", pinned: false }, "z1"), false)
+})
+
+test("isZonePinned tolerates a null zone", () => {
+  assert.strictEqual(M.isZonePinned(null, "z1"), false)
+})
+
 test("nextRetryDelay backs off and then caps", () => {
   assert.strictEqual(M.nextRetryDelay(0), 1000)
   assert.strictEqual(M.nextRetryDelay(1), 2000)

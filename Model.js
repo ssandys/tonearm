@@ -384,6 +384,40 @@ function zoneList(state) {
   return out
 }
 
+// Whether `id` is the zone the daemon is currently pinned to. This exact
+// three-clause comparison used to be duplicated character-for-character in
+// two places in Panel.qml (the "pinned" row label and the pin/unpin click
+// branch) -- both untested by design, since Panel.qml has no test coverage.
+// One tested copy here instead of two untested ones there.
+function isZonePinned(zone, id) {
+  return !!(zone && zone.pinned && zone.id === id)
+}
+
+// Fraction of the volume's [min, max] range that `value` represents, for the
+// slider fill width. 0 when there is no volume at all (a fixed-volume zone)
+// or when min === max -- a genuine edge case, not a defensive nicety: a
+// zero-width range makes "fraction of the range" undefined, and without this
+// guard it divides by zero and renders NaN * width as the fill.
+function volumeFraction(volume) {
+  if (!volume || volume.max === volume.min) return 0
+  return (volume.value - volume.min) / (volume.max - volume.min)
+}
+
+// Inverse of volumeFraction: the integer volume value a click at fraction
+// `frac` of the track represents. Rounds here, not at the call site, because
+// this is the one place that knows it is producing a volume value rather
+// than a fill ratio. Clamps frac defensively even though Panel.qml's click
+// handler already clamps before calling, since a stray caller must not be
+// able to send an out-of-range volume.
+function volumeFromFraction(volume, frac) {
+  if (!volume) return 0
+  if (volume.max === volume.min) return volume.min
+  var f = frac
+  if (!(f >= 0)) f = 0    // also catches NaN
+  if (f > 1) f = 1
+  return Math.round(volume.min + f * (volume.max - volume.min))
+}
+
 // With tonearmd down, `tonearmctl subscribe` exits immediately, so a Process
 // that respawns on exit becomes a fork loop. Service.qml waits this long first.
 function nextRetryDelay(attempt) {
@@ -432,6 +466,9 @@ if (typeof module !== "undefined") {
     barState: barState,
     tooltipText: tooltipText,
     zoneList: zoneList,
+    isZonePinned: isZonePinned,
+    volumeFraction: volumeFraction,
+    volumeFromFraction: volumeFromFraction,
     nextRetryDelay: nextRetryDelay,
     artUrl: artUrl
   }
