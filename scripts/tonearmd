@@ -24,18 +24,30 @@ def main() -> int:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    srv_holder = {}
+    import asyncio
+    import threading
+
+    loop = asyncio.new_event_loop()
+    holder = {}
 
     def broadcast_current() -> None:
         # Used both as the on_change hook (a Roon push) and as art.Cache's
         # on_ready callback (a background art fetch finishing after the
         # push that started it already went out). Re-reading the session's
         # own snapshot() -- rather than trusting whatever payload the
-        # caller has in hand -- means both paths always broadcast the same
-        # art_path logic in tonearm_lib.art.CachingSession.snapshot().
-        srv = srv_holder.get("srv")
+        # caller has in hand -- means every consumer (the socket fan-out
+        # and the MPRIS adapter alike) always sees the same art_path logic
+        # in tonearm_lib.art.CachingSession.snapshot().
+        payload = session.snapshot()
+        srv = holder.get("srv")
         if srv:
-            srv.broadcast(session.snapshot())
+            srv.broadcast(payload)
+        adapter = holder.get("mpris")
+        if adapter:
+            # Roon's callback (and the art cache's on_ready callback) run on
+            # their own threads; the adapter must touch the bus only from
+            # the asyncio loop's own thread.
+            loop.call_soon_threadsafe(adapter.update, payload)
 
     def on_change(_payload) -> None:
         broadcast_current()
@@ -48,18 +60,49 @@ def main() -> int:
     session = art.CachingSession(raw_session, cache)
 
     srv = server.Server(session)
-    srv_holder["srv"] = srv
+    holder["srv"] = srv
 
     def shutdown(_signum, _frame):
         raw_session.stop()
         srv.shutdown()
-        sys.exit(0)
+
+        async def _teardown():
+            # Withdraw the MPRIS name rather than leave it advertising a
+            # stale track once the Roon connection is gone.
+            adapter = holder.get("mpris")
+            if adapter:
+                await adapter.stop()
+            loop.stop()
+
+        loop.call_soon_threadsafe(lambda: loop.create_task(_teardown()))
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
     raw_session.start()
-    srv.serve_forever()
+
+    async def boot():
+        # The import lives inside this try too: MPRIS is not load-bearing,
+        # so even a broken/missing dbus_next must not take the daemon down --
+        # only bus-unavailable or registration failures are expected in
+        # practice, but nothing here should be allowed to escape.
+        try:
+            from tonearm_lib.mpris import MprisAdapter
+            adapter = MprisAdapter(session)
+            await adapter.start()
+            holder["mpris"] = adapter
+            adapter.update(session.snapshot())
+        except Exception:
+            # Not load-bearing: the widget works without media keys.
+            logging.getLogger("tonearmd").exception(
+                "MPRIS unavailable; continuing without media keys")
+
+    loop.create_task(boot())
+    try:
+        loop.run_forever()
+    finally:
+        loop.close()
     return 0
 
 
