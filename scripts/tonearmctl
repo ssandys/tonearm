@@ -1,0 +1,70 @@
+#!/usr/bin/python
+"""tonearmctl -- talk to tonearmd over its unix socket.
+
+`subscribe` streams NDJSON state until killed; `status` sends one command and
+reads exactly one reply line (Task 13's setup.sh --check uses this as its
+health probe); every other verb sends one command and exits. Exit codes:
+0 ok, 2 usage, 3 daemon not running.
+"""
+
+import json
+import os
+import socket
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from tonearm_lib import cli, server, sood   # noqa: E402
+
+EXIT_USAGE = 2
+EXIT_NO_DAEMON = 3
+
+
+def main(argv):
+    if argv and argv[0] == "discover":
+        for core in sood.discover():
+            print(json.dumps(core))
+        return 0
+
+    try:
+        request = cli.to_request(argv)
+    except ValueError as err:
+        print(err, file=sys.stderr)
+        return EXIT_USAGE
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.connect(server.socket_path())
+    except OSError:
+        print("tonearmd is not running", file=sys.stderr)
+        return EXIT_NO_DAEMON
+
+    try:
+        sock.sendall((json.dumps(request) + "\n").encode())
+
+        if request["cmd"] == "status":
+            # Unlike subscribe: one reply line, then exit -- this is a probe,
+            # not a stream.
+            line = sock.makefile("r").readline()
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            return 0
+
+        if request["cmd"] != "subscribe":
+            return 0
+
+        stream = sock.makefile("r")
+        for line in stream:
+            sys.stdout.write(line)
+            # Unbuffered: SplitParser on the QML side reads line by line, and a
+            # buffered relay would deliver state in silent bursts.
+            sys.stdout.flush()
+        return EXIT_NO_DAEMON     # the daemon closed on us
+    except (OSError, KeyboardInterrupt):
+        return EXIT_NO_DAEMON
+    finally:
+        sock.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
