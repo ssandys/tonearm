@@ -545,6 +545,57 @@ that deliberately rather than discovering it after the swap: the severity colour
 (`ok`/`warn`/`error`) must survive regardless, since the failure states in §7.4
 depend on it.
 
+### Marketplace submission
+
+Intended eventually, **gated on search shipping** — the author will not submit
+until browse exists. Guidelines:
+`https://github.com/HANCORE-linux/omarchy-plugin-marketplace/blob/main/SUBMISSION.md`
+
+Submission is a GitHub issue on `HANCORE-linux/omarchy-plugin-marketplace` via the
+`gh` CLI, titled `[Plugin]: plugin_name`. Automated validation checks repository
+structure and Omarchy Quattro compatibility, and an Automated Security Baseline
+runs static analysis on the exact validated commit. It is explicitly *not* a
+security review.
+
+Readiness against the published requirements, as of the MVP:
+
+| Requirement | Status |
+|---|---|
+| `manifest.json` in repo root | ✅ |
+| `preview.png` (≤50 MB, ≤40 MP; the marketplace resizes) | ✅ |
+| Root README with installation **and removal** instructions | ⚠️ removal missing |
+| Root license file documenting the licence **and external dependencies** | ⚠️ ours is plain MIT |
+| Plugin ID outside the reserved `omarchy.*` namespace | ✅ `ssandys.tonearm` |
+
+**Decide the plugin ID before the first submission — IDs are permanent and cannot
+be reused if retired or renamed.** `ssandys.tonearm` is valid and matches the
+sibling plugins, but the marketplace *prefers* the namespaced form
+`io.github.<name>.<plugin>` — e.g. `io.github.ssandys.tonearm`, which is the shape
+`io.github.teevans.apple-tv-remote` already uses in this very plugin directory.
+Changing it later is not possible, and it would also move the install path,
+the systemd unit's `ExecStart`, and `setup.sh`'s `installed_root`.
+
+**Two small gaps to close before submitting:**
+- The README must document **removal**, not just installation. For tonearm that
+  is more than deleting a directory: `systemctl --user disable --now
+  tonearmd.service`, removing the unit file, and deleting
+  `~/.config/tonearm/` (host, token, pinned zone).
+- The root licence file must document **external dependencies**. Ours is plain
+  MIT; the vendored Apache-2.0 `roonapi` and its `LICENSE`/`NOTICE` are recorded
+  only in `scripts/vendor/README.md`. Surface them at the root.
+
+**Submission metadata** (exact spellings required): category **`Widgets`** — note
+`Audio`, which `manifest.json`'s `barWidget.category` currently uses for
+Omarchy's own picker, is *not* a marketplace category. Tags, one to three from the
+fixed list: **`media`**, **`bar`**, **`quickshell`**.
+
+**Anticipate the security baseline.** tonearm ships a vendored third-party library
+(1,599 lines of Apache-2.0 `roonapi`) and a Python daemon that opens a unix
+socket, makes outbound HTTP and WebSocket connections, and scans the local `/24`
+during discovery. All of that is legitimate and documented, but it is exactly what
+static analysis flags. Being able to point at §2.1's measured findings and
+`scripts/vendor/README.md` will help.
+
 ### The cheap thing to do now
 
 **Treat the socket as a real interface rather than an internal detail.** The
