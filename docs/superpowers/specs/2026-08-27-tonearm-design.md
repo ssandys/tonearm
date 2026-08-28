@@ -165,8 +165,17 @@ playpause · play · pause · next · previous
 seek <seconds>            absolute
 volume <n> · mute · unmute
 zone pin <id> · zone unpin
-discover · pair · status   setup-time only
+subscribe                 stream state until killed
+discover · status         setup-time; status backs setup.sh --check
 ```
+
+There is no `pair` verb. Pairing needs no command: `RoonApi` blocks until the
+extension is enabled by hand in Roon Remote, so the daemon simply reports
+`status: "unpaired"` until it succeeds.
+
+Exit codes from `tonearmctl`: `0` ok, `2` usage, `3` daemon not running.
+`Service.qml` distinguishes a dead daemon from a bad invocation by that code and
+backs off rather than respawning in a tight loop.
 
 ---
 
