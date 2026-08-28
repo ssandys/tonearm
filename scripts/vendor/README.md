@@ -10,7 +10,9 @@ AUR package is 0.1.4 — behind upstream, zero votes, untouched since May 2023.
 Vendoring pins the version and needs no network at install time.
 
 Its declared dependencies (`requests`, `six`, `ifaddr`) are over-declared: the
-five source files import only `websocket`, which system Python already has.
+source files import `websocket` as a hard dependency, and conditionally
+`simplejson` (which falls back to stdlib `json` when absent, adding no
+installation requirement). System Python already has both `websocket` and `json`.
 
 To refresh: bump the version, repeat the copy, re-run `./bin/test`, and check
 `RoonApi.__init__`'s signature has not changed.

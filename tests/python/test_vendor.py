@@ -45,6 +45,12 @@ class TestVendoredRoonApi(unittest.TestCase):
         # imported with a fallback to stdlib json, so it's optional.
         self.assertEqual(found - stdlib_and_self, {"websocket", "simplejson"})
 
+    def test_soodmsg_data_file_exists(self):
+        # The discovery code reads this data file; it must not be lost to glob.
+        import roonapi, pathlib
+        pkg = pathlib.Path(inspect.getfile(roonapi)).parent
+        self.assertTrue((pkg / ".soodmsg").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
