@@ -96,6 +96,41 @@ function pickAccent(colors, bgHex) {
   return best === null ? THEME_ACCENT : best
 }
 
+function formatTime(sec) {
+  var s = Math.floor(sec || 0)
+  if (!(s > 0)) s = 0          // also catches NaN
+  var h = Math.floor(s / 3600)
+  var m = Math.floor((s % 3600) / 60)
+  var r = s % 60
+  var mm = (h > 0 && m < 10) ? "0" + m : String(m)
+  var ss = r < 10 ? "0" + r : String(r)
+  if (h > 0) return h + ":" + mm + ":" + ss
+  return mm + ":" + ss
+}
+
+function formatRemaining(posSec, lenSec) {
+  var rem = (lenSec || 0) - (posSec || 0)
+  if (!(rem > 0)) rem = 0
+  // U+2212 MINUS SIGN, not U+002D HYPHEN-MINUS: the hyphen renders short and
+  // sits off the numeric baseline in a tabular-figures run.
+  return "−" + formatTime(rem)
+}
+
+// The daemon sends position without a timestamp; Service.qml stamps arrival.
+// Interpolating against a clock this side owns avoids any cross-process clock
+// assumption, and keeps this a pure function.
+function position(zone, recvMs, nowMs) {
+  if (!zone) return 0
+  var base = zone.position || 0
+  if (zone.state !== "playing") return base
+  var elapsed = (nowMs - recvMs) / 1000
+  if (!(elapsed > 0)) elapsed = 0
+  var p = base + elapsed
+  var len = zone.length || 0
+  if (len > 0 && p > len) p = len
+  return p
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     THEME_ACCENT: THEME_ACCENT,
@@ -105,6 +140,9 @@ if (typeof module !== "undefined") {
     relativeLuminance: relativeLuminance,
     contrastRatio: contrastRatio,
     saturation: saturation,
-    pickAccent: pickAccent
+    pickAccent: pickAccent,
+    formatTime: formatTime,
+    formatRemaining: formatRemaining,
+    position: position
   }
 }
