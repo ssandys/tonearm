@@ -28,8 +28,6 @@ Item {
   // healthy connection does not leave the NEXT reconnect waiting 30s.
   property int _attempt: 0
 
-  signal payload(var value)
-
   Process {
     id: relay
     running: false
@@ -48,7 +46,6 @@ Item {
         root._attempt = 0
         root.receivedAt = Date.now()
         root.state = parsed
-        root.payload(parsed)
       }
     }
 
@@ -60,6 +57,12 @@ Item {
     onRunningChanged: {
       if (!relay.running) {
         root.state = null
+        // Cleared alongside state, not left stale: the two are documented as
+        // a pair (receivedAt is the arrival stamp for `state`), and a null
+        // state with a stale receivedAt is a latent inconsistency even
+        // though every current reader of receivedAt is gated behind a
+        // non-null zone.
+        root.receivedAt = 0
         backoff.interval = Model.nextRetryDelay(root._attempt)
         root._attempt = root._attempt + 1
         backoff.restart()
@@ -91,10 +94,25 @@ Item {
     Quickshell.execDetached(argv)
   }
 
+  // Qt.resolvedUrl() percent-encodes reserved characters (a space becomes
+  // %20), so a bare `.replace("file://", "")` would leave that escape in the
+  // path and the spawn would fail on any install path containing one. A
+  // failed spawn never emits exited() -- it goes straight to running=false
+  // -- so the relay would back off and retry forever with nothing in the
+  // journal at all: no ReferenceError, no "unparseable state line", because
+  // there would be no output to parse. Copied verbatim from
+  // galley/Panel.qml:46-50 and colophon/Panel.qml:25-30, which independently
+  // converged on the same body.
+  function pathFromUrl(url) {
+    var value = String(url || "")
+    if (value.indexOf("file://") === 0) return decodeURIComponent(value.substring(7))
+    return value
+  }
+
   Component.onCompleted: {
     // Exactly one onCompleted handler: QML rejects a duplicate and the whole
     // component fails to instantiate with nothing in the journal.
-    root.ctlPath = String(Qt.resolvedUrl("scripts/tonearmctl")).replace("file://", "")
+    root.ctlPath = root.pathFromUrl(Qt.resolvedUrl("scripts/tonearmctl"))
     relay.running = true
   }
 }
