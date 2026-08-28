@@ -213,8 +213,18 @@ class BrowseSession:
         addresses a different row. Acting on it would play the wrong album,
         silently, in a way indistinguishable from a mis-click. That is the one
         failure this design must not have.
+
+        spec 5.1.1 requires index-addressed ops to carry level_id -- so a
+        missing/None level_id is treated as stale, not as "unchecked", and a
+        level_id that fails to parse as an int is stale too, never a bare
+        ValueError. Both keep the same fail-safe response: the widget
+        re-renders and discards the keystroke without ever reaching Roon.
         """
-        if level_id is not None and int(level_id) != self.level_id:
+        try:
+            matches = level_id is not None and int(level_id) == self.level_id
+        except (TypeError, ValueError):
+            matches = False
+        if not matches:
             raise BrowseError(
                 "stale", "the view is out of date; it has been refreshed")
         if not isinstance(index, int) or index < 0 or index >= len(self._keys):

@@ -50,8 +50,40 @@ class TestEnter(unittest.TestCase):
             s.enter(99, reply["level_id"])
         self.assertEqual(caught.exception.token, "bad_index")
 
+    def test_an_omitted_level_id_is_stale_and_performs_no_action(self):
+        # spec 5.1.1: index-addressed ops MUST carry level_id. A missing one
+        # (the default, or None off a JSON payload) must not be treated as
+        # "unchecked" -- that would let the guard above be skipped entirely.
+        api, s, reply = searched()
+        before = len(api.calls)
+        with self.assertRaises(browse.BrowseError) as caught:
+            s.enter(1)
+        self.assertEqual(caught.exception.token, "stale")
+        self.assertEqual(len(api.calls), before,
+                         "an unenforceable request must not touch Roon at all")
+
+    def test_an_unparseable_level_id_is_stale_not_a_bare_valueerror(self):
+        # A malformed level_id must still carry the module's stable machine
+        # token (spec 5.2), never leak int()'s ValueError to the caller.
+        api, s, reply = searched()
+        before = len(api.calls)
+        with self.assertRaises(browse.BrowseError) as caught:
+            s.enter(1, "abc")
+        self.assertEqual(caught.exception.token, "stale")
+        self.assertEqual(len(api.calls), before,
+                         "an unenforceable request must not touch Roon at all")
+
 
 class TestBack(unittest.TestCase):
+    def test_works_with_no_level_id_argument_at_all(self):
+        # Regression: back() does not address a row and never calls _check,
+        # so it must not start requiring level_id.
+        api, s, reply = searched()
+        s.enter(1, reply["level_id"])
+        out = s.back()
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["path"], ["Search"])
+
     def test_uses_pop_levels_and_never_re_walks_from_root(self):
         # spec 2.5: re-walking invalidates every captured key, and a stale key
         # silently returns the ROOT with no error.
