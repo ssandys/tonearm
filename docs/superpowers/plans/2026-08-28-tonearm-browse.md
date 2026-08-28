@@ -1094,17 +1094,21 @@ MAX_ACTION_DEPTH = 3
             raise BrowseError("bad_index", "unknown action %r" % (action,))
         with self._lock:
             key = self._check(index, level_id)
+            # Bound BEFORE the try: if the first _browse raises, the finally
+            # clause and the check below both still need these names.
             depth = 0
+            descents = []
             try:
                 self._browse(item_key=key)
                 depth = 1
-                found = self._descend_to_action(title)
+                descents = self._descend_to_action(title)
+                depth += len(descents)
             finally:
                 # Unwind to exactly where the user was, whatever happened.
                 # Leaving them inside an action list -- or worse, at the root
                 # after a silent stale-key reset -- would be a visible bug.
                 self._unwind(depth)
-            if not found:
+            if not descents:
                 raise BrowseError(
                     "no_action", "nothing here can be played")
             reply = self.current()
@@ -1134,49 +1138,53 @@ MAX_ACTION_DEPTH = 3
                 reply["played"] = False
                 return reply
 
-    def _descend_to_action(self, title: str) -> bool:
-        """Walk down looking for an action list containing `title`."""
+    def _descend_to_action(self, title: str) -> list:
+        """Walk down looking for an action of exactly `title`.
+
+        Returns the list of descents performed, so the caller can pop exactly
+        that many. Returning a count rather than a bool is what makes the
+        unwind exact: comparing list titles to decide when to stop would break
+        on any hierarchy where a child level shares its parent's title, and
+        Roon does exactly that -- an album's detail level is titled after the
+        album (measured, spec 2.4).
+        """
+        descents = []
         for _ in range(MAX_ACTION_DEPTH):
             loaded = self._load()
             items = loaded.get("items") or []
             for item in items:
                 if item.get("title") == title and item.get("hint") == "action":
                     self._browse(item_key=item["item_key"])
-                    return True
+                    descents.append(item["item_key"])
+                    return descents
             nxt = None
             for item in items:
                 if item.get("hint") in ("action_list", "list") and item.get("item_key"):
                     nxt = item["item_key"]
                     break
             if nxt is None:
-                return False
+                return []
             self._browse(item_key=nxt)
-            self._depth_used = getattr(self, "_depth_used", 0) + 1
-        return False
+            descents.append(nxt)
+        return []
 
-    def _unwind(self, _depth) -> None:
-        """Return to the level the user was on before a play attempt.
+    def _unwind(self, depth: int) -> None:
+        """Pop exactly `depth` levels, back to where the user was.
 
-        Re-adopts by popping until the breadcrumb depth matches again. Uses
-        pop_levels rather than a re-walk for the reason in spec 2.5.
+        pop_levels, never a re-walk (spec 2.5). Guarded so a failure here
+        cannot mask the BrowseError the caller is already raising.
         """
-        while True:
-            loaded = self._load()
-            lst = loaded.get("list") or {}
-            if (lst.get("title") or "") == (self._path[-1] if self._path else ""):
-                break
-            try:
-                self._browse(pop_levels=1)
-            except BrowseError:
-                break
+        if depth <= 0:
+            return
+        try:
+            self._browse(pop_levels=depth)
+            self._load()
+        except BrowseError:
+            LOG.warning("could not unwind %d level(s) after a play", depth)
 ```
 
-> **Note for the implementer:** `_descend_to_action` and `_unwind` above are the
-> shape, not necessarily the final code. The tests in Step 1 are the contract.
-> If a cleaner unwind (for example, counting the descents actually performed and
-> popping exactly that many) passes every test, prefer it and say so in the
-> report — `_unwind`'s title comparison is the weakest part of this task and a
-> counted pop is more obviously correct.
+`play`'s body above already tracks the depth it reached and passes it to
+`_unwind`; there is nothing further to add here.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -1654,7 +1662,28 @@ def browse_request(argv):
     return None
 ```
 
-In `scripts/tonearmctl`, route `browse` before the existing verb handling, send the request, and print the reply line verbatim to stdout. Exit 0 when `ok` is true, 1 otherwise.
+`cli.py` already exposes a single entry point, `to_request(argv)`, which raises
+`ValueError` on anything it cannot parse (`cli.py:35`). Keep that contract: add a
+`browse` branch to `to_request` that delegates to `browse_request` and converts a
+`None` into the same kind of error, so `tonearmctl` keeps exactly one parse path
+and one failure mode.
+
+```python
+    if verb == "browse":
+        request = browse_request(argv)
+        if request is None:
+            raise ValueError(
+                "usage: tonearmctl browse search <term> | enter <i> <level_id>"
+                " | activate <i> <level_id> | play <i> <action> <level_id>"
+                " | back | page <offset> | reset")
+        return request
+```
+
+Place it before the final `raise ValueError("unknown verb %r" % verb)`.
+
+In `scripts/tonearmctl`, `browse` needs a **reply**, unlike every existing
+command verb — the current client sends and exits. Read one line back from the
+socket and print it verbatim to stdout. Exit 0 when `ok` is true, 1 otherwise.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -1688,7 +1717,7 @@ git commit -m "feat(browse): tonearmctl browse subcommands"
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `imageUrl(core, imageKey, px)`, `rowArtUrl(state, row, px)`, `moveCursor(current, delta, count)`, `rowLabel(row)`. `artUrl(state, px)` keeps its existing signature and behaviour.
+- Produces: `imageUrl(core, imageKey, px)`, `rowArtUrl(state, row, px)`, `moveCursor(current, delta, count)`. `artUrl(state, px)` keeps its existing signature and behaviour.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1760,13 +1789,9 @@ test("moveCursor clamps a cursor left past the end by a shorter page", () => {
   assert.strictEqual(M.moveCursor(9, 0, 3), 2)
 })
 
-test("rowLabel falls back to the title when there is no subtitle", () => {
-  assert.strictEqual(M.rowLabel({ title: "X", subtitle: "" }), "X")
-})
-
-test("rowLabel joins title and subtitle for the tooltip", () => {
-  assert.strictEqual(M.rowLabel(ROW), "Dead Man's Party — Oingo Boingo")
-})
+// `rowLabel` was cut in the pre-flight scan: nothing consumed it. An exported
+// helper with no caller is the kind of thing this project's own review rubric
+// treats as a defect, and it is trivial to add back if a tooltip ever wants it.
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -1816,16 +1841,9 @@ function moveCursor(current, delta, count) {
   return next
 }
 
-function rowLabel(row) {
-  if (!row) return ""
-  var title = row.title || ""
-  var subtitle = row.subtitle || ""
-  if (!subtitle) return title
-  return title + " — " + subtitle
-}
 ```
 
-Add `imageUrl`, `rowArtUrl`, `moveCursor`, `rowLabel` to the `module.exports` block, keeping `artUrl` in place.
+Add `imageUrl`, `rowArtUrl`, `moveCursor` to the `module.exports` block, keeping `artUrl` in place.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -1944,19 +1962,22 @@ git commit -m "feat(browse): request/response RPC in Service.qml"
 - Create: `BrowsePane.qml`
 
 **Interfaces:**
-- Consumes: `Service.browse(args, callback)` (Task 9); `Model.moveCursor`, `Model.rowArtUrl`, `Model.rowLabel` (Task 8).
+- Consumes: `Service.browse(args, callback)` (Task 9); `Model.moveCursor`, `Model.rowArtUrl` (Task 8).
 - Produces: properties `service`, `state`, `active`, `editing`, `rowCount`; signals `playStarted()`, `closeRequested()`; functions `handleMove(dx, dy)`, `handleActivate()`, `handleQueue()`, `handleBack()`, `focusSearch()`.
 
 - [ ] **Step 1: Write the component**
 
 ```qml
 import QtQuick
-import QtQuick.Controls
 import Quickshell
 import qs.Commons
 import qs.Ui
-// REQUIRED: this file calls Model.moveCursor, Model.rowArtUrl and
-// Model.rowLabel. Without this import each is a ReferenceError raised inside
+// NOT QtQuick.Controls: it also exports a TextField, and which one wins is
+// decided by import order rather than by anything visible at the use site.
+// The shell's own qs.Ui TextField is the one that carries the theme. Nothing
+// else here needs Controls -- ListView and Text are QtQuick.
+// REQUIRED: this file calls Model.moveCursor and Model.rowArtUrl.
+// Without this import each is a ReferenceError raised inside
 // a signal handler -- invisible to qmllint, and it fails as a pane whose
 // arrow keys silently do nothing.
 import "Model.js" as Model
