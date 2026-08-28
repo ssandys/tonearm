@@ -94,6 +94,75 @@ Item {
     Quickshell.execDetached(argv)
   }
 
+  // One Process per call, created here and destroyed in onExited. Reassigning
+  // command on a running Process is silently ignored (galley trap #11), and a
+  // single shared Process would drop every overlapping browse request --
+  // which is exactly what happens when a keypress lands while a search is
+  // still in flight.
+  Component {
+    id: rpcComponent
+
+    Process {
+      id: rpc
+      property var callback: null
+      property string buffer: ""
+
+      stdout: SplitParser {
+        onRead: function (line) {
+          if (line && line.length > 0 && rpc.buffer === "") rpc.buffer = line
+        }
+      }
+
+      // onRunningChanged, NOT onExited. A failed spawn never emits exited()
+      // -- measured, and documented at Service.qml:52-56: the process goes
+      // straight to running=false without ever passing through true. Firing
+      // the callback from onExited would mean a failed spawn never calls back
+      // at all, so BrowsePane's `busy` flag would stay true forever and the
+      // pane would freeze with no error anywhere. onRunningChanged is the one
+      // drain signal that covers both a failed spawn and a normal exit.
+      //
+      // `done` guards against a double fire: onRunningChanged also runs on the
+      // false->true transition when the process starts, and a callback invoked
+      // twice would clear `busy` before the real reply arrives.
+      property bool done: false
+
+      onRunningChanged: {
+        if (rpc.running || rpc.done) return
+        rpc.done = true
+        var parsed = null
+        if (rpc.buffer.length > 0) {
+          try {
+            parsed = JSON.parse(rpc.buffer)
+          } catch (e) {
+            console.warn("tonearm: unparseable browse reply")
+          }
+        }
+        if (rpc.callback) rpc.callback(parsed)
+        rpc.destroy()
+      }
+    }
+  }
+
+  // Fire a browse op and hand the parsed reply to `callback`. The callback is
+  // guaranteed to run exactly once -- on a reply, on a crash, or on a failed
+  // spawn -- because the Process above drains on onRunningChanged rather than
+  // onExited. Callers rely on that guarantee to clear their `busy` flag; a
+  // path that can skip the callback freezes the pane silently.
+  function browse(args, callback) {
+    var argv = [root.ctlPath, "browse"]
+    for (var i = 0; i < args.length; i++) argv.push(String(args[i]))
+    var proc = rpcComponent.createObject(root, {
+      command: argv,
+      callback: callback
+    })
+    if (proc === null) {
+      console.warn("tonearm: could not create browse process")
+      if (callback) callback(null)
+      return
+    }
+    proc.running = true
+  }
+
   // Qt.resolvedUrl() percent-encodes reserved characters (a space becomes
   // %20), so a bare `.replace("file://", "")` would leave that escape in the
   // path and the spawn would fail on any install path containing one. A
