@@ -16,8 +16,15 @@ def _volume_of(roon_zone: dict) -> dict | None:
     if not outputs:
         return None
     raw = outputs[0].get("volume")
-    if not raw:
-        # A fixed-volume output has no volume object. Rendering a slider for it
+    if not raw or raw.get("type") == "incremental" or raw.get("value") is None:
+        # Many streamers expose no volume object at all (a fixed-volume
+        # output) -- `not raw` -- or type "incremental", which has no
+        # absolute value/min/max at all, only relative up/down steps `raw
+        # can neither read nor set a slider position for. Previously only
+        # the first case was handled, and an incremental output fell
+        # through to the fabricated {"value": 0, "min": 0, "max": 100}
+        # below -- a slider parked at zero for a zone whose real volume
+        # this can neither read nor set. Rendering a slider for either case
         # would be a lie, so the widget is told there is nothing to show.
         return None
     return {

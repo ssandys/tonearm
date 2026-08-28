@@ -58,8 +58,6 @@ Configure these from the widget's settings panel in the Omarchy shell:
 | Tint the seek bar with the album's color | on | Derives an accent color from the current track's album art and uses it for the seek bar fill. When off (or when no art is available), the theme's accent color is used instead. |
 | Album art size in the popup | 118px | Size of the album art shown in the popup, from 96 to 256 pixels. |
 | Show the volume slider | on | Shows or hides the volume control in the popup. |
-| Notify when the Roon Core becomes unreachable | on | Sends a desktop notification if tonearm loses its connection to Roon. |
-| Notify when the followed zone changes | off | Sends a desktop notification whenever the zone tonearm is displaying changes (for example, because you started playback somewhere else in Roon). |
 
 ## Media keys
 

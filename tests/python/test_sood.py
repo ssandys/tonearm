@@ -3,6 +3,7 @@ import random
 import struct
 import sys
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "scripts")))
@@ -107,21 +108,90 @@ class TestParseNeverRaises(unittest.TestCase):
 
 class TestCoreRecord(unittest.TestCase):
     def test_to_core_extracts_the_fields_we_use(self):
+        # Deliberately NOT 9150/9330 (DEFAULT_TCP_PORT/DEFAULT_HTTP_PORT):
+        # using the defaults here means a stub that always returns the
+        # default -- skipping both string->int coercion and the actual
+        # dict lookup -- would leave this green. Port selection is the
+        # trickiest thing in this project (see AGENTS.md); this fixture
+        # must actually exercise it.
         raw = {
-            "name": "yavin", "tcp_port": "9150", "http_port": "9330",
+            "name": "yavin", "tcp_port": "9151", "http_port": "9331",
             "unique_id": "96e11146", "display_version": "2.71 (build 1683)",
         }
         core = sood.to_core("192.168.50.118", raw, via="multicast")
         self.assertEqual(core["host"], "192.168.50.118")
         self.assertEqual(core["name"], "yavin")
-        self.assertEqual(core["tcp_port"], 9150)
-        self.assertEqual(core["http_port"], 9330)
+        self.assertEqual(core["tcp_port"], 9151)
+        self.assertEqual(core["http_port"], 9331)
         self.assertEqual(core["via"], "multicast")
 
     def test_to_core_defaults_ports_when_absent(self):
         core = sood.to_core("10.0.0.5", {"name": "x"}, via="scan")
         self.assertEqual(core["tcp_port"], 9150)
         self.assertEqual(core["http_port"], 9330)
+
+
+class TestLocalNetworksStayPrivate(unittest.TestCase):
+    """`_local_networks()` and the `_local_ipv4()` fallback must never hand
+    `discover()` a /24 outside private address space -- see Important 3 of
+    the final review. A network handing out globally-routable addresses
+    (hotel, campus, bridged VM, VPS) must not get 254 unsolicited TCP
+    connections from this daemon.
+    """
+
+    def test_local_networks_excludes_a_public_interface_address(self):
+        # eth0 is a normal private LAN address; eth1 is a real, globally
+        # routable address (Google's public DNS range) as an interface
+        # could plausibly carry on a network that hands those out directly.
+        # Only eth0's /24 must survive.
+        addrs = {"eth0": "192.168.1.50", "eth1": "8.8.8.8"}
+        with unittest.mock.patch.object(
+            sood.socket, "if_nameindex", return_value=[(1, "eth0"), (2, "eth1")]
+        ), unittest.mock.patch.object(
+            sood, "_iface_ipv4", side_effect=lambda name: addrs[name]
+        ):
+            nets = sood._local_networks()
+        self.assertEqual([str(n) for n in nets], ["192.168.1.0/24"])
+
+    def test_local_networks_excludes_the_tailscale_cgnat_range(self):
+        # Measured on the dev machine (see the module docstring): an exit
+        # node's policy routes can make an interface-level trick land on a
+        # 100.64.0.0/10 address. is_private structurally excludes that
+        # whole range, independent of the interface-name ignore list.
+        with unittest.mock.patch.object(
+            sood.socket, "if_nameindex", return_value=[(1, "eth0")]
+        ), unittest.mock.patch.object(
+            sood, "_iface_ipv4", return_value="100.94.206.126"
+        ):
+            nets = sood._local_networks()
+        self.assertEqual(nets, [])
+
+    def test_local_ipv4_fallback_rejects_a_public_address(self):
+        with unittest.mock.patch.object(
+            sood, "_local_networks", return_value=[]
+        ), unittest.mock.patch.object(
+            sood, "_local_ipv4", return_value="8.8.8.8"
+        ):
+            # discover() with a zero listen timeout still goes through the
+            # multicast phase (no replies expected here) and then the /24
+            # fallback path this test targets; assert only that no scan
+            # target reached _port_open by checking discover() returns []
+            # rather than hanging on 254 real connect attempts.
+            found = sood.discover(timeout=0)
+        self.assertEqual(found, [])
+
+    def test_local_ipv4_fallback_accepts_a_private_address(self):
+        with unittest.mock.patch.object(
+            sood, "_local_networks", return_value=[]
+        ), unittest.mock.patch.object(
+            sood, "_local_ipv4", return_value="192.168.50.5"
+        ), unittest.mock.patch.object(
+            sood, "_port_open", return_value=False
+        ) as port_open:
+            sood.discover(timeout=0)
+        # _port_open is only reached at all if the fallback network passed
+        # the private-space check and produced scan targets.
+        self.assertTrue(port_open.called)
 
 
 if __name__ == "__main__":

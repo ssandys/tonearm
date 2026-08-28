@@ -227,8 +227,8 @@ function pickAccent(colors, bgHex) {
 }
 
 function formatTime(sec) {
-  var s = Math.floor(sec || 0)
-  if (!(s > 0)) s = 0          // also catches NaN
+  var s = Math.floor(sec || 0)  // `|| 0` already replaces NaN/undefined with 0
+  if (!(s > 0)) s = 0          // clamps a negative duration to zero
   var h = Math.floor(s / 3600)
   var m = Math.floor((s % 3600) / 60)
   var r = s % 60

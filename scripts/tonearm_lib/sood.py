@@ -17,12 +17,19 @@ rather than from a routing decision; see `_local_networks`.
 
 from __future__ import annotations
 
-import fcntl
 import ipaddress
 import socket
 import struct
 import time
 from concurrent.futures import ThreadPoolExecutor
+
+try:
+    import fcntl  # POSIX-only; guarded so importing this module (and
+                  # therefore core.py/tonearmd) never hard-fails on a
+                  # platform without it. Only `_iface_ipv4` needs it.
+except ImportError:  # pragma: no cover - not exercised on Linux, the only
+                      # platform this daemon ships on
+    fcntl = None
 
 SOOD_PORT = 9003
 SOOD_MULTICAST = "239.255.90.90"
@@ -126,6 +133,8 @@ def _iface_ipv4(name: str) -> str | None:
     instead of the real LAN address. Asking each interface directly for its
     own address sidesteps routing-table policy entirely.
     """
+    if fcntl is None:
+        return None
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         packed = struct.pack("256s", name[:15].encode())
@@ -138,7 +147,19 @@ def _iface_ipv4(name: str) -> str | None:
 
 
 def _local_networks() -> list[ipaddress.IPv4Network]:
-    """Local /24s to scan, one per non-virtual interface with an IPv4 address."""
+    """Local /24s to scan, one per non-virtual interface with a PRIVATE IPv4 address.
+
+    The private check is deliberate, not incidental: on a network handing
+    out globally-routable addresses (a hotel, a campus, a bridged VM, a VPS)
+    an interface can carry a public address, and scanning "whatever /24 the
+    interface is on" would then port-scan 254 hosts on the public internet
+    that never asked for it. Restricting to `is_private` keeps this to the
+    address space it is actually meant for. It also structurally excludes
+    100.64.0.0/10 (carrier-grade NAT, e.g. Tailscale), closing that hazard
+    for any interface `_iface_ipv4` sees that the name-prefix ignore list
+    above does not catch -- `is_private` does not depend on interface naming
+    at all.
+    """
     nets: list[ipaddress.IPv4Network] = []
     try:
         names = [name for _, name in socket.if_nameindex()]
@@ -149,7 +170,9 @@ def _local_networks() -> list[ipaddress.IPv4Network]:
             continue
         addr = _iface_ipv4(name)
         if addr:
-            nets.append(ipaddress.ip_network(addr + "/24", strict=False))
+            net = ipaddress.ip_network(addr + "/24", strict=False)
+            if net.is_private:
+                nets.append(net)
     return nets
 
 
@@ -198,9 +221,15 @@ def discover(timeout: float = 6.0) -> list[dict]:
     nets = _local_networks()
     if not nets:
         local = _local_ipv4()
-        if not local:
-            return []
-        nets = [ipaddress.ip_network(local + "/24", strict=False)]
+        if local:
+            # Same private-space restriction as _local_networks(), and for
+            # the same reason: `_local_ipv4`'s connect-trick fallback can
+            # return a globally-routable address (or, on this machine, the
+            # Tailscale CGNAT one -- see the module docstring), and either
+            # would otherwise send an unsolicited /24 scan outside the LAN.
+            net = ipaddress.ip_network(local + "/24", strict=False)
+            if net.is_private:
+                nets = [net]
     hosts = [str(h) for net in nets for h in net.hosts()]
     with ThreadPoolExecutor(max_workers=128) as pool:
         candidates = [

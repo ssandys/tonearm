@@ -8,7 +8,7 @@ readonly unit_dir="$HOME/.config/systemd/user"
 readonly target_unit="$unit_dir/tonearmd.service"
 
 missing=()
-for command in systemctl curl; do
+for command in systemctl; do
   command -v "$command" >/dev/null 2>&1 || missing+=("$command")
 done
 # Probe /usr/bin/python explicitly, not whichever python3 a version manager puts
