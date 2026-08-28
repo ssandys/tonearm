@@ -10,7 +10,6 @@ import logging
 import os
 import sys
 import threading
-import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vendor"))
 
@@ -36,6 +35,47 @@ APPINFO = {
 # RoonApi.__init__ blocks forever and the daemon looks "healthy" while doing
 # nothing. See docs/superpowers/specs/2026-08-27-tonearm-design.md S2.1.
 CONNECT_TIMEOUT = 10.0
+
+# Seconds to wait, after signalling a timed-out attempt to give up, for it to
+# actually finish before moving on to the next candidate port regardless.
+#
+# `_zones`/`_outputs` are mutable CLASS-level defaults in the vendored
+# roonapi (roonapi.py:51-55): the async "zones"/"outputs" subscription
+# writes into them by item-mutation (`self._zones[zone_id] = zone`,
+# roonapi.py:900-903), which only becomes private to one instance once that
+# instance does its own `self._zones = self._get_zones()` reassignment,
+# shortly after registration. With one port to try, at most one RoonApi
+# instance ever existed, so a second instance racing that same window was
+# impossible. With port fallback, an abandoned instance from a timed-out
+# port and a fresh instance for the next port can now both exist at once --
+# if the abandoned one ever reaches registration late and its subscription
+# fires before it takes its own private copy, it can write into the dict the
+# new instance is also relying on. This grace period exists to shrink that
+# window and, for one sub-case, close it outright -- not to guarantee
+# non-overlap in every case. Read on for exactly which.
+#
+# It reliably closes the window for an abandoned attempt that eventually
+# reaches registration late (e.g. a genuinely slow-but-working port, not a
+# dead one) -- once ready is True, its own zones/outputs prefetch is
+# time-bounded on retry count alone (roonapi.py:983-996, ~2.5s per call,
+# independent of `_exit` or socket state), so it reliably finishes and takes
+# its own private copy well inside this grace period.
+#
+# It does NOT reliably close the window for an abandoned attempt that never
+# gets past the initial handshake read at all -- port 9150's actual observed
+# behavior against yavin (TCP connects, then silence, forever). Measured
+# directly: a local test server reproducing that exact behavior (accept the
+# connection, send nothing) left the abandoned thread still blocked in that
+# read even after stop()'s self._socket.close() and this full grace period
+# elapsed -- it only unblocked once the test closed the server socket and a
+# RST arrived. Nothing on our side can manufacture that RST; only the remote
+# Core (or a firewall) can, and by definition it never does for this
+# specific failure. No finite STOP_GRACE closes this sub-case, so this is a
+# deliberately bounded, not eliminated, residual risk: on timeout this code
+# proceeds to the next port anyway (logged loudly) rather than letting one
+# permanently dead port block discovery of a working one forever. See the
+# note in `_try_port` and the fix-round-2 report for the full reasoning.
+STOP_GRACE = 5.0
 
 
 class RoonSession:
@@ -129,6 +169,12 @@ class RoonSession:
     def _connect(self, token) -> RoonApi | None:
         """Try each candidate port in turn, each bounded by CONNECT_TIMEOUT.
         Returns a ready RoonApi, or None if nothing answered on any port.
+
+        Ports are tried strictly one at a time, and `_try_port` does not
+        return control here until a timed-out attempt is confirmed torn down
+        (or STOP_GRACE elapses) -- so this loop never has two RoonApi
+        instances alive at once under normal operation. See STOP_GRACE's
+        comment for the one case that can still leave an overlap.
         """
         host = self._cfg["host"]
         ports = self._candidate_ports()
@@ -168,6 +214,11 @@ class RoonSession:
         our own thread and bound it with an external join timeout. __new__
         is called separately from __init__ so there is a handle to `api`
         to call .stop() on even if __init__ itself never returns.
+
+        A timed-out attempt is also joined again (bounded by STOP_GRACE)
+        after stop() before this returns, so `_connect`'s loop does not start
+        a second RoonApi instance while this one might still be alive and
+        able to mutate the shared class-level zones/outputs dicts.
         """
         api = RoonApi.__new__(RoonApi)
         errors: list[Exception] = []
@@ -185,13 +236,24 @@ class RoonSession:
         if thread.is_alive():
             # Silent hang: TCP connected but the WebSocket handshake never
             # answered -- exactly what the SOOD-advertised tcp_port does on
-            # this Roon version. Signal the stuck init to give up; the
-            # abandoned thread unwinds on its own once _exit is seen.
+            # this Roon version. Signal the stuck init to give up, then wait
+            # (bounded) to actually confirm it has, before returning -- so
+            # the caller cannot start a second RoonApi instance while this
+            # one might still register and mutate the shared class-level
+            # zones/outputs dicts. See STOP_GRACE's comment for why this is
+            # bounded rather than unconditional, and what it does not cover.
             LOG.warning("no response from %s:%s within %.0fs", host, port, CONNECT_TIMEOUT)
             try:
                 api.stop()
             except Exception:
                 LOG.exception("error tearing down timed-out connection to %s:%s", host, port)
+            thread.join(STOP_GRACE)
+            if thread.is_alive():
+                LOG.error(
+                    "connection attempt to %s:%s did not unwind within %.0fs of "
+                    "stop(); abandoning it and moving on. It may still be running "
+                    "and could briefly overlap with the next connection attempt.",
+                    host, port, STOP_GRACE)
             return None
 
         if errors:
