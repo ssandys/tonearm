@@ -1,6 +1,19 @@
 [Unit]
 Description=tonearm — Roon bridge for the Omarchy shell bar
 After=graphical-session.target
+# Retry forever. The daemon's only retry mechanism is exiting non-zero and
+# letting Restart=on-failure below bring it back, so systemd's default start
+# limit (5 starts / 10s) is the thing that would cap it -- and hitting that cap
+# leaves the unit `failed` and silent, which is strictly worse than merely
+# disconnected: the bar shows a stale track and nothing retries.
+#
+# Today the cap cannot be reached, but only by accident: sood.discover()'s
+# receive loop runs for its full timeout (6s default) even when no interface
+# has a usable address, so a fail-restart cycle is ~9s and at most 2 starts
+# land in any rolling 10s window. Nothing designed that margin and no test
+# guards it -- shortening that timeout, or swapping the vendored library,
+# would silently reintroduce "the daemon never retries".
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

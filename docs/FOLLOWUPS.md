@@ -29,31 +29,13 @@ live-disconnect signal to wire it to.
 (roonapi exposes callbacks) and distinguishing a durable loss from a reconnect
 blip. This is the highest-value item here.
 
-## 2. `StartLimitIntervalSec` is unset, and the margin protecting it is accidental
-
-`systemd/tonearmd.service` sets `Restart=on-failure` / `RestartSec=3` but no
-start-limit override, so systemd's defaults apply (5 starts / 10s). The daemon
-cannot currently trip that limit — but only because `sood.discover()` has a hard
-floor equal to its `timeout` parameter (default 6.0s): its receive loop runs to
-completion even when no interface has a usable address. That makes a
-fail-restart cycle ~9s, so at most 2 starts land in any rolling 10s window.
-
-The margin falls out of a default timeout and a vendored library's
-spin-until-joined behaviour, not out of a deliberate safeguard, and no test
-guards it. Shortening that default — or swapping the library — would silently
-reintroduce "the daemon never retries", in the harder-to-diagnose form of a
-`failed` unit rather than a merely disconnected one.
-
-**Fix:** `StartLimitIntervalSec=0` (or a generous burst) in the unit file.
-One line of cheap insurance.
-
-## 3. `position()` clamps to `length` only while playing
+## 2. `position()` clamps to `length` only while playing
 
 A paused zone reporting `position > length` returns the unclamped value, so the
 seek bar could render past its end. Low probability (depends on Roon's data),
 cosmetic.
 
-## 4. The subscribe handshake calls `conn.sendall()` under `Server._lock`
+## 3. The subscribe handshake calls `conn.sendall()` under `Server._lock`
 
 A stalled new client can block `broadcast()` to every other subscriber, and
 block further subscribes, for as long as that send blocks. This extends the
@@ -62,7 +44,7 @@ inherited rather than chosen. The code now carries a comment saying so, which
 makes the decision explicit but does not change the availability characteristic.
 Revisit if a subscriber is ever slow or remote.
 
-## 5. `setup.sh` uses `cp` where the modelled script uses `ln -s`
+## 4. `setup.sh` uses `cp` where the modelled script uses `ln -s`
 
 `stappmus.audio:51-57` symlinks the unit and guards against replacing an
 unrelated service file. `cp` is non-atomic (an interrupted copy leaves a
@@ -70,25 +52,25 @@ truncated unit) and will clobber whatever sits at the target. Low practical risk
 given the unique unit name, but the script we modelled on deliberately does
 better.
 
-## 6. `Cache._prune()`'s `getmtime` is unguarded
+## 5. `Cache._prune()`'s `getmtime` is unguarded
 
 `listdir`/`unlink` are guarded; `getmtime` is not. Two rapid track changes both
 completing fetches could race a `FileNotFoundError` out of a function whose
 docstring promises best-effort.
 
-## 7. Nothing enforces `Model.js`'s ES3-subset or no-mutable-module-state rules
+## 6. Nothing enforces `Model.js`'s ES3-subset or no-mutable-module-state rules
 
 Both constraints exist because `Model.js` is loaded by both node and Qt's V4,
 and both are currently checked by human review on every change. A lint-style
 test would close a whole class of regression. This is the constraint most likely
 to be broken by someone who has not read `AGENTS.md`.
 
-## 8. Untested branch: `formatTime` with `h > 0 && m >= 10`
+## 7. Untested branch: `formatTime` with `h > 0 && m >= 10`
 
 E.g. `4200` → `"1:10:00"`. Correct by construction, but the minute-padding rule
 has a branch no test exercises.
 
-## 9. Tidiness
+## 8. Tidiness
 
 - The `(started_at, id)` ranking tuple is duplicated between `Arbiter.observe()`'s
   recompute and `select()`'s active branch.
@@ -108,9 +90,19 @@ has a branch no test exercises.
 - `THEME_BACKGROUND` and `CONTRAST_FLOOR` are exported beyond the interface the
   plan specified.
 
-## Closed by the final review's fix wave
+## Closed
 
-Recorded so they are not re-opened:
+Recorded so they are not re-opened.
+
+Closed after the final review:
+
+- Systemd's default start limit (5 starts / 10s) could have capped the daemon's
+  only retry mechanism, leaving the unit `failed` and silent rather than merely
+  disconnected. It was unreachable in practice, but only because
+  `sood.discover()`'s 6s floor makes a fail-restart cycle ~9s — an accidental
+  margin no test guards. Now pinned with `StartLimitIntervalSec=0` in `[Unit]`.
+
+Closed by the final review's fix wave:
 
 - Incremental-volume outputs reported a fabricated `value: 0` instead of `None`,
   parking the popup slider at zero for a zone whose volume cannot be read.
