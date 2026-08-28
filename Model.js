@@ -131,6 +131,115 @@ function position(zone, recvMs, nowMs) {
   return p
 }
 
+// Built, never typed. A literal astral character does not survive every editing
+// path, and the failure mode is an invisible widget with nothing logged. The
+// tests assert the CODEPOINT, because a shape check passes on a typo too.
+var GLYPH_PLAYING = String.fromCodePoint(0xf040a)   // nf-md-play
+var GLYPH_PAUSED  = String.fromCodePoint(0xf03e4)   // nf-md-pause
+var GLYPH_IDLE    = String.fromCodePoint(0xf0387)   // nf-md-music
+var GLYPH_FAULT   = String.fromCodePoint(0xf0026)   // nf-md-alert
+
+// Severity colors live here, not in Commons/Color.qml: that exposes only
+// background, foreground, accent and the per-surface roles -- there is no
+// Color.red or Color.yellow to bind to. headway carries its own for the same
+// reason. Chosen against the theme's own red and yellow.
+var COLOR_ERROR = "#c38b7b"
+var COLOR_WARN  = "#6B5E73"
+
+// Read with hasOwnProperty only. A bare STATUS_SEVERITY[key] walks the
+// prototype chain, so a status of "constructor" or "toString" would return a
+// truthy inherited member and report a broken daemon as healthy.
+var STATUS_SEVERITY = {
+  ok: "ok",
+  connecting: "warn",
+  unpaired: "warn",
+  unreachable: "error"
+}
+
+function severityFor(status) {
+  if (typeof status !== "string") return "error"
+  if (!Object.prototype.hasOwnProperty.call(STATUS_SEVERITY, status)) return "error"
+  return STATUS_SEVERITY[status]
+}
+
+function nowPlayingOf(state) {
+  if (!state || !state.zone || !state.zone.now_playing) return null
+  return state.zone.now_playing
+}
+
+function barState(state, recvMs, nowMs) {
+  // A null state means the relay has not delivered a line yet, which in
+  // practice means tonearmd is not running.
+  if (!state) return { severity: "error", glyph: GLYPH_FAULT, showArt: false }
+
+  var severity = severityFor(state.status)
+  if (severity !== "ok") {
+    return { severity: severity, glyph: GLYPH_FAULT, showArt: false }
+  }
+
+  var zone = state.zone
+  if (!zone) return { severity: "ok", glyph: GLYPH_IDLE, showArt: false }
+
+  var np = nowPlayingOf(state)
+  var showArt = !!(np && np.image_key)
+  var glyph = GLYPH_IDLE
+  if (zone.state === "playing") glyph = GLYPH_PLAYING
+  else if (zone.state === "paused") glyph = GLYPH_PAUSED
+
+  return { severity: "ok", glyph: glyph, showArt: showArt }
+}
+
+function tooltipText(state) {
+  if (!state) return "tonearmd not running"
+  var severity = severityFor(state.status)
+  if (state.status === "unpaired") {
+    return "Enable tonearm in Roon → Settings → Extensions"
+  }
+  if (severity !== "ok") return "Roon Core unreachable"
+
+  var coreName = (state.core && state.core.name) ? state.core.name : "Roon"
+  if (!state.zone) return "Nothing playing · " + coreName
+
+  var np = nowPlayingOf(state)
+  if (!np) return "Nothing playing · " + coreName
+  var head = (np.title || "Unknown title")
+  if (np.artist) head = head + " — " + np.artist
+  return head + " · " + (state.zone.name || coreName)
+}
+
+function zoneList(state) {
+  if (!state || !state.zones) return []
+  var pinnedId = (state.zone && state.zone.pinned) ? state.zone.id : null
+  var out = []
+  for (var i = 0; i < state.zones.length; i++) out.push(state.zones[i])
+  out.sort(function (a, b) {
+    var ap = (a.id === pinnedId) ? 0 : 1
+    var bp = (b.id === pinnedId) ? 0 : 1
+    if (ap !== bp) return ap - bp
+    var an = String(a.name || "")
+    var bn = String(b.name || "")
+    if (an < bn) return -1
+    if (an > bn) return 1
+    // Total order. Without this, equal names reshuffle under V4's unstable sort
+    // and the switcher visibly jumps between pushes.
+    var ai = String(a.id || "")
+    var bi = String(b.id || "")
+    if (ai < bi) return -1
+    if (ai > bi) return 1
+    return 0
+  })
+  return out
+}
+
+// With tonearmd down, `tonearmctl subscribe` exits immediately, so a Process
+// that respawns on exit becomes a fork loop. Service.qml waits this long first.
+function nextRetryDelay(attempt) {
+  var n = attempt || 0
+  if (n < 0) n = 0
+  var ms = 1000 * Math.pow(2, n)
+  return ms > 30000 ? 30000 : ms
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     THEME_ACCENT: THEME_ACCENT,
@@ -143,6 +252,16 @@ if (typeof module !== "undefined") {
     pickAccent: pickAccent,
     formatTime: formatTime,
     formatRemaining: formatRemaining,
-    position: position
+    position: position,
+    GLYPH_PLAYING: GLYPH_PLAYING,
+    GLYPH_PAUSED: GLYPH_PAUSED,
+    GLYPH_IDLE: GLYPH_IDLE,
+    GLYPH_FAULT: GLYPH_FAULT,
+    COLOR_ERROR: COLOR_ERROR,
+    COLOR_WARN: COLOR_WARN,
+    barState: barState,
+    tooltipText: tooltipText,
+    zoneList: zoneList,
+    nextRetryDelay: nextRetryDelay
   }
 }
