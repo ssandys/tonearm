@@ -42,8 +42,6 @@ Panel {
   // load. `display` is Model.barState's result instead.
   readonly property var st: service.state
   readonly property var display: Model.barState(service.state, service.receivedAt, clock.now)
-  readonly property bool hasArt: root.display.showArt
-  readonly property string artSource: root.hasArt ? Model.artUrl(service.state, 32) : ""
 
   Service {
     id: service
@@ -75,12 +73,15 @@ Panel {
   // No fixedWidth/fixedHeight override here, matching galley and colophon:
   // BarIconButton sizes itself from Style.bar.iconSlot, so the widget's
   // width in the bar is a constant that does not depend on what state.zone
-  // reports. The brief's draft laid the art thumbnail out in a RowLayout
-  // beside the glyph, whose own comment said the width "must not vary with
-  // what is playing" -- but a RowLayout with a conditionally-visible child
-  // does exactly that. The art thumbnail below is a corner overlay instead
-  // (the same idiom headway's unread-count badge and colophon's status
-  // badge both use), which never perturbs BarIconButton's own layout.
+  // reports.
+  //
+  // No album art here. An earlier version overlaid a cover-art thumbnail in
+  // the glyph's corner, but at icon-slot resolution (a ~16-27px square) it
+  // read as an indistinct smear, not art -- illegible rather than useful.
+  // The bar button stays a single static Nerd Font glyph (play/pause/idle/
+  // alert), which is legible at this size and is what actually carries the
+  // state. Model.artUrl still exists and is tested; the popup (Task 16) is
+  // where the art has room to mean something.
   BarIconButton {
     id: button
     anchors.fill: parent
@@ -110,35 +111,6 @@ Panel {
     onPressed: function (which) {
       if (which === Qt.MiddleButton) { service.send("playpause"); return }
       root.toggle()
-    }
-
-    // Album art thumbnail, shown only once there is one. Anchored to the
-    // glyph's own ink corner via glyphPaintedWidth/fontSize the same way
-    // headway's badge and colophon's status badge are, so it sits correctly
-    // no matter where OpticalGlyph centers the glyph inside the icon slot.
-    // No MouseArea here -- a bare Rectangle/Image consumes no mouse events,
-    // so click-to-toggle, middle-click-playpause and the tooltip all keep
-    // working straight through it.
-    Rectangle {
-      visible: root.hasArt
-      width: Style.space(11)
-      height: width
-      radius: 2
-      color: Color.background
-      clip: true
-      anchors.horizontalCenter: parent.horizontalCenter
-      anchors.horizontalCenterOffset: button.glyphPaintedWidth / 2
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.verticalCenterOffset: -button.fontSize * 0.5
-
-      Image {
-        anchors.fill: parent
-        source: root.artSource
-        sourceSize.width: 32
-        sourceSize.height: 32
-        fillMode: Image.PreserveAspectCrop
-        asynchronous: true
-      }
     }
   }
 }
