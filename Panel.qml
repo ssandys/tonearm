@@ -41,7 +41,7 @@ Panel {
   // on a derived type at compile time, so the whole file would fail to
   // load. `display` is Model.barState's result instead.
   readonly property var st: service.state
-  readonly property var display: Model.barState(service.state, service.receivedAt, clock.now)
+  readonly property var display: Model.barState(root.st, service.receivedAt, clock.now)
 
   Service {
     id: service
@@ -55,7 +55,7 @@ Panel {
     id: clock
     property real now: Date.now()
     interval: 1000
-    running: root.opened || (root.st && root.st.zone && root.st.zone.state === "playing")
+    running: root.opened || root.display.playing
     repeat: true
     onTriggered: now = Date.now()
   }
@@ -97,10 +97,15 @@ Panel {
     // idle) dims via root.dim, a Qt.darker() of the bar's own foreground,
     // rather than an alpha blend -- there is no Color.selection or
     // Color.lighterBackground here to blend toward.
+    //
+    // root.display.playing, not a hand-rolled `root.st.zone.state ===
+    // "playing"` check: Model.js already derives the identical condition to
+    // pick the glyph, and duplicating it here bypasses the one file this
+    // codebase keeps test-free of that logic.
     foreground: {
       if (root.display.severity === "error") return Model.COLOR_ERROR
       if (root.display.severity === "warn") return Model.COLOR_WARN
-      if (root.st && root.st.zone && root.st.zone.state === "playing") return root.barForeground
+      if (root.display.playing) return root.barForeground
       return root.dim
     }
 
