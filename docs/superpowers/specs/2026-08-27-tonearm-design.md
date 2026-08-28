@@ -393,9 +393,18 @@ Also measured: `String(color)` from `ColorQuantizer` yields `#rrggbb` (7 chars)
 with alpha 1.0, not the `#aarrggbb` that `normalizeHex` also tolerates. The
 defensive alpha-stripping is harmless and stays.
 
-The bar module is a fixed-width art thumbnail plus play state, with no text. Title and
-artist live in `tooltipText()`. The right-hand bar section already carries 18 widgets;
-an unbounded track title does not belong there.
+The bar module is a fixed-width **state glyph only** — no text and no album art.
+Title and artist live in `tooltipText()`. The right-hand bar section already carries
+18 widgets; an unbounded track title does not belong there.
+
+**Revised after seeing it running.** The design originally called for a small cover
+thumbnail beside the glyph. Built and deployed, it did not survive contact with the
+real bar: at a ~16px icon slot inside a 40px bar the thumbnail is roughly 10px of
+image and reads as a coloured blur, not as art. It was removed at the user's
+request once they saw it. Album art still appears in the popup at `artSizePx`
+(118 by default), where it has room to be legible, and `Model.artUrl` remains for
+that use. This is the one decision in this document that was settled by looking
+rather than by reasoning.
 
 ---
 
