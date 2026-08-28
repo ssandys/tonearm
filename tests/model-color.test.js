@@ -52,6 +52,55 @@ test("pickAccent is deterministic when saturation ties", () => {
   assert.strictEqual(a, b)
 })
 
+test("pickAccent lightens a dark vivid color when nothing legible is vivid enough", () => {
+  // A dark cover: the only entry that clears the contrast floor on its own
+  // (#8a8588, sat 0.036) is drab -- below DRAB (0.35) -- so it must not win
+  // outright just for being legible. #2a0a0a (sat 0.762) fails the floor at
+  // its own lightness (contrast 1.07) but is well above MIN_LIGHTNESS, so it
+  // gets lightened until it clears the floor, and wins on its ORIGINAL
+  // saturation. Fixture values are exercised, not asserted-equal-to-a-default:
+  // both candidates are real colors with distinct, non-boundary properties.
+  const result = M.pickAccent(["#8a8588", "#2a0a0a"], "#0c0b0c")
+  assert.notStrictEqual(result, "#b59790", "must not fall back to the theme accent")
+  assert.notStrictEqual(result, "#8a8588", "must not settle for the drab legible entry")
+  assert.ok(M.contrastRatio(result, "#0c0b0c") >= 3.0, "the lightened result must itself be legible")
+  // Hue preserved: the lifted color is still recognizably a red, i.e. its red
+  // channel is highest and clearly separated from green/blue.
+  const r = parseInt(result.substring(1, 3), 16)
+  const g = parseInt(result.substring(3, 5), 16)
+  const b = parseInt(result.substring(5, 7), 16)
+  assert.ok(r > g + 20 && r > b + 20, "hue must stay red-dominant after lightening: got " + result)
+})
+
+test("pickAccent does not lighten a near-black entry -- compression noise, not a real hue", () => {
+  // #060301 has HSL lightness ~0.014, well under MIN_LIGHTNESS (0.10):
+  // lightening it would invent a vivid hue that was never really in the
+  // artwork. #050505 is a pure, zero-saturation gray. Neither clears the
+  // floor on its own and neither may be lifted, so this must fall all the
+  // way back to the theme accent.
+  assert.strictEqual(M.pickAccent(["#060301", "#050505"], "#0c0b0c"), "#b59790")
+})
+
+test("pickAccent ranks the lifted bucket by ORIGINAL saturation, not the lightened result", () => {
+  // Both candidates are illegible as-is (contrast < 3.0 against #0c0b0c) and
+  // both are liftable, so both compete purely inside the lifted bucket -- no
+  // legible entry present to win outright and mask a ranking bug, unlike a
+  // prior version of this test whose #aa6848 fixture won via the legible
+  // fast path regardless of what these two did.
+  //
+  // #0f0c92 (deep blue-violet, ORIGINAL saturation 0.918) beats #310c0c
+  // (dark red, ORIGINAL saturation 0.755) under the correct rule -- rank by
+  // the saturation of the color as quantized, before lightening. But
+  // #0f0c92's own lightness is close to 0.5, so lifting it toward the
+  // contrast floor washes it out fast: its LIFTED saturation (0.704) is
+  // actually LOWER than #310c0c's LIFTED saturation (0.756). A regression
+  // that ranked by the lifted color's saturation instead of the original
+  // would therefore pick the other candidate -- a different, wrong, hex.
+  const colors = ["#0f0c92", "#310c0c"]
+  const result = M.pickAccent(colors, "#0c0b0c")
+  assert.strictEqual(result, "#4b47f0", "must lift and return #0f0c92 (higher ORIGINAL saturation), not #310c0c")
+})
+
 test("artUrl builds a sized URL against the core's http port", () => {
   // http_port is deliberately NOT 9330 (artUrl's own fallback default) --
   // a regression that ignored state.core.http_port entirely and always
