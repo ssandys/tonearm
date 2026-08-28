@@ -1,0 +1,14 @@
+{
+  "zone_id": "1601abc",
+  "display_name": "Living Room",
+  "state": "playing",
+  "outputs": [ { "output_id": "o1", "display_name": "Living Room",
+                 "volume": { "type": "number", "min": 0, "max": 100, "step": 1,
+                             "value": 62, "is_muted": false } } ],
+  "now_playing": {
+    "seek_position": 271,
+    "length": 585,
+    "image_key": "a1b2c3",
+    "three_line": { "line1": "Blue Train", "line2": "John Coltrane", "line3": "Blue Train" }
+  }
+}
