@@ -42,16 +42,22 @@ echo "== python =="
 # under the CWD matching test*.py, and scripts/ is not a package root.
 python_rc=0
 if [ -d tests/python ]; then
-  /usr/bin/python -m unittest discover -s tests/python -t . -v || {
-    echo "FAILED: python" >&2; exit 1; }
+  /usr/bin/python -m unittest discover -s tests/python -t . -v || python_rc=$?
+  # 5 means "no tests collected" (Python 3.12+), which is valid only before the
+  # first suite lands. Any other non-zero is a real failure.
+  if [ "$python_rc" -eq 5 ]; then
+    echo "  no python tests collected yet"
+    python_rc=0
+  fi
 else
   echo "  no python tests yet, skipped"
 fi
 
 echo "== javascript =="
+# Auto-discovery finds tests/*.test.js. Bare form is used because passing an empty
+# directory as an argument throws MODULE_NOT_FOUND in Node.js.
 js_rc=0
-if [ -f tests/manifest.test.js ]; then node --test tests/manifest.test.js || js_rc=$?; fi
-if [ -f tests/model.test.js ]; then node --test tests/model.test.js || js_rc=$?; fi
+node --test || js_rc=$?
 
 # Both suites always run, and the exit code is decided here. Exiting early on a
 # Python failure -- as an earlier version did -- silently skipped the JS suite
