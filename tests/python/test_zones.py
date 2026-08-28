@@ -88,6 +88,41 @@ class TestArbiter(unittest.TestCase):
         a.select(listing)
         self.assertFalse(listing[0]["pinned"])
 
+    def test_recency_wins_even_when_the_more_recent_zone_has_the_smaller_id(self):
+        # Regression guard: a transition-blind implementation that just
+        # picked max(active, key=id) would pass every other test in this
+        # file, because in all of them the more-recently-started zone
+        # also happens to have the larger id. Here zone "2" starts first
+        # and zone "1" starts later, so recency and id order disagree --
+        # only real recency tracking gets this right.
+        a = zones.Arbiter()
+        a.observe([z("2", "B", "playing"), z("1", "A", "stopped")])
+        a.observe([z("2", "B", "playing"), z("1", "A", "playing")])
+        listing = [z("2", "B", "playing"), z("1", "A", "playing")]
+        self.assertEqual(a.select(listing)["id"], "1")
+
+    def test_the_remaining_zone_takes_over_when_the_leader_pauses_and_holds_after_it_also_pauses(self):
+        # Regression: B starts after A and becomes the followed zone. When
+        # B pauses, A is still playing and must take over -- that is not a
+        # transition into playing for anyone, so an implementation that
+        # only updates the followed zone on such a transition would keep
+        # pointing at B. Once A also pauses, the bar must stay on A (the
+        # zone that was actually last playing), not snap back to B.
+        a = zones.Arbiter()
+        a.observe([z("1", "A", "playing")])
+
+        a.observe([z("1", "A", "playing"), z("2", "B", "playing")])
+        listing = [z("1", "A", "playing"), z("2", "B", "playing")]
+        self.assertEqual(a.select(listing)["id"], "2")
+
+        a.observe([z("1", "A", "playing"), z("2", "B", "paused")])
+        listing = [z("1", "A", "playing"), z("2", "B", "paused")]
+        self.assertEqual(a.select(listing)["id"], "1")
+
+        a.observe([z("1", "A", "paused"), z("2", "B", "paused")])
+        listing = [z("1", "A", "paused"), z("2", "B", "paused")]
+        self.assertEqual(a.select(listing)["id"], "1")
+
 
 if __name__ == "__main__":
     unittest.main()

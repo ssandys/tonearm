@@ -28,14 +28,20 @@ class Arbiter:
         self.pinned_id = None
 
     def observe(self, zones: list[dict]) -> None:
-        """Record play-start transitions. Call once per Roon update.
+        """Record play-start transitions. Call once per Roon update, with
+        the complete current zone listing, immediately before `select()`.
 
-        `_last_followed` is updated here, at the moment a zone transitions
-        into playing -- not in `select()`. If it were only ever set as a
-        side effect of `select()`, a caller that observed a zone starting
-        and pausing without an intervening `select()` call would find no
-        followed zone recorded, and the paused-zone fallback below would
-        incorrectly return None instead of the zone that was playing.
+        `_last_followed` is maintained here rather than in `select()`, so
+        that `select()` stays a pure read. It must track the current
+        winner among zones active IN THIS LISTING -- not just "the last
+        zone that ever transitioned into playing" -- because the winner
+        can also change when some OTHER zone drops out of the active set
+        (e.g. it pauses). That is not a transition into playing for
+        anyone, so a version of this method that only updated
+        `_last_followed` inside the transition check above would leave it
+        stuck on a zone that is no longer active, and a later "nothing is
+        active" cycle would incorrectly fall back to that stale zone
+        instead of the one that was actually still playing.
         """
         for zone in zones:
             zid = zone.get("id", "")
@@ -43,8 +49,17 @@ class Arbiter:
             was = self._last_state.get(zid)
             if now in ACTIVE and was not in ACTIVE:
                 self._started_at[zid] = next(self._counter)
-                self._last_followed = zid
             self._last_state[zid] = now
+
+        active_ids = [z.get("id", "") for z in zones if z.get("state") in ACTIVE]
+        if active_ids:
+            # Same ranking as select()'s active branch: most recently
+            # started wins, ties broken by id. Recomputing here (rather
+            # than only on a transition) is what lets the winner update
+            # when the *previous* winner drops out without anyone new
+            # starting.
+            self._last_followed = max(
+                active_ids, key=lambda zid: (self._started_at.get(zid, -1), zid))
 
     def select(self, zones: list[dict]) -> dict | None:
         by_id = {z.get("id", ""): z for z in zones}
