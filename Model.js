@@ -16,6 +16,18 @@ var THEME_BACKGROUND = "#0c0b0c"
 // hole rather than a color. 3.0 is the WCAG floor for large graphical objects.
 var CONTRAST_FLOOR = 3.0
 
+// pickAccent's lighten-a-dark-vivid-color path (see below). Below DRAB, a
+// legible color is not carrying the record's character, so a lightened vivid
+// one that clears the floor is preferred over it. Below MIN_LIGHTNESS, a
+// pixel's hue is mostly compression/quantization noise -- without this guard
+// a near-black entry like #060301 lightens into a confident vivid orange that
+// is not actually in the artwork. Above MAX_LIGHTNESS a color has washed out
+// and stopped reading as the record's own color.
+var DRAB = 0.35
+var MIN_LIGHTNESS = 0.10
+var MAX_LIGHTNESS = 0.75
+var LIGHTEN_STEP = 0.02
+
 function normalizeHex(c) {
   if (c === null || c === undefined) return null
   var s = String(c)
@@ -70,30 +82,148 @@ function saturation(hex) {
   return (max - min) / max
 }
 
+// RGB (0-255 channels) <-> HSL (h in [0,1), s and l in [0,1]). Used only by
+// pickAccent's lighten path below, to raise a dark vivid color's lightness
+// while preserving its hue and HSL saturation. saturation() above stays the
+// HSV-style (max-min)/max metric pickAccent has always ranked by; these are
+// a separate pair of helpers for the lighten transform only.
+function rgbToHsl(r, g, b) {
+  var rn = r / 255, gn = g / 255, bn = b / 255
+  var max = Math.max(rn, Math.max(gn, bn))
+  var min = Math.min(rn, Math.min(gn, bn))
+  var l = (max + min) / 2
+  var h = 0
+  var s = 0
+  if (max !== min) {
+    var d = max - min
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
+    if (max === rn) h = (gn - bn) / d + (gn < bn ? 6 : 0)
+    else if (max === gn) h = (bn - rn) / d + 2
+    else h = (rn - gn) / d + 4
+    h = h / 6
+  }
+  return { h: h, s: s, l: l }
+}
+
+function hueToRgbChannel(p, q, t) {
+  if (t < 0) t = t + 1
+  if (t > 1) t = t - 1
+  if (t < 1 / 6) return p + (q - p) * 6 * t
+  if (t < 1 / 2) return q
+  if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6
+  return p
+}
+
+function hslToRgb(h, s, l) {
+  var r, g, b
+  if (s === 0) {
+    r = l
+    g = l
+    b = l
+  } else {
+    var q = l < 0.5 ? l * (1 + s) : l + s - l * s
+    var p = 2 * l - q
+    r = hueToRgbChannel(p, q, h + 1 / 3)
+    g = hueToRgbChannel(p, q, h)
+    b = hueToRgbChannel(p, q, h - 1 / 3)
+  }
+  return {
+    r: Math.round(r * 255),
+    g: Math.round(g * 255),
+    b: Math.round(b * 255)
+  }
+}
+
+function clampByte(v) {
+  return Math.max(0, Math.min(255, v))
+}
+
+function byteToHexPair(v) {
+  var s = clampByte(v).toString(16)
+  return s.length === 1 ? "0" + s : s
+}
+
+function hslToHex(h, s, l) {
+  var c = hslToRgb(h, s, l)
+  return "#" + byteToHexPair(c.r) + byteToHexPair(c.g) + byteToHexPair(c.b)
+}
+
+// Raise hex's lightness in LIGHTEN_STEP increments, hue and HSL saturation
+// held fixed, until the result clears CONTRAST_FLOOR against bg. Returns null
+// if it never clears the floor before MAX_LIGHTNESS.
+function liftToContrast(hex, bg) {
+  var c = channels(hex)
+  if (c === null) return null
+  var hsl = rgbToHsl(c.r, c.g, c.b)
+  var l = hsl.l + LIGHTEN_STEP
+  while (l <= MAX_LIGHTNESS) {
+    var candidate = hslToHex(hsl.h, hsl.s, l)
+    if (contrastRatio(candidate, bg) >= CONTRAST_FLOOR) return candidate
+    l = l + LIGHTEN_STEP
+  }
+  return null
+}
+
 // Direction C: exactly one element takes its color from the cover. Choose the
 // most saturated quantized entry that is still legible on the panel, and fall
-// back to the theme accent when none is -- never darken or synthesize a color,
-// because a cover with no legible entry should look deliberate, not muddy.
+// back to the theme accent when none is -- never darken or synthesize a color
+// out of nothing.
+//
+// A cover that is dark throughout (a lot of album art is) used to fail this
+// entirely: every vivid entry is dark, fails CONTRAST_FLOOR, and gets thrown
+// away, leaving only a desaturated highlight that looks nothing like the
+// record. So a dark vivid color is no longer discarded outright -- it is
+// lightened (preserving hue/saturation) until it clears the floor, and that
+// lightened color is used ONLY when nothing already-legible is vivid enough
+// (DRAB) to carry the record's character on its own. Saturation is always
+// judged on the ORIGINAL color in both buckets, never the lightened one --
+// that original is the record's actual character; lightening is only how it
+// is made legible.
 function pickAccent(colors, bgHex) {
   var bg = normalizeHex(bgHex)
   if (bg === null) bg = THEME_BACKGROUND
   var list = colors || []
-  var best = null
-  var bestSat = -1
+
+  var bestLegible = null
+  var bestLegibleSat = -1
+  var bestLiftedResult = null   // the lightened hex actually returned
+  var bestLiftedOrig = null     // the original hex, for ranking/tie-break
+  var bestLiftedSat = -1
+
   for (var i = 0; i < list.length; i++) {
     var hex = normalizeHex(list[i])
     if (hex === null) continue
-    if (contrastRatio(hex, bg) < CONTRAST_FLOOR) continue
     var s = saturation(hex)
-    // Strict > keeps the first of equals; the lexical compare then imposes a
-    // total order so the result cannot depend on V4's unstable sort or on the
-    // order the quantizer happened to emit.
-    if (s > bestSat || (s === bestSat && best !== null && hex < best)) {
-      bestSat = s
-      best = hex
+
+    if (contrastRatio(hex, bg) >= CONTRAST_FLOOR) {
+      // Strict > keeps the first of equals; the lexical compare then imposes
+      // a total order so the result cannot depend on V4's unstable sort or
+      // on the order the quantizer happened to emit.
+      if (s > bestLegibleSat || (s === bestLegibleSat && bestLegible !== null && hex < bestLegible)) {
+        bestLegibleSat = s
+        bestLegible = hex
+      }
+      continue
+    }
+
+    var c = channels(hex)
+    if (c === null) continue
+    var l = rgbToHsl(c.r, c.g, c.b).l
+    if (l < MIN_LIGHTNESS) continue   // compression-noise near-black, not a real hue
+    var lifted = liftToContrast(hex, bg)
+    if (lifted === null) continue     // still illegible even at MAX_LIGHTNESS
+
+    if (s > bestLiftedSat || (s === bestLiftedSat && bestLiftedOrig !== null && hex < bestLiftedOrig)) {
+      bestLiftedSat = s
+      bestLiftedResult = lifted
+      bestLiftedOrig = hex
     }
   }
-  return best === null ? THEME_ACCENT : best
+
+  if (bestLegible !== null && bestLegibleSat >= DRAB) return bestLegible
+  if (bestLiftedResult !== null) return bestLiftedResult
+  if (bestLegible !== null) return bestLegible
+  return THEME_ACCENT
 }
 
 function formatTime(sec) {
@@ -138,6 +268,16 @@ var GLYPH_PLAYING = String.fromCodePoint(0xf040a)   // nf-md-play
 var GLYPH_PAUSED  = String.fromCodePoint(0xf03e4)   // nf-md-pause
 var GLYPH_IDLE    = String.fromCodePoint(0xf0387)   // nf-md-music
 var GLYPH_FAULT   = String.fromCodePoint(0xf0026)   // nf-md-alert
+
+// Popup transport/volume glyphs. Same rule as the four above: built, never
+// typed, and read out of the Nerd Font's own cmap rather than guessed --
+// Panel.qml originally used plain Unicode media symbols (U+23EE/U+25B6/
+// U+23F8/U+23ED) here, which carry emoji presentation in the deployed font
+// and rendered as colour blocks instead of monochrome glyphs.
+var GLYPH_PREV         = String.fromCodePoint(0xf04ae)   // nf-md-skip_previous
+var GLYPH_NEXT         = String.fromCodePoint(0xf04ad)   // nf-md-skip_next
+var GLYPH_VOLUME_HIGH  = String.fromCodePoint(0xf057e)   // nf-md-volume_high
+var GLYPH_VOLUME_MUTED = String.fromCodePoint(0xf075f)   // nf-md-volume_mute
 
 // Severity colors live here, not in Commons/Color.qml: that exposes only
 // background, foreground, accent and the per-surface roles -- there is no
@@ -283,6 +423,10 @@ if (typeof module !== "undefined") {
     GLYPH_PAUSED: GLYPH_PAUSED,
     GLYPH_IDLE: GLYPH_IDLE,
     GLYPH_FAULT: GLYPH_FAULT,
+    GLYPH_PREV: GLYPH_PREV,
+    GLYPH_NEXT: GLYPH_NEXT,
+    GLYPH_VOLUME_HIGH: GLYPH_VOLUME_HIGH,
+    GLYPH_VOLUME_MUTED: GLYPH_VOLUME_MUTED,
     COLOR_ERROR: COLOR_ERROR,
     COLOR_WARN: COLOR_WARN,
     barState: barState,

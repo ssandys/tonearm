@@ -24,6 +24,17 @@ test("glyph codepoints are asserted, not shape-checked", () => {
   assert.strictEqual(M.GLYPH_FAULT.codePointAt(0), 0xf0026)
 })
 
+test("popup transport/volume glyph codepoints are asserted, not shape-checked", () => {
+  // Panel.qml's popup originally used plain Unicode media symbols here
+  // (U+23EE/U+25B6/U+23F8/U+23ED), which carry emoji presentation in the
+  // deployed font and rendered as colour blocks instead of monochrome
+  // glyphs. Same reasoning as the bar glyphs above: assert the codepoint.
+  assert.strictEqual(M.GLYPH_PREV.codePointAt(0), 0xf04ae)
+  assert.strictEqual(M.GLYPH_NEXT.codePointAt(0), 0xf04ad)
+  assert.strictEqual(M.GLYPH_VOLUME_HIGH.codePointAt(0), 0xf057e)
+  assert.strictEqual(M.GLYPH_VOLUME_MUTED.codePointAt(0), 0xf075f)
+})
+
 test("playing is ok severity with art", () => {
   const s = M.barState(PLAYING, 1000, 1000)
   assert.strictEqual(s.severity, "ok")
