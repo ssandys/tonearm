@@ -1896,7 +1896,22 @@ git commit -m "feat(browse): imageUrl extraction and cursor helpers"
         }
       }
 
-      onExited: function (code, status) {
+      // onRunningChanged, NOT onExited. A failed spawn never emits exited()
+      // -- measured, and documented at Service.qml:52-56: the process goes
+      // straight to running=false without ever passing through true. Firing
+      // the callback from onExited would mean a failed spawn never calls back
+      // at all, so BrowsePane's `busy` flag would stay true forever and the
+      // pane would freeze with no error anywhere. onRunningChanged is the one
+      // drain signal that covers both a failed spawn and a normal exit.
+      //
+      // `done` guards against a double fire: onRunningChanged also runs on the
+      // false->true transition when the process starts, and a callback invoked
+      // twice would clear `busy` before the real reply arrives.
+      property bool done: false
+
+      onRunningChanged: {
+        if (rpc.running || rpc.done) return
+        rpc.done = true
         var parsed = null
         if (rpc.buffer.length > 0) {
           try {
@@ -1911,11 +1926,11 @@ git commit -m "feat(browse): imageUrl extraction and cursor helpers"
     }
   }
 
-  // Fire a browse op and hand the parsed reply to `callback`. A failed spawn
-  // never emits exited() (measured, see the relay comment above), so the
-  // callback would never run -- the caller must therefore treat a missing
-  // callback as "still pending" and not as an error, and BrowsePane's
-  // `busy` flag is cleared on reply, not on a timer.
+  // Fire a browse op and hand the parsed reply to `callback`. The callback is
+  // guaranteed to run exactly once -- on a reply, on a crash, or on a failed
+  // spawn -- because the Process above drains on onRunningChanged rather than
+  // onExited. Callers rely on that guarantee to clear their `busy` flag; a
+  // path that can skip the callback freezes the pane silently.
   function browse(args, callback) {
     var argv = [root.ctlPath, "browse"]
     for (var i = 0; i < args.length; i++) argv.push(String(args[i]))
