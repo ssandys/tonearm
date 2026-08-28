@@ -39,6 +39,10 @@ def _now_playing_of(roon_zone: dict) -> dict | None:
         "artist": lines.get("line2", ""),
         "album": lines.get("line3", ""),
         "image_key": np.get("image_key", ""),
+        # Nullable placeholder: this module does no I/O (see the module
+        # docstring), so it cannot know whether a local cached copy exists.
+        # The daemon's art cache (art.py) fills this in, or leaves it null.
+        "art_path": None,
     }
 
 

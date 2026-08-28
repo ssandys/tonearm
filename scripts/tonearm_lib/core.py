@@ -144,10 +144,38 @@ class RoonSession:
     def _zones(self):
         if not self._api:
             return [], None
-        raw = list((self._api.zones or {}).values())
+        raw = self._raw_zones()
         listing = [z for z in (state.normalize_zone(r) for r in raw) if z]
         self._arbiter.observe(listing)
         return listing, self._arbiter.select(listing)
+
+    def _raw_zones(self) -> list:
+        """A defensive read of `self._api.zones.values()`.
+
+        `self._api.zones` is a plain dict, mutated IN PLACE by roonapi's own
+        websocket thread (`RoonApiWebSocket.run_forever()` ->
+        `_on_state_change()`, roonapisocket.py/roonapi.py) as zones are
+        added, updated or removed -- entirely outside anything this class
+        (or `CachingSession`'s lock, in server.py's caller) controls. A zone
+        being added or removed changes the dict's size, so a caller here can
+        be mid-iteration when that happens: `list(...values())` then raises
+        `RuntimeError: dictionary changed size during iteration`, which
+        nothing downstream catches -- it would escape through `snapshot()`
+        and kill whichever connection thread in server.py was reading state
+        at that instant.
+
+        One retry closes this in practice: the window is a handful of
+        microseconds around a single dict mutation, and landing in it twice
+        in a row does not happen. If it somehow does anyway, an empty
+        listing is what `self._api` being unset already produces elsewhere
+        in this class -- a graceful "nothing to report" rather than a crash.
+        """
+        for _ in range(2):
+            try:
+                return list((self._api.zones or {}).values())
+            except RuntimeError:
+                continue
+        return []
 
     def _publish(self, *_args) -> None:
         try:
