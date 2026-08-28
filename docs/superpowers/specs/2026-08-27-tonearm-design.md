@@ -461,6 +461,74 @@ grouping and ungrouping, multiple Cores.
 
 ---
 
+## 10a. Post-MVP directions, and what they imply
+
+Two features are on the radar: **search** (pick music and albums to play from the
+widget) and an **MCP server** (control Roon from an LLM). Neither is scheduled.
+Recorded here because both bear on architecture, and the constraints are not
+obvious from the code.
+
+### The load-bearing constraint: one Roon client
+
+**Roon pairing is per-extension.** A second independent Roon client means a second
+entry in Roon Remote → Settings → Extensions, a second manual approval, and a
+second token to manage. So `tonearmd` stays the *only* thing that talks to Roon,
+and everything else — the widget, an MCP server, anything later — is a **consumer
+of `tonearmd`'s socket**. This is not a stylistic preference; it is what keeps the
+pairing story to one click.
+
+### Search belongs in `tonearmd`, and does not force a repo split
+
+`roonapi` provides `browse_browse`, `browse_load`, `list_media` and `play_media`,
+so the capability is there. Browse state is **connection-scoped**, so whoever owns
+the Roon connection must own the browse session — that is `tonearmd`. Search
+becomes new socket verbs; the widget consumes them exactly as it consumes
+transport today. Same shape as the current design.
+
+**The trap: the vendored `roonapi` has no `multi_session_key`.** There is exactly
+one browse session per `RoonApi` instance. So two concurrent consumers *will*
+clobber each other's navigation — you are part-way down an album list in the
+popup, the LLM runs a search, your list resets under you. Upstream MOO supports
+multiple browse sessions; the Python library does not expose it. Solving this
+means either serialising browse access in `tonearmd`, or adding session-key
+support to the vendored library. **A repo split does not fix it** — it is a
+concurrency problem inside the daemon, and it is the first thing to design before
+either feature ships.
+
+Note also that §10's reason for excluding browse still stands: it is
+session-stateful and not addressable, and it is the bulk of roon-tui's
+913-line state machine. Search is the expensive feature, not the cheap one.
+
+### MCP is what should trigger a repo split
+
+`omarchy plugin add <git-url>` does a `git clone` and moves **the whole repo** into
+`$PLUGINS_DIR/<id>`. The repo *is* the plugin directory. So an MCP server living
+here means every plugin user clones an MCP server they will never run, alongside
+its dependencies. That is the strongest argument for separating.
+
+Recommended shape when the time comes:
+
+- `tonearm` — the plugin: manifest, QML, and (for now) the daemon.
+- a second repo — the MCP server, talking to the same `$XDG_RUNTIME_DIR/tonearm/sock`.
+
+Splitting the **daemon** out of the plugin repo is a separate question and should
+be resisted for now: today's one-command `setup.sh` install depends on
+co-location, and `stappmus.audio` is precedent for a daemon shipping inside a
+plugin. Revisit only if the daemon acquires consumers that have nothing to do with
+the bar.
+
+### The cheap thing to do now
+
+**Treat the socket as a real interface rather than an internal detail.** The
+payload already carries `v: 1`, but nothing yet says what that promises. Write the
+protocol down — the verbs, the payload shape, what may change within a version and
+what may not — and never let the widget reach around it into the daemon's
+internals. `tonearmctl` already serves as the reference client and proves the
+protocol is sufficient.
+
+Do that, and splitting a consumer into its own repo later is `git mv` and a
+README, not a refactor. Skip it, and the seam erodes quietly until it is one.
+
 ## 11. Risks
 
 | Risk | Mitigation |
