@@ -126,6 +126,26 @@ Play Now · Add Next · Queue · Start Radio
 An album row is therefore *both* descendable and playable, which is why row
 capabilities are two independent booleans rather than one enum.
 
+**A category row and an album row are indistinguishable by `hint`.** Measured — the
+search-results level returns:
+
+```json
+{"title":"Oingo Boingo","subtitle":"0 Albums","image_key":"fe39…","item_key":"68:0","hint":"list"}
+{"title":"Artists",     "subtitle":"3 Results","image_key":null,  "item_key":"68:1","hint":"list"}
+{"title":"Albums",      "subtitle":"21 Results","image_key":null, "item_key":"68:2","hint":"list"}
+```
+
+`Albums` (a category, not playable) and `Dead Man's Query` (an album, playable) both
+carry `hint: "list"`. The only structural difference is that category rows have
+`image_key: null` — but that is a **proxy, not a rule**: an album with no cover art
+would be misclassified as unplayable, and the failure would be silent and
+library-dependent.
+
+Therefore `can_play` is **optimistic** for `hint: "list"` rows and the true answer is
+only known by descending. This is what motivates the `activate` op in §5.1: the daemon
+resolves the ambiguity in one round-trip rather than making the widget guess, and
+`image_key` is never used to infer playability.
+
 ### 2.5 `item_key` is ephemeral, and staleness fails silently
 
 Keys are positional strings of the form `"65:0"`, `"65:1"` — level and index. They are
@@ -275,6 +295,7 @@ survives across connections.
 |---|---|
 | `search` | Walk to `Library → Search`, submit `term`, return the results level. Implicitly resets the session first. |
 | `enter` | Descend into the row at `index`. |
+| `activate` | Try `play_now` on the row at `index`; if no action list is reachable, descend into it instead. One round-trip. This is what `Enter` sends, and it exists because §2.4 proves a category and an album cannot be told apart before descending. |
 | `back` | `pop_levels: 1`. At the top level this is a no-op that returns the current level unchanged. |
 | `page` | Re-load the current level at a different `offset`. Does not move the cursor. |
 | `play` | Resolve and invoke `action` on the row at `index` (§4.3). Returns the current level unchanged on success. |
@@ -420,8 +441,8 @@ introducing any.
 | `/` or any letter | Focus the search field |
 | `Enter` (in field) | Submit the search |
 | `↑` `↓` | Move the row cursor |
-| `Enter` | Play Now if the row is playable; otherwise descend |
-| `→` | Descend if the row is descendable; otherwise nothing |
+| `Enter` | `activate` — plays if playable, descends if not |
+| `→` | `enter` — always descends |
 | `q` | Queue the selected row |
 | `←` | Back one level |
 | `Esc` | Back one level; at the top level, close the popup |
@@ -432,8 +453,16 @@ interaction choice in the design. An album row is both playable and descendable
 keystroke and an extra screen — directly against §1's stated goal. So `Enter` on an
 album plays it, and `→` is how you look inside at its tracks.
 
-Category rows (`Albums`, `Tracks`, `Artists`) are descendable but not playable, so
-`Enter` descends on them with no special-casing needed.
+`Enter` on a category row (`Albums`, `Tracks`, `Artists`) descends, because `activate`
+falls back to descending when no action list is reachable. The widget does not decide
+this and must not try to: §2.4 measured that categories and albums are indistinguishable
+before descending, so any client-side rule would be a guess that fails on art-less
+albums.
+
+The cost is that `Enter` on a category spends a failed play resolution before
+descending. That is one extra round-trip on a keystroke the user perceives as
+navigation, not playback, and it is the deliberate price of never guessing wrong in
+the audible direction.
 
 While the search field has focus, `PanelKeyCatcher.blocked` is true so the `TextField`
 receives keys normally. Gate it on *"the search field is active"*, following the
