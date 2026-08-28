@@ -1,0 +1,67 @@
+#!/usr/bin/python
+"""tonearmd -- the Roon side of tonearm.
+
+Runs under the SYSTEM interpreter with no venv. Its only external dependencies
+are websocket-client (already present) and python-dbus-next; roonapi is vendored
+alongside this file.
+"""
+
+import logging
+import os
+import signal
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from tonearm_lib import art                           # noqa: E402
+from tonearm_lib import server                        # noqa: E402
+from tonearm_lib.core import RoonSession               # noqa: E402
+
+
+def main() -> int:
+    logging.basicConfig(
+        level=os.environ.get("TONEARM_LOG", "INFO"),
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+
+    srv_holder = {}
+
+    def broadcast_current() -> None:
+        # Used both as the on_change hook (a Roon push) and as art.Cache's
+        # on_ready callback (a background art fetch finishing after the
+        # push that started it already went out). Re-reading the session's
+        # own snapshot() -- rather than trusting whatever payload the
+        # caller has in hand -- means both paths always broadcast the same
+        # art_path logic in tonearm_lib.art.CachingSession.snapshot().
+        srv = srv_holder.get("srv")
+        if srv:
+            srv.broadcast(session.snapshot())
+
+    def on_change(_payload) -> None:
+        broadcast_current()
+
+    raw_session = RoonSession(on_change)
+    # ColorQuantizer cannot load the Core's remote :9330 image URL (measured:
+    # zero colors vs. eight for the identical bytes as a local file) -- so the
+    # daemon keeps a small local copy and hands back a path. See art.py.
+    cache = art.Cache(server.runtime_dir(), on_ready=broadcast_current)
+    session = art.CachingSession(raw_session, cache)
+
+    srv = server.Server(session)
+    srv_holder["srv"] = srv
+
+    def shutdown(_signum, _frame):
+        raw_session.stop()
+        srv.shutdown()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
+
+    raw_session.start()
+    srv.serve_forever()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

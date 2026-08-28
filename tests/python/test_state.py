@@ -67,6 +67,14 @@ class TestNormalizeZone(unittest.TestCase):
         self.assertEqual(np["title"], "")
         self.assertEqual(np["image_key"], "a1b2c3")
 
+    def test_now_playing_carries_a_nullable_art_path_placeholder(self):
+        # state.py does no I/O (see its module docstring), so it cannot know
+        # whether a local cached copy exists. It only ever declares the slot;
+        # the daemon's art cache (art.py) fills it in, or leaves it null.
+        np = state.normalize_zone(self.raw)["now_playing"]
+        self.assertIn("art_path", np)
+        self.assertIsNone(np["art_path"])
+
     def test_none_in_none_out(self):
         self.assertIsNone(state.normalize_zone(None))
 
