@@ -1978,7 +1978,7 @@ git commit -m "feat(browse): request/response RPC in Service.qml"
 
 **Interfaces:**
 - Consumes: `Service.browse(args, callback)` (Task 9); `Model.moveCursor`, `Model.rowArtUrl` (Task 8).
-- Produces: properties `service`, `state`, `active`, `editing`, `rowCount`; signals `playStarted()`, `closeRequested()`; functions `handleMove(dx, dy)`, `handleActivate()`, `handleQueue()`, `handleBack()`, `focusSearch()`.
+- Produces: properties `service`, `state`, `editing`, `rowCount`; signals `playStarted()`, `closeRequested()`; functions `handleMove(dx, dy)`, `handleActivate()`, `handleDescend()`, `handleQueue()`, `handleBack()`, `focusSearch()`.
 
 - [ ] **Step 1: Write the component**
 
