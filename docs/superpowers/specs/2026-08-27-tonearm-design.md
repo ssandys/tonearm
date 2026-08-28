@@ -567,13 +567,15 @@ Readiness against the published requirements, as of the MVP:
 | Root license file documenting the licence **and external dependencies** | ⚠️ ours is plain MIT |
 | Plugin ID outside the reserved `omarchy.*` namespace | ✅ `ssandys.tonearm` |
 
-**Decide the plugin ID before the first submission — IDs are permanent and cannot
-be reused if retired or renamed.** `ssandys.tonearm` is valid and matches the
-sibling plugins, but the marketplace *prefers* the namespaced form
-`io.github.<name>.<plugin>` — e.g. `io.github.ssandys.tonearm`, which is the shape
-`io.github.teevans.apple-tv-remote` already uses in this very plugin directory.
-Changing it later is not possible, and it would also move the install path,
-the systemd unit's `ExecStart`, and `setup.sh`'s `installed_root`.
+**Plugin ID: `ssandys.tonearm`. Settled — do not revisit.** IDs are permanent and
+cannot be reused if retired or renamed, so this was decided deliberately before
+submission. The guidelines *prefer* the namespaced `io.github.<name>.<plugin>`
+form, but flat vendor namespaces are plainly accepted — `stappmus.audio`,
+`bibek.ytdl` and `robzolkos.github` all ship that way — and **consistency with the
+author's other submitted plugins** (`ssandys.headway`, `ssandys.galley`,
+`ssandys.colophon`) outweighs a stylistic preference. Changing it would also move
+the install path, the systemd unit's `ExecStart`, and `setup.sh`'s
+`installed_root`, so it is now fixed in three places besides the manifest.
 
 **Two small gaps to close before submitting:**
 - The README must document **removal**, not just installation. For tonearm that
