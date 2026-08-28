@@ -41,7 +41,14 @@ class TestMetadata(unittest.TestCase):
 
     def test_track_id_is_a_valid_object_path(self):
         # A bad path makes some clients disconnect from the bus entirely.
-        track_id = mpris.metadata_for(PLAYING)["mpris:trackid"]
+        # PLAYING's own image_key ("a1b2") has no hyphen to strip, so this
+        # would pass even if the sanitization in metadata_for() were deleted
+        # outright -- use a hyphenated key, like Roon's real ones, so the
+        # assertion can actually fail.
+        import copy
+        payload = copy.deepcopy(PLAYING)
+        payload["zone"]["now_playing"]["image_key"] = "a1b2-c3d4-e5f6"
+        track_id = mpris.metadata_for(payload)["mpris:trackid"]
         self.assertTrue(track_id.startswith("/com/onemanposse/tonearm/"))
         self.assertNotIn("-", track_id.rsplit("/", 1)[-1])
 

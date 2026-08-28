@@ -10,6 +10,7 @@ the socket -- the widget works, only the media keys do not.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
@@ -191,39 +192,56 @@ class _Player(ServiceInterface):
     def CanControl(self) -> "b":          # noqa: F821
         return True
 
-    @method()
-    def PlayPause(self):
-        self._session.command("playpause")
+    async def _run_command(self, verb: str, arg=None) -> None:
+        """Run session.command() off the asyncio loop thread.
+
+        dbus-next dispatches D-Bus method calls (this method included) on the
+        loop thread. RoonSession.command() blocks synchronously -- it walks
+        into the vendored roonapi's request/response wait, which polls with
+        time.sleep(0.05) up to 50 times (~2.5s) before giving up. Calling it
+        directly here would stall the whole loop for that long on a slow or
+        briefly unreachable Core, freezing every other bus consumer's
+        PropertiesChanged traffic along with it. Running it in the default
+        executor keeps the loop free; RoonSession.command() already takes
+        its own lock, so concurrent calls from the executor's worker threads
+        are safe.
+        """
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._session.command, verb, arg)
 
     @method()
-    def Play(self):
-        self._session.command("play")
+    async def PlayPause(self):
+        await self._run_command("playpause")
 
     @method()
-    def Pause(self):
-        self._session.command("pause")
+    async def Play(self):
+        await self._run_command("play")
 
     @method()
-    def Stop(self):
-        self._session.command("pause")
+    async def Pause(self):
+        await self._run_command("pause")
 
     @method()
-    def Next(self):
-        self._session.command("next")
+    async def Stop(self):
+        await self._run_command("pause")
 
     @method()
-    def Previous(self):
-        self._session.command("previous")
+    async def Next(self):
+        await self._run_command("next")
 
     @method()
-    def SetPosition(self, track_id: "o", position: "x"):   # noqa: F821
-        self._session.command("seek", int(position // 1_000_000))
+    async def Previous(self):
+        await self._run_command("previous")
 
     @method()
-    def Seek(self, offset: "x"):          # noqa: F821
+    async def SetPosition(self, track_id: "o", position: "x"):   # noqa: F821
+        await self._run_command("seek", int(position // 1_000_000))
+
+    @method()
+    async def Seek(self, offset: "x"):    # noqa: F821
         zone = self._payload.get("zone") or {}
         target = int((zone.get("position") or 0) + offset / 1_000_000)
-        self._session.command("seek", max(0, target))
+        await self._run_command("seek", max(0, target))
 
 
 class MprisAdapter:
