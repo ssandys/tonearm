@@ -55,19 +55,28 @@ Item {
       // of date. Re-render and discard the keystroke rather than replaying it
       // against a level the user never saw (spec 5.2).
       root.errorText = reply.error === "stale" ? "" : (reply.message || "error")
-      if (reply.rows !== undefined) {
-        root.rows = reply.rows
-        root.levelId = reply.level_id
-        root.path = reply.path || []
-        root.cursor = Model.moveCursor(root.cursor, 0, root.rows.length)
-      }
+      if (reply.rows !== undefined) root._applyLevel(reply)
       return
     }
     root.errorText = ""
+    root._applyLevel(reply)
+  }
+
+  // `level_id` increments on every level change (search/enter/back/reset,
+  // and an activate that resolves to a descend rather than a play) and stays
+  // put across a page reload or a play, which return the SAME level
+  // unchanged (spec 5.1.1, 5.3 "level_id is strictly increasing... on every
+  // level change"). A level change puts the cursor on the first row --
+  // descending into an album should not carry over whatever index the
+  // previous level happened to have the cursor on. page/play leave the
+  // cursor where the user had it, merely clamped to the (possibly shorter)
+  // new row count.
+  function _applyLevel(reply) {
+    var levelChanged = reply.level_id !== root.levelId
     root.rows = reply.rows || []
     root.levelId = reply.level_id
     root.path = reply.path || []
-    root.cursor = Model.moveCursor(root.cursor, 0, root.rows.length)
+    root.cursor = Model.moveCursor(levelChanged ? -1 : root.cursor, 0, root.rows.length)
   }
 
   // `after` runs once the reply has been applied, so a caller can react to
@@ -135,13 +144,14 @@ Item {
   function handleBack() {
     if (root.editing) { root.editing = false; return true }
     if (root.path.length > 1) { _send(["back"]); return true }
-    if (root.path.length === 1) {
-      root.rows = []
-      root.path = []
-      root.cursor = -1
-      if (root.service) root.service.browse(["reset"], function () {})
-      return true
-    }
+    // At the top level, `reset` is the same op class as every other browse
+    // call: gated by `busy`, and cleared only once the daemon's reply says
+    // so, via _apply -- not optimistically here. An earlier draft cleared
+    // rows/path/cursor locally and called service.browse() directly,
+    // bypassing `busy`. Fast key-repeat during an in-flight activate/enter
+    // then let that op's reply land afterward and silently overwrite the
+    // reset (_apply has no idea a reset happened underneath it).
+    if (root.path.length === 1) { _send(["reset"]); return true }
     return false
   }
 
@@ -245,7 +255,13 @@ Item {
 
             Text {
               width: parent.width
-              text: modelData.title
+              // Defended at the use site even though the daemon guarantees a
+              // non-null title/subtitle (spec 5.3) -- same idiom as
+              // Panel.qml:252's `root.np.title || "Nothing playing"`. A null
+              // reaching `.length` below would throw inside a property
+              // binding, which Qt swallows silently, leaving the binding
+              // stale with no visible error anywhere.
+              text: modelData.title || ""
               color: Color.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
@@ -254,8 +270,8 @@ Item {
 
             Text {
               width: parent.width
-              visible: modelData.subtitle.length > 0
-              text: modelData.subtitle
+              visible: (modelData.subtitle || "").length > 0
+              text: modelData.subtitle || ""
               color: Color.muted
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
