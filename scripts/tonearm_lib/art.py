@@ -196,23 +196,47 @@ class CachingSession:
 
     What this does NOT cover: `RoonSession._publish()` calls `self.snapshot()`
     directly, inside core.py, before it ever reaches `on_change` -- that call
-    bypasses this wrapper entirely and cannot be brought under this lock
-    without editing core.py (out of scope; merged and reviewed). It remains
-    exactly as serial as it was before this wrapper existed (Roon's own
-    callback thread processes events one at a time), so it does not race
-    ITSELF, but it is not mutually exclusive with a concurrent call arriving
-    through this wrapper. Also not covered: `command()` is deliberately left
-    unlocked here, even though `RoonSession.command()` can itself call
-    `_zones()` -- locking it would nest this wrapper's lock *outside*
-    server.py's `Server._lock` on the "zone pin/unpin" path (command ->
-    `_command_locked` -> `_publish()` -> `on_change` -> a nested
-    `snapshot()` call while still holding this lock), while server.py's
-    subscribe handler nests them the other way (`Server._lock` outer, this
-    lock inner) -- two threads taking the same two locks in opposite orders
-    is a textbook deadlock. `RoonSession.command()` already serializes
-    against itself via its own internal lock; a command racing a snapshot()
-    read is a narrower, pre-existing-shaped gap than the multi-subscriber
-    hazard this class was written to close.
+    bypasses this wrapper entirely. `core.py`'s own `_raw_zones()` defends the
+    one genuinely racy part of that (a concurrent mutation of
+    `self._api.zones` escaping as `RuntimeError` -- see its docstring); this
+    lock is not what closes that, and does not need to be, since that call
+    remains exactly as serial with respect to ITSELF as it was before this
+    wrapper existed (Roon's own callback thread processes events one at a
+    time). It is simply a second, independent caller of `RoonSession`,
+    outside anything `CachingSession` can reach.
+
+    Also not covered: `command()` is deliberately left unlocked here, even
+    though `RoonSession.command()` can itself call `_zones()`. This is NOT
+    to avoid a two-thread lock-ordering cycle -- tracing it shows there
+    isn't one to avoid. It is to avoid a same-thread REENTRANT deadlock: if
+    `command()` took this lock too, a "zone" pin/unpin would walk, on ONE
+    thread, still holding this (non-reentrant) lock, through
+    `RoonSession.command()` -> `_command_locked` -> `_publish()` ->
+    `on_change` -> `broadcast_current()` -> `session.snapshot()` --
+    which is `CachingSession.snapshot()` again, trying to reacquire the
+    SAME lock the SAME thread already holds. That deadlocks immediately and
+    deterministically on the very first zone pin or unpin, with no second
+    thread and no race required -- the thread never gets anywhere near
+    `srv.broadcast()`/`Server._lock` at all, since it never gets past
+    reacquiring its own lock. `RoonSession.command()` already serializes
+    against itself via its own internal lock; a command racing a
+    `snapshot()` read is a narrower, pre-existing-shaped gap than the
+    multi-subscriber hazard this class exists to close.
+
+    As shipped, this has no live deadlock against `server.py`'s
+    `Server._lock` either: the only path that holds both is the subscribe
+    handshake, where `Server._lock` is always the OUTER lock (acquired
+    first, in `_handle()`) and this class's lock is acquired and released
+    strictly inside it, briefly, while `snapshot()` runs. Every other path
+    that reaches both (`on_change` / `broadcast_current()`) computes
+    `session.snapshot()` as a plain value FIRST -- releasing this lock
+    completely -- before ever calling `srv.broadcast(...)`, which is the
+    only thing that needs `Server._lock`. So the two locks are never
+    nested in the opposite order anywhere in the current code. THIS is the
+    property that must not be broken by a future change (e.g. broadcasting
+    while still "inside" a `snapshot()` call, or locking `command()`
+    after all) -- if it ever is, re-derive the lock-ordering argument from
+    scratch rather than assuming the old one still holds.
     """
 
     def __init__(self, session, cache: Cache) -> None:
