@@ -203,3 +203,64 @@ class BrowseSession:
             if predicate(item) and item.get("item_key"):
                 return item["item_key"]
         return None
+
+    def _check(self, index: int, level_id) -> str:
+        """Validate an index/level_id pair and return the real item_key.
+
+        The level_id check comes FIRST and short-circuits before any Roon
+        call. spec 5.1.1: if the session moved between the widget rendering a
+        page and the user pressing a key, the index is still *valid* -- it just
+        addresses a different row. Acting on it would play the wrong album,
+        silently, in a way indistinguishable from a mis-click. That is the one
+        failure this design must not have.
+
+        spec 5.1.1 requires index-addressed ops to carry level_id -- so a
+        missing/None level_id is treated as stale, not as "unchecked", and a
+        level_id that fails to parse as an int is stale too, never a bare
+        ValueError. Both keep the same fail-safe response: the widget
+        re-renders and discards the keystroke without ever reaching Roon.
+        """
+        try:
+            matches = level_id is not None and int(level_id) == self.level_id
+        except (TypeError, ValueError):
+            matches = False
+        if not matches:
+            raise BrowseError(
+                "stale", "the view is out of date; it has been refreshed")
+        if not isinstance(index, int) or index < 0 or index >= len(self._keys):
+            raise BrowseError("bad_index", "no such row")
+        key = self._keys[index]
+        if not key:
+            raise BrowseError("bad_index", "that row cannot be opened")
+        return key
+
+    def enter(self, index: int, level_id=None) -> dict:
+        with self._lock:
+            key = self._check(index, level_id)
+            title = self._rows[index]["title"]
+            self._browse(item_key=key)
+            self._path = self._path + [title]
+            return self._adopt(self._load(), 0)
+
+    def back(self) -> dict:
+        """One level up, via pop_levels -- never a re-walk (spec 2.5)."""
+        with self._lock:
+            if len(self._path) <= 1:
+                return self.current()
+            self._browse(pop_levels=1)
+            self._path = self._path[:-1]
+            return self._adopt(self._load(), 0)
+
+    def page(self, offset: int) -> dict:
+        with self._lock:
+            return self._adopt(self._load(int(offset)), int(offset))
+
+    def reset(self) -> dict:
+        with self._lock:
+            self._path = []
+            self._rows = []
+            self._keys = []
+            self._count = 0
+            self._offset = 0
+            self.level_id += 1
+            return self.current()
