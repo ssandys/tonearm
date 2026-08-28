@@ -108,6 +108,20 @@ class TestServer(unittest.TestCase):
                              "unreachable")
         a.close(); b.close()
 
+    def test_status_gets_one_reply_line_and_the_connection_closes(self):
+        # setup.sh --check depends on this: connect, send status, read exactly
+        # one line, and the server closes the connection afterward (unlike
+        # subscribe, which stays open).
+        sock = self._connect()
+        sock.sendall(b'{"cmd":"status"}\n')
+        reader = sock.makefile("r")
+        line = reader.readline()
+        self.assertEqual(json.loads(line)["status"], "ok")
+        # The server closed its end; a second read returns EOF (empty string),
+        # not a hang.
+        self.assertEqual(reader.readline(), "")
+        sock.close()
+
     def test_a_command_is_forwarded_and_the_connection_closes(self):
         sock = self._connect()
         sock.sendall(b'{"cmd":"seek","arg":42}\n')
