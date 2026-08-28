@@ -84,3 +84,26 @@ class TestLevelId(unittest.TestCase):
         a = s.search("oingo boingo")["level_id"]
         b = s.search("oingo boingo")["level_id"]
         self.assertNotEqual(a, b)
+
+
+class TestFakeRoonStaleness(unittest.TestCase):
+    def test_a_key_from_a_level_left_behind_resolves_to_root_not_itself(self):
+        # spec 2.5: real Roon staleness is POSITIONAL. A key captured from a
+        # level you have since navigated away from must be treated as stale
+        # even though that exact key string still legitimately belongs to
+        # some other, un-navigated-to level -- FakeRoon must only resolve an
+        # item_key against the level it is CURRENTLY on, or a future test of
+        # "stale key -> root" (Tasks 3+, enter/back/page/play) would get a
+        # false pass on the realistic case and only catch the unrealistic one
+        # (a key that never existed anywhere).
+        api = FakeRoon(yavin_levels())
+        api.browse_browse({"item_key": "1:0"})  # root -> library
+        library = api.browse_load({})
+        stale_key = library["items"][0]["item_key"]  # "2:0", the Search item
+        self.assertEqual(stale_key, "2:0")
+
+        api.browse_browse({"pop_all": True})  # navigate away, back to root
+
+        result = api.browse_browse({"item_key": stale_key})
+        self.assertEqual(result["list"], api.levels["root"]["list"])
+        self.assertEqual(api.current, "root")

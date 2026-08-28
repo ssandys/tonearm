@@ -34,7 +34,10 @@ class FakeRoon:
         target = self._target_for(key, opts.get("input"))
         if target is None:
             # Roon's real behaviour for a stale key: silently return the ROOT
-            # with no error (spec 2.5).
+            # with no error (spec 2.5). Staleness is POSITIONAL -- a key is
+            # only ever resolved against the level the fake is currently on
+            # (see _target_for), so a real key left over from a level we have
+            # since navigated away from takes this same path.
             self.current = "root"
             self.stack = []
             return {"list": self.levels["root"]["list"]}
@@ -53,13 +56,19 @@ class FakeRoon:
         }
 
     def _target_for(self, item_key, text):
-        for name, level in self.levels.items():
-            for item in level["items"]:
-                if item.get("item_key") == item_key:
-                    dest = item.get("_goes_to")
-                    if callable(dest):
-                        return dest(text)
-                    return dest
+        # Only the CURRENT level's items are searched. Real Roon staleness is
+        # positional (spec 2.5, measured): a key valid at a previous position
+        # becomes invalid once you've navigated away, even if that exact key
+        # string still belongs to some other, un-navigated-to level. Searching
+        # every level here (rather than just self.current) would let such a
+        # key resolve successfully, which is more forgiving than the real
+        # server and would hide the bug this fake exists to catch.
+        for item in self.levels[self.current]["items"]:
+            if item.get("item_key") == item_key:
+                dest = item.get("_goes_to")
+                if callable(dest):
+                    return dest(text)
+                return dest
         return None
 
 
