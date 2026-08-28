@@ -170,23 +170,30 @@ function nowPlayingOf(state) {
 function barState(state, recvMs, nowMs) {
   // A null state means the relay has not delivered a line yet, which in
   // practice means tonearmd is not running.
-  if (!state) return { severity: "error", glyph: GLYPH_FAULT, showArt: false }
+  if (!state) return { severity: "error", glyph: GLYPH_FAULT, showArt: false, playing: false }
 
   var severity = severityFor(state.status)
   if (severity !== "ok") {
-    return { severity: severity, glyph: GLYPH_FAULT, showArt: false }
+    return { severity: severity, glyph: GLYPH_FAULT, showArt: false, playing: false }
   }
 
   var zone = state.zone
-  if (!zone) return { severity: "ok", glyph: GLYPH_IDLE, showArt: false }
+  if (!zone) return { severity: "ok", glyph: GLYPH_IDLE, showArt: false, playing: false }
 
   var np = nowPlayingOf(state)
   var showArt = !!(np && np.image_key)
+  // Strict equality against "playing" alone, NOT zones.py's broader ACTIVE
+  // tuple ("playing", "loading") -- that tuple answers "does this zone count
+  // for auto-follow arbitration", a different question from "is audio
+  // actually advancing right now". A buffering zone should not be shown at
+  // full brightness or tick the seek clock; it renders as idle below, same
+  // as any other non-playing state that isn't "paused".
+  var playing = zone.state === "playing"
   var glyph = GLYPH_IDLE
-  if (zone.state === "playing") glyph = GLYPH_PLAYING
+  if (playing) glyph = GLYPH_PLAYING
   else if (zone.state === "paused") glyph = GLYPH_PAUSED
 
-  return { severity: "ok", glyph: glyph, showArt: showArt }
+  return { severity: "ok", glyph: glyph, showArt: showArt, playing: playing }
 }
 
 function tooltipText(state) {
@@ -246,6 +253,19 @@ function nextRetryDelay(attempt) {
   return ms > 30000 ? 30000 : ms
 }
 
+// The bar button and (later) the popup both need a sized image URL against
+// the Core's own HTTP port. Pure and node-testable like the rest of this
+// file; Panel.qml is the first consumer.
+function artUrl(state, px) {
+  if (!state || !state.core || !state.core.host) return ""
+  var np = nowPlayingOf(state)
+  if (!np || !np.image_key) return ""
+  var size = px || 256
+  return "http://" + state.core.host + ":" + (state.core.http_port || 9330) +
+         "/api/image/" + np.image_key +
+         "?scale=fit&width=" + size + "&height=" + size
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     THEME_ACCENT: THEME_ACCENT,
@@ -268,6 +288,7 @@ if (typeof module !== "undefined") {
     barState: barState,
     tooltipText: tooltipText,
     zoneList: zoneList,
-    nextRetryDelay: nextRetryDelay
+    nextRetryDelay: nextRetryDelay,
+    artUrl: artUrl
   }
 }

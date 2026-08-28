@@ -51,3 +51,20 @@ test("pickAccent is deterministic when saturation ties", () => {
   const b = M.pickAccent(["#00d400", "#d40000"], "#0c0b0c")
   assert.strictEqual(a, b)
 })
+
+test("artUrl builds a sized URL against the core's http port", () => {
+  // http_port is deliberately NOT 9330 (artUrl's own fallback default) --
+  // a regression that ignored state.core.http_port entirely and always
+  // emitted the fallback would still pass a fixture using 9330.
+  const state = { core: { host: "192.168.50.118", http_port: 8080, name: "yavin" },
+                  zone: { now_playing: { image_key: "a1b2" } } }
+  assert.strictEqual(M.artUrl(state, 256),
+    "http://192.168.50.118:8080/api/image/a1b2?scale=fit&width=256&height=256")
+})
+
+test("artUrl is empty when there is nothing to show", () => {
+  assert.strictEqual(M.artUrl(null, 256), "")
+  assert.strictEqual(M.artUrl({ core: null, zone: null }, 256), "")
+  assert.strictEqual(M.artUrl({ core: { host: "h", http_port: 1 },
+                                zone: { now_playing: {} } }, 256), "")
+})

@@ -29,6 +29,7 @@ test("playing is ok severity with art", () => {
   assert.strictEqual(s.severity, "ok")
   assert.strictEqual(s.glyph, M.GLYPH_PLAYING)
   assert.strictEqual(s.showArt, true)
+  assert.strictEqual(s.playing, true)
 })
 
 test("paused keeps ok severity but changes glyph", () => {
@@ -37,6 +38,7 @@ test("paused keeps ok severity but changes glyph", () => {
   const s = M.barState(st, 1000, 1000)
   assert.strictEqual(s.severity, "ok")
   assert.strictEqual(s.glyph, M.GLYPH_PAUSED)
+  assert.strictEqual(s.playing, false)
 })
 
 test("connected but idle is ok severity with no art", () => {
@@ -44,6 +46,19 @@ test("connected but idle is ok severity with no art", () => {
   assert.strictEqual(s.severity, "ok")
   assert.strictEqual(s.glyph, M.GLYPH_IDLE)
   assert.strictEqual(s.showArt, false)
+  assert.strictEqual(s.playing, false)
+})
+
+test("a loading (buffering) zone is not playing", () => {
+  // zones.py's Arbiter treats "playing" and "loading" both as ACTIVE for
+  // zone-selection purposes (Task 8), but that is a different question from
+  // whether audio is actually advancing right now. barState's `playing` pins
+  // the narrower intent this widget needs: dim like any non-playing state,
+  // and do not tick the seek clock, while buffering.
+  const st = JSON.parse(JSON.stringify(PLAYING))
+  st.zone.state = "loading"
+  const s = M.barState(st, 1000, 1000)
+  assert.strictEqual(s.playing, false)
 })
 
 test("unpaired is a warning, unreachable is an error", () => {
