@@ -14,6 +14,7 @@ from __future__ import annotations
 import http.client
 import http.server
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -207,12 +208,17 @@ class TestCachingSession(ArtServerTestCase):
         def __init__(self, payload):
             self._payload = payload
             self.commands = []
+            self.browse_calls = []
 
         def snapshot(self):
             return self._payload
 
         def command(self, verb, arg=None):
             self.commands.append((verb, arg))
+
+        def browse(self, key, op, **kwargs):
+            self.browse_calls.append((key, op, kwargs))
+            return {"ok": True, "op": op}
 
     def test_adds_art_path_beside_image_key(self):
         payload = {
@@ -252,6 +258,13 @@ class TestCachingSession(ArtServerTestCase):
         wrapped = art.CachingSession(fake, self._cache())
         wrapped.command("seek", 42)
         self.assertEqual(fake.commands, [("seek", 42)])
+
+    def test_forwards_browse_to_the_wrapped_session_with_arguments_intact(self):
+        fake = self._FakeSession({"v": 1, "status": "ok", "core": None, "zone": None, "zones": []})
+        wrapped = art.CachingSession(fake, self._cache())
+        reply = wrapped.browse("widget", "search", term="x")
+        self.assertEqual(fake.browse_calls, [("widget", "search", {"term": "x"})])
+        self.assertEqual(reply, {"ok": True, "op": "search"})
 
     def _cache(self):
         return art.Cache(self.tmp.name)
@@ -307,6 +320,40 @@ class TestCachingSessionSerialization(unittest.TestCase):
                 session.peak_concurrent, 1,
                 "two snapshot() calls overlapped -- CachingSession is not "
                 "serializing access to the wrapped session")
+
+
+class TestCachingSessionForwardsWhatServerNeeds(unittest.TestCase):
+    """The bug this guards against: CachingSession is a decorator that
+    silently drops any session method it doesn't explicitly forward, and a
+    missing one only surfaces as AttributeError on a live call -- which is
+    exactly how `browse` shipped broken, discovered only against a real
+    Core. This reads the required method list out of server.py itself
+    (every `self._session.<name>(` call site) rather than hardcoding it, so
+    a future verb that adds a new self._session.<name>(...) call and
+    forgets the matching CachingSession wrapper fails this test immediately
+    instead of at runtime.
+    """
+
+    def test_exposes_every_session_method_server_py_calls(self):
+        server_path = os.path.join(
+            os.path.dirname(__file__), "..", "..", "scripts", "tonearm_lib", "server.py")
+        with open(server_path, "r") as handle:
+            source = handle.read()
+        methods = sorted(set(re.findall(r"self\._session\.(\w+)\(", source)))
+        # A regex that stopped matching anything would make every assertion
+        # below vacuously pass -- guard against that failure mode too.
+        self.assertTrue(
+            methods,
+            "found no self._session.<name>( call sites in server.py -- the "
+            "regex is broken, not the code")
+        for name in methods:
+            self.assertTrue(
+                hasattr(art.CachingSession, name),
+                "CachingSession has no %r, but server.py calls "
+                "self._session.%s(...) -- add a forwarding method" % (name, name))
+            self.assertTrue(
+                callable(getattr(art.CachingSession, name)),
+                "CachingSession.%s exists but is not callable" % name)
 
 
 if __name__ == "__main__":
