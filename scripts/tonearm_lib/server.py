@@ -151,6 +151,15 @@ class Server:
             except browse.BrowseError as exc:
                 reply = {"v": 1, "ok": False, "error": exc.token,
                          "message": exc.message}
+                if exc.level:
+                    # Spec 5.1.1/5.2: a `stale` reply carries the current
+                    # level so the widget can re-render, and BrowsePane._apply
+                    # is already written expecting it. Merged AFTER the error
+                    # fields are built and with `ok` stripped, so the level
+                    # payload's own `ok: true` can never turn an error reply
+                    # into a success one.
+                    reply.update({k: v for k, v in exc.level.items()
+                                  if k != "ok"})
                 blob = (json.dumps(reply) + "\n").encode()
             except Exception:
                 # A browse failure -- including a reply that fails to
