@@ -8,6 +8,8 @@ import os
 import socket
 import threading
 
+from . import browse
+
 LOG = logging.getLogger("tonearmd.server")
 
 
@@ -117,6 +119,49 @@ class Server:
         if cmd == "status":
             try:
                 conn.sendall((json.dumps(self._session.snapshot()) + "\n").encode())
+            except OSError:
+                pass
+            conn.close()
+            return
+
+        if cmd == "browse":
+            # Deliberately NOT under self._lock. A browse round-trip is far
+            # slower than a snapshot, and holding the broadcast lock here
+            # would stall every subscriber for its duration (spec 7.5, and
+            # docs/FOLLOWUPS.md item 3). Nothing here touches the subscriber
+            # list, so there is nothing for that lock to protect.
+            payload = dict(request)
+            payload.pop("cmd", None)
+            key = payload.pop("session", None) or "widget"
+            op = payload.pop("op", None) or ""
+            # Serialization is deliberately INSIDE this guarded region, not
+            # a separate step after it. `json.dumps` on a reply that
+            # contains something non-serializable raises TypeError -- if
+            # that happened after the try/except below, it would kill this
+            # thread before conn.close() ran, and the client's readline()
+            # would block forever rather than see EOF. That is exactly the
+            # permanent-freeze failure this branch exists to prevent, so
+            # the only thing left outside the guard is the write itself,
+            # where OSError genuinely is the only expected failure.
+            try:
+                reply = self._session.browse(key, op, **payload)
+                reply = dict(reply)
+                reply["v"] = 1
+                blob = (json.dumps(reply) + "\n").encode()
+            except browse.BrowseError as exc:
+                reply = {"v": 1, "ok": False, "error": exc.token,
+                         "message": exc.message}
+                blob = (json.dumps(reply) + "\n").encode()
+            except Exception:
+                # A browse failure -- including a reply that fails to
+                # serialize -- must never take the daemon down or leave the
+                # widget waiting on a line that never arrives.
+                LOG.exception("browse %r failed", op)
+                reply = {"v": 1, "ok": False, "error": "roon_error",
+                         "message": "browse failed"}
+                blob = (json.dumps(reply) + "\n").encode()
+            try:
+                conn.sendall(blob)
             except OSError:
                 pass
             conn.close()
