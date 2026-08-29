@@ -33,6 +33,23 @@ class TestArgParsing(unittest.TestCase):
         self.assertEqual(cli.to_request(["zone", "unpin"]),
                          {"cmd": "zone", "arg": "unpin"})
 
+    def test_transfer_carries_the_destination_id(self):
+        self.assertEqual(cli.to_request(["transfer", "z2"]),
+                         {"cmd": "transfer", "arg": "z2"})
+
+    def test_transfer_without_a_destination_is_a_usage_error(self):
+        # Not a silent no-op: `transfer` alone has no sensible default
+        # destination, and defaulting to anything would move audio into a room
+        # the user never named.
+        with self.assertRaises(ValueError):
+            cli.to_request(["transfer"])
+
+    def test_transfer_keeps_the_id_a_string(self):
+        # Roon zone ids are opaque strings ("1601abc"). A numeric-looking one
+        # must not be coerced the way seek/volume arguments are.
+        self.assertEqual(cli.to_request(["transfer", "1601"]),
+                         {"cmd": "transfer", "arg": "1601"})
+
     def test_a_non_numeric_seek_is_rejected_rather_than_sent(self):
         with self.assertRaises(ValueError):
             cli.to_request(["seek", "later"])

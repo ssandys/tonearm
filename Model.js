@@ -282,6 +282,14 @@ var GLYPH_FAULT   = String.fromCodePoint(0xf0026)   // nf-md-alert
 // widget with nothing logged.
 var GLYPH_VINYL = String.fromCodePoint(0xefbd)      // nf-fa-record_vinyl
 
+// "Move the music here", on each zone row that can receive it. Deliberately
+// NOT a right arrow: `->` already means "descend into this row" in the browse
+// pane's key map, and one glyph meaning two things inside one popup is the
+// same collision the bar's product icon was introduced to remove. Cast is the
+// conventional "send audio to this device" mark and carries no other meaning
+// here. Coverage checked with `fc-list :charset=f0118`.
+var GLYPH_TRANSFER = String.fromCodePoint(0xf0118)  // nf-md-cast
+
 // Popup transport/volume glyphs. Same rule as the four above: built, never
 // typed, and read out of the Nerd Font's own cmap rather than guessed --
 // Panel.qml originally used plain Unicode media symbols (U+23EE/U+25B6/
@@ -427,6 +435,25 @@ function zoneList(state) {
 // two places in Panel.qml (the "pinned" row label and the pin/unpin click
 // branch) -- both untested by design, since Panel.qml has no test coverage.
 // One tested copy here instead of two untested ones there.
+// Can the stream be moved to this zone right now? Kept here rather than in a
+// QML binding because it is four decidable conditions, and Panel.qml is the
+// one file in this project with no tests.
+//
+// `now_playing` rather than `state === "playing"`: transfer_zone moves the
+// QUEUE, so a paused zone is still transferable -- and gating on playback
+// would hide the control exactly when someone pauses in one room meaning to
+// resume in another. What it needs is something to move.
+//
+// The severity check matters because the control is otherwise a click that
+// silently does nothing: `_command_locked` drops every API verb when the
+// daemon is not connected.
+function canTransferTo(state, id) {
+  if (!state || severityFor(state.status) !== "ok") return false
+  var zone = state.zone
+  if (!zone || !zone.now_playing) return false
+  return zone.id !== id
+}
+
 function isZonePinned(zone, id) {
   return !!(zone && zone.pinned && zone.id === id)
 }
@@ -518,6 +545,7 @@ if (typeof module !== "undefined") {
     GLYPH_PLAYING: GLYPH_PLAYING,
     GLYPH_PAUSED: GLYPH_PAUSED,
     GLYPH_VINYL: GLYPH_VINYL,
+    GLYPH_TRANSFER: GLYPH_TRANSFER,
     GLYPH_FAULT: GLYPH_FAULT,
     GLYPH_PREV: GLYPH_PREV,
     GLYPH_NEXT: GLYPH_NEXT,
@@ -530,6 +558,7 @@ if (typeof module !== "undefined") {
     headerStatus: headerStatus,
     zoneList: zoneList,
     isZonePinned: isZonePinned,
+    canTransferTo: canTransferTo,
     volumeFraction: volumeFraction,
     volumeFromFraction: volumeFromFraction,
     nextRetryDelay: nextRetryDelay,

@@ -767,6 +767,45 @@ Panel {
                   else service.send("zone", "pin", zoneRow.modelData.id)
                 }
               }
+
+              // "Move the music here." Declared AFTER the row's MouseArea on
+              // purpose: siblings are hit-tested in reverse declaration order,
+              // so a glyph declared before it would be covered by the
+              // full-row pin handler and never receive a click.
+              //
+              // Clicking the row still only changes which zone the widget
+              // FOLLOWS. This is the one control that moves audio between
+              // rooms, so it gets its own small target rather than sharing a
+              // gesture with the view change -- and it never collides with the
+              // "pinned" label above, because canTransferTo excludes the
+              // followed zone, which is the only row that label appears on.
+              Text {
+                id: transferGlyph
+                anchors.right: parent.right
+                anchors.rightMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                visible: Model.canTransferTo(root.st, zoneRow.modelData.id)
+                text: Model.GLYPH_TRANSFER
+                // Lighting up on hover is what says "this is a separate
+                // target", on a row whose whole surface is already clickable.
+                color: transferArea.containsMouse ? Color.accent : root.fgFaint
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+
+                MouseArea {
+                  id: transferArea
+                  anchors.fill: parent
+                  // The glyph is ~11 units square in a 26-unit row; without
+                  // this the target is small enough to miss, and missing means
+                  // silently repinning instead.
+                  anchors.margins: -Style.space(6)
+                  hoverEnabled: true
+                  // The popup deliberately stays open: the daemon repins to
+                  // the destination, so the card above redraws as the new
+                  // zone. That redraw is the confirmation the action worked.
+                  onClicked: service.send("transfer", zoneRow.modelData.id)
+                }
+              }
             }
           }
         }

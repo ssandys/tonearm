@@ -54,6 +54,30 @@ wrong — the daemon isn't running, the extension isn't enabled yet, the Core is
 unreachable — the header says so in place of the Core's name, so you never
 have to guess why nothing is playing.
 
+## Zones
+
+The `ZONES` list at the bottom of the popup does two different things, and
+they are deliberately separate targets:
+
+| Action | What it does |
+|---|---|
+| Click a zone's name | Follow that zone — changes what the widget *shows*. Clicking the zone you're already pinned to unpins it, so the widget goes back to following whichever zone is playing. |
+| Click the cast icon at the right of a row | **Move the music there.** Roon's queue, the current track and its position all move to that zone. |
+
+The cast icon only appears on rows that can actually receive the stream: not
+on the zone you're already listening to, and not when there's nothing playing.
+Because it moves the queue rather than the playback state, it works while
+paused too — pause in the kitchen, move it to the study, press play there.
+
+If you had pinned a zone, the widget re-pins to the destination so it doesn't
+sit watching the room you just emptied. If you weren't pinned, it follows the
+music on its own as usual.
+
+From a script: `tonearmctl transfer <zone_id>`.
+
+There's no keyboard shortcut for this yet — the zone rows aren't part of the
+popup's keyboard cursor, which currently only covers search results.
+
 ## Library search
 
 The popup can search your whole Roon library — not just the current zone or

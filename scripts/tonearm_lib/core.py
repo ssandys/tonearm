@@ -502,16 +502,27 @@ class RoonSession:
         with self._lock:
             self._command_locked(verb, arg)
 
+    def _pin_locked(self, zone_id: str | None) -> None:
+        """Follow `zone_id` (or resume auto-follow when None), and persist it.
+
+        Shared by the `zone` verb and by `transfer`, which re-pins to the
+        destination so a pinned widget is not left watching the room it just
+        emptied. Factored out rather than duplicated because the arbiter
+        update and the config write have to stay in step -- a caller that did
+        one without the other would follow the right zone until the next
+        restart and then silently revert.
+        """
+        if zone_id is None:
+            self._arbiter.unpin()
+        else:
+            self._arbiter.pin(zone_id)
+        self._cfg["pinned_zone_id"] = zone_id
+        config.save(self._cfg)
+        self._publish()
+
     def _command_locked(self, verb: str, arg) -> None:
         if verb == "zone":
-            if arg == "unpin":
-                self._arbiter.unpin()
-                self._cfg["pinned_zone_id"] = None
-            else:
-                self._arbiter.pin(arg)
-                self._cfg["pinned_zone_id"] = arg
-            config.save(self._cfg)
-            self._publish()
+            self._pin_locked(None if arg == "unpin" else arg)
             return
 
         if not self._api:
@@ -542,6 +553,28 @@ class RoonSession:
             outputs = self._api.zones.get(zid, {}).get("outputs") or []
             if outputs:
                 self._api.change_volume_raw(outputs[0]["output_id"], int(arg), "absolute")
+        elif verb == "transfer":
+            # `zid` is the followed zone, resolved above -- the source is never
+            # the caller's to choose, so the only argument is the destination.
+            #
+            # Both guards keep a click from becoming a request Roon would
+            # accept and act on pointlessly: transferring a zone onto itself,
+            # and a destination id from a widget whose zone list predates a
+            # room disappearing.
+            if arg == zid:
+                LOG.warning("dropping transfer: %r is already the followed zone", arg)
+                return
+            if arg not in self._api.zones:
+                LOG.warning("dropping transfer: unknown destination %r", arg)
+                return
+            self._api.transfer_zone(zid, arg)
+            # Follow the music, but only for a user who had already chosen a
+            # room. Unpinned, the arbiter's auto-follow lands on the
+            # destination by itself once audio starts there; pinning here would
+            # convert someone who deliberately follows the music into someone
+            # locked to one zone.
+            if self._arbiter.pinned_id is not None:
+                self._pin_locked(arg)
         elif verb in ("mute", "unmute"):
             # Unlike volume, mute/unmute deliberately applies to every output
             # in the zone, not just outputs[0]: muting the whole zone (not

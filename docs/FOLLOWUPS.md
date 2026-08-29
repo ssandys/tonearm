@@ -138,6 +138,19 @@ library, a loaded Core — reads as a hang. The fix is a busy indicator bound
 to the existing `busy` property; no new state is needed, just something
 visible while it's true.
 
+## 12. Zone transfer is mouse-only
+
+`transfer` is reachable from the CLI and from the cast icon on each zone row,
+but not from the keyboard. The popup's cursor model (`BrowsePane`'s `cursor`,
+driven by `PanelKeyCatcher.moveRequested`) covers only browse result rows —
+the zone list is not in it at all, so there is nothing for a key to act on.
+
+Adding it means extending the cursor over two structurally different row
+kinds in two different files, and finding a free key: `h j k l x X` and Space
+are taken by the shell before the widget sees them, and every other printable
+key opens search. Neither half is hard; together they are their own piece of
+work rather than a line in the transfer change.
+
 ## 13. `tonearmctl` sets no socket timeout anywhere
 
 `scripts/tonearmctl` calls `socket.connect()`, `sendall()` and

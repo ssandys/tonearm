@@ -250,3 +250,43 @@ test("headerStatus and tooltipText agree on every unhealthy state", () => {
   }
   assert.notStrictEqual(M.headerStatus(PLAYING), M.tooltipText(PLAYING))
 })
+
+test("GLYPH_TRANSFER codepoint is asserted, not shape-checked", () => {
+  // nf-md-cast. Deliberately NOT a right arrow: `->` already means "descend
+  // into this row" in the browse pane's key map, and reusing the shape for
+  // "move the music here" would give one glyph two meanings in one popup.
+  assert.strictEqual(M.GLYPH_TRANSFER.codePointAt(0), 0xf0118)
+})
+
+test("canTransferTo is false for the zone already playing", () => {
+  // The source and destination cannot be the same zone. Roon would accept it;
+  // the row would just be an inert control that looks live.
+  assert.strictEqual(M.canTransferTo(PLAYING, "z1"), false)
+  assert.strictEqual(M.canTransferTo(PLAYING, "z2"), true)
+})
+
+test("canTransferTo needs something to move", () => {
+  // transfer_zone moves the QUEUE, so a paused zone is still transferable --
+  // gating on `playing` would wrongly hide the control exactly when someone
+  // pauses in one room to resume in another. What it needs is now_playing.
+  const paused = JSON.parse(JSON.stringify(PLAYING))
+  paused.zone.state = "paused"
+  assert.strictEqual(M.canTransferTo(paused, "z2"), true)
+
+  const empty = JSON.parse(JSON.stringify(PLAYING))
+  empty.zone.now_playing = null
+  assert.strictEqual(M.canTransferTo(empty, "z2"), false)
+})
+
+test("canTransferTo is false whenever the daemon is not healthy", () => {
+  // Offering to move audio while the daemon cannot reach the Core produces a
+  // click that silently does nothing.
+  assert.strictEqual(M.canTransferTo(null, "z2"), false)
+  assert.strictEqual(M.canTransferTo({ status: "unreachable", zone: null }, "z2"), false)
+  assert.strictEqual(M.canTransferTo({ status: "connecting", zone: null }, "z2"), false)
+  assert.strictEqual(M.canTransferTo({ status: "ok", core: CORE, zone: null }, "z2"), false)
+
+  const stillConnecting = JSON.parse(JSON.stringify(PLAYING))
+  stillConnecting.status = "connecting"
+  assert.strictEqual(M.canTransferTo(stillConnecting, "z2"), false)
+})

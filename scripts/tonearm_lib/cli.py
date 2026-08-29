@@ -32,6 +32,14 @@ def to_request(argv: list[str]) -> dict:
             return {"cmd": "zone", "arg": argv[2]}
         raise ValueError("usage: tonearmctl zone pin <id> | zone unpin")
 
+    if verb == "transfer":
+        # The destination stays a STRING. Roon zone ids are opaque and can look
+        # numeric, so this must not go through the int() coercion the seek and
+        # volume verbs use above.
+        if len(argv) < 2:
+            raise ValueError("usage: tonearmctl transfer <zone_id>")
+        return {"cmd": "transfer", "arg": argv[1]}
+
     if verb == "browse":
         request = browse_request(argv)
         if request is None:
