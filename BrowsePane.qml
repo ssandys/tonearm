@@ -44,7 +44,19 @@ Item {
   // invisible child entirely, including the spacing that would otherwise be
   // reserved before it; a visible-but-zero-height pane would still cost that
   // spacing, which is the defect this property closes.
+  //
+  // `busy` and `path.length > 0` were added after `editing || hasResults ||
+  // errorText.length > 0` alone left two states with nothing visible: (1) a
+  // search in flight -- `search()` sets `editing = false` synchronously
+  // before the reply repopulates rows/errorText, so without `busy` the pane
+  // (and the field the user just typed into) would vanish for the
+  // round-trip; (2) a genuine zero-result search -- an `ok` reply with no
+  // rows leaves `errorText` cleared too, so without `path.length > 0` the
+  // "No results" Text below (itself gated on `path.length > 0`, not on row
+  // count, for exactly this reason) could never render, because its
+  // ancestor would already be `visible: false`.
   readonly property bool hasContent: root.editing || root.hasResults || root.errorText.length > 0
+                                      || root.busy || root.path.length > 0
 
   signal playStarted()
   signal closeRequested()
