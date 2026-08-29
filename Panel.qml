@@ -312,7 +312,7 @@ Panel {
               text: "Tonearm"
               color: root.fgMid
               font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
+              font.pixelSize: Style.font.title
               font.weight: Font.DemiBold
               font.letterSpacing: 0.6
             }
