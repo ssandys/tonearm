@@ -68,3 +68,42 @@ test("moveCursor clamps a cursor left past the end by a shorter page", () => {
 // `rowLabel` was cut in the pre-flight scan: nothing consumed it. An exported
 // helper with no caller is the kind of thing this project's own review rubric
 // treats as a defect, and it is trivial to add back if a tooltip ever wants it.
+
+test("activatePlayed is false when Enter descended instead of playing", () => {
+  // THE case this predicate exists for. `activate` plays if the row is
+  // playable and descends if it is not -- spec 2.4 measured that a category
+  // row and an album row are both hint "list" and cannot be told apart
+  // without descending, so the daemon decides and reports which happened.
+  //
+  // Get this wrong in the descend direction and Enter on `Albums` wipes the
+  // search and throws away the list the user was about to navigate.
+  assert.strictEqual(M.activatePlayed({ ok: true, played: false }), false)
+  assert.strictEqual(M.activatePlayed({ ok: true }), false)
+})
+
+test("activatePlayed is true only when the daemon says it played", () => {
+  assert.strictEqual(M.activatePlayed({ ok: true, played: true }), true)
+})
+
+test("activatePlayed rejects a failed reply even if it carries played", () => {
+  // A `stale` reply re-renders the level and can carry payload from it. It is
+  // not a play, and treating it as one would clear a search the user never
+  // finished acting on.
+  assert.strictEqual(M.activatePlayed({ ok: false, error: "stale", played: true }), false)
+  assert.strictEqual(M.activatePlayed({ ok: false, error: "no_zone" }), false)
+})
+
+test("activatePlayed survives no reply at all", () => {
+  // `_apply` passes through whatever the relay produced; a dead daemon yields
+  // null, and reaching into it would throw inside a signal handler, which Qt
+  // swallows silently.
+  assert.strictEqual(M.activatePlayed(null), false)
+  assert.strictEqual(M.activatePlayed(undefined), false)
+})
+
+test("activatePlayed is strict about the flag's type", () => {
+  // The wire carries a JSON boolean. A truthy string would mean some other
+  // producer is on the socket and the reply is not the shape we think.
+  assert.strictEqual(M.activatePlayed({ ok: true, played: "true" }), false)
+  assert.strictEqual(M.activatePlayed({ ok: true, played: 1 }), false)
+})

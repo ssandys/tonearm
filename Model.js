@@ -447,6 +447,25 @@ function zoneList(state) {
 // The severity check matters because the control is otherwise a click that
 // silently does nothing: `_command_locked` drops every API verb when the
 // daemon is not connected.
+// Did an `activate` reply actually start playback, or did it descend?
+//
+// spec 2.4 measured that a category row and an album row are both hint "list"
+// and cannot be told apart without descending, so the DAEMON decides which
+// happened and says so; the widget only reads the answer. This lives here
+// rather than as a condition inside BrowsePane's reply callback because it
+// decides whether a play clears the user's search, and getting it wrong in the
+// descend direction wipes the very list they were navigating -- a branch
+// Panel.qml and BrowsePane.qml have no way to cover, being the two files in
+// this project with no tests.
+//
+// `ok !== false` rather than `ok === true`: a reply with no `ok` at all has
+// not failed. `played === true` strictly, because a truthy non-boolean would
+// mean something other than tonearmd is answering on the socket.
+function activatePlayed(reply) {
+  if (!reply) return false
+  return reply.ok !== false && reply.played === true
+}
+
 function canTransferTo(state, id) {
   if (!state || severityFor(state.status) !== "ok") return false
   var zone = state.zone
@@ -559,6 +578,7 @@ if (typeof module !== "undefined") {
     zoneList: zoneList,
     isZonePinned: isZonePinned,
     canTransferTo: canTransferTo,
+    activatePlayed: activatePlayed,
     volumeFraction: volumeFraction,
     volumeFromFraction: volumeFromFraction,
     nextRetryDelay: nextRetryDelay,

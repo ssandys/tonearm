@@ -235,7 +235,9 @@ Item {
     if (root.editing || root.cursor < 0) return
     _send(["activate", String(root.cursor), String(root.levelId)],
           function (reply) {
-            if (reply && reply.ok !== false && reply.played === true) {
+            // Model.activatePlayed, not the condition inline: this is the one
+            // decision in the callback, and it is node-tested there.
+            if (Model.activatePlayed(reply)) {
               // Safe from inside an `after` callback: _apply has already
               // cleared `busy`, so resetPane's own _send is not suppressed.
               root.resetPane()
