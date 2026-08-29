@@ -361,7 +361,14 @@ Errors:
 | `stale` | The request's `level_id` does not match the session's current level (§5.1.1). The reply also carries the current level, so the widget can re-render. |
 | `bad_index` | `index` is outside the current level's loaded rows. |
 | `no_action` | Play was requested but no action list was reachable from that row (§4.3). |
+| `no_zone` | Play was requested with no zone selected to play into. Roon browse actions play into the zone named by `zone_or_output_id` in the browse opts; with none, invoking `Play Now` succeeds at the protocol level and plays nothing (measured). Failing loudly is mandatory — reporting `played: true` over silence is indistinguishable from working. Navigation (`search`/`enter`/`back`/`page`) is unaffected and works with no zone. |
 | `roon_error` | Roon returned an error or an unusable response. The session resets to root (§7.4). |
+
+Every browse call carries `zone_or_output_id`, read from the daemon's
+followed/pinned zone at call time (the widget never names it — §3 keeps the
+pinned zone the single target, and the popup already has a zone switcher). The
+`roon_error` reply also carries the current level, since the session has just
+reset underneath the widget and the pane must be told.
 
 A `stale` reply is the only error that is **not** a failure from the user's point of
 view: nothing went wrong, the screen was simply out of date. The pane re-renders and
@@ -438,14 +445,36 @@ introducing any.
 
 | Key | Behaviour |
 |---|---|
-| `/` or any letter | Focus the search field |
+| `/` | Focus the search field |
+| Any printable key except `h j k l x X` and Space | Focus the field, **seeded** with that character |
 | `Enter` (in field) | Submit the search |
 | `↑` `↓` | Move the row cursor |
 | `Enter` | `activate` — plays if playable, descends if not |
 | `→` | `enter` — always descends |
-| `q` | Queue the selected row |
+| `q` | Queue the selected row; with no row selected, start a search instead |
 | `←` | Back one level |
 | `Esc` | Back one level; at the top level, close the popup |
+
+**`h j k l x X` and Space cannot open the search field.** `PanelKeyCatcher`
+consumes them before `onTextKey` is emitted at all — `h`/`j`/`k`/`l` as
+`moveRequested`, `x`/`X` as `deleteRequested`, Space as `activateRequested` —
+so no widget-side handler can recover them. An earlier draft of this section
+and of the README promised "any letter", which was wrong for seven of them
+(no Queen, Kraftwerk, Led Zeppelin, Hendrix, Haim or XTC from an idle popup).
+`q` is the one that *was* recoverable: it is now resolved by context rather
+than claimed unconditionally.
+
+**Focus must be returned symmetrically.** `Ui/TextField.qml` inherits QQC2
+`TextField`, i.e. it *is* the `QQuickTextInput` and it **accepts** the keys it
+understands. Clearing the `blocked` flag is therefore not enough: everywhere
+the pane stops editing (search submitted, `Esc` in the field, back out of the
+field) it must also hand active focus back to the `PanelKeyCatcher`, or
+`Enter` re-runs the search, `q` types a `q`, and `←`/`→` move the text caret.
+
+**The seed matters.** The key that opens the field is never `accepted` by the
+catcher, and the focus grab is deferred a frame, so the triggering character
+reaches nothing — the field must be seeded with it explicitly or the first
+letter of every query is silently dropped.
 
 `Enter` prefers **playing** over descending, and this is the single most important
 interaction choice in the design. An album row is both playable and descendable

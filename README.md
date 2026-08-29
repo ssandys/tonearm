@@ -57,20 +57,28 @@ the search field is hidden until you use it, on purpose, so the popup keeps
 its normal size when you're just glancing at what's playing. Nothing on
 screen advertises it.
 
-To search, open the popup and press `/` — or just start typing; any letter
-opens the field and starts your query with it. Press `Enter` to submit.
-Results come back grouped the way Roon's own search groups them: a top
-match, then `Artists`, `Albums`, `Composers`, `Tracks`, and `Works`, each
-row showing a count.
+To search, open the popup and press `/` — or just start typing; most
+printable keys open the field and start your query with that character.
+Press `Enter` to submit. Results come back grouped the way Roon's own search
+groups them: a top match, then `Artists`, `Albums`, `Composers`, `Tracks`,
+and `Works`, each row showing a count.
+
+The exceptions are `h`, `j`, `k`, `l`, `x`, `X` and Space: the Omarchy
+shell's own panel key handler claims those before any widget sees them
+(`h`/`j`/`k`/`l` are vim-style movement, and `j`/`k` also double as Down/Up
+here; `x` is delete; Space activates). They cannot start a search — press `/`
+first and type them into the field. `q` starts a search when no row is
+selected and queues the selected row when one is.
 
 | Key | Behavior |
 |---|---|
-| `/` or any letter | Focus the search field |
+| `/` | Focus the search field |
+| Any printable key except `h j k l x X` and Space | Focus the field and start the query with that character |
 | `Enter` (while typing) | Submit the search |
 | `↑` / `↓` | Move the selection |
 | `Enter` (on a result) | Play if the row is playable, otherwise descend into it (e.g. `Albums` → its list of albums) |
 | `→` | Descend into the selected row |
-| `q` | Queue the selected row without closing the popup |
+| `q` | Queue the selected row without closing the popup (with no row selected, starts a search instead) |
 | `←` | Back one level |
 | `Esc` | Back one level; closes the popup at the top level |
 

@@ -149,7 +149,34 @@ only place a user can learn about it. A discoverability affordance — a
 placeholder hint row, a `/` glyph near the popup header — would close this
 without giving up the idle-height goal, but nothing does yet.
 
-## 13. Tidiness
+## 13. `tonearmctl` sets no socket timeout anywhere
+
+`scripts/tonearmctl` calls `socket.connect()`, `sendall()` and
+`makefile("r").readline()` on a socket left in blocking mode with no
+`settimeout()` on any path. A daemon that accepts the connection and then
+never answers — the exact shape of the Roon `tcp_port` hang recorded in
+`AGENTS.md`, and of any deadlock inside `_handle` — leaves `readline()`
+blocked forever. There is no timeout, no retry and no way out but a signal.
+
+Pre-existing, not introduced by browse: `status` has the identical exposure,
+and `setup.sh --check` uses `status` as its health probe, so a hung daemon
+turns the health check itself into a hang.
+
+Browse makes it reachable from the UI, and it **combines with the popup's own
+Esc handling into an unclosable popup**: `BrowsePane` gates every op on
+`busy`, and `busy` is only cleared when a reply arrives. A `browse` request
+that never gets an answer therefore pins `busy` true forever. (The fix wave
+made `handleBack()` return false when `busy` suppressed the send, so `Esc`
+now falls through to closing the popup instead of being swallowed — that
+closes the *unclosable* half. The wedged relay process and the permanently
+`busy` pane remain.)
+
+The fix is a `settimeout()` on the socket covering connect and the
+single-reply reads (`subscribe`'s stream is the one path that legitimately
+blocks indefinitely), plus a non-zero exit so `Service.qml`'s existing
+respawn-with-backoff treats it like any other failed relay.
+
+## 14. Tidiness
 
 - The `(started_at, id)` ranking tuple is duplicated between `Arbiter.observe()`'s
   recompute and `select()`'s active branch.
