@@ -176,7 +176,72 @@ single-reply reads (`subscribe`'s stream is the one path that legitimately
 blocks indefinitely), plus a non-zero exit so `Service.qml`'s existing
 respawn-with-backoff treats it like any other failed relay.
 
-## 14. Tidiness
+## 14. A reset lost to `busy` at popup close is discarded, not delayed
+
+`resetPane()` routes through `_send`, which returns early when `busy` is true —
+so closing the popup while a browse is in flight drops the reset. Nothing
+retries it. The in-flight reply then lands, `_apply` clears `busy` and
+`_applyLevel` **repopulates** `rows`/`path`. On the next open, `hasContent` is
+true via `path.length > 0`, so the separator and the whole pane render.
+
+That is exactly the idle-height regression items R13/R14 cost two fix rounds to
+close, still reachable on this one path — press Esc or click away immediately
+after Enter. Combined with item 13 (no socket timeout), a wedged daemon pins
+`busy` forever and `resetPane()` can never fire at all.
+
+Clearing state optimistically does not work — it loses to the same in-flight
+reply. The fix is a `_resetPending` flag set by `resetPane()` when `_send`
+returns false, honoured in `_apply` once `busy` clears.
+
+## 15. `play()` re-reads the zone several times (TOCTOU)
+
+`_opts()` calls the zone provider on every browse and load, so a single `play()`
+reads it many times across the descent walk and the unwind. If the zone
+*vanishes* between the `no_zone` guard and the action invoke, the C0 failure
+returns in miniature: `played: true` over silence. If it merely *changes*, the
+play lands in the new room, which is arguably what a repin should do.
+
+Browse position is per-`multi_session_key`, not per-zone, so a mid-play repin
+cannot corrupt the walk itself — only the final invoke's target matters, and it
+uses the freshest value. Severity is low. The cheap close is to read the zone
+once at the top of `play()` and thread it through as an `_opts(zone=…)`
+override, leaving per-call reads everywhere else.
+
+## 16. Browse threads call `Arbiter.observe()` outside `CachingSession`'s lock
+
+`CachingSession` exists specifically to serialize `Arbiter`'s unlocked mutations
+across threads — its docstring says so at length. But `CachingSession.browse()`
+is a deliberate unlocked pass-through, and `selected_zone_id()` reaches
+`_zones()` → `Arbiter.observe()`. So browse threads now mutate
+`_last_state`/`_started_at`/`_counter` outside the lock added to protect them,
+concurrently with subscriber `snapshot()` calls that hold it.
+
+This is a frequency increase on a pre-existing hazard, not a new class of one:
+`RoonSession._publish()` already bypasses the wrapper entirely, and `art.py`
+records that. `observe()` was verified idempotent (1× vs 5× produce identical
+state; 10× consumes one counter value), and under CPython each dict write and
+`next(counter)` is atomic, so nothing corrupts. Worst case is `_last_followed`
+computed from a momentarily mixed `_started_at` — a transient wrong zone in the
+bar.
+
+One visible consequence worth knowing: extra sampling between publishes can now
+catch a zone that flaps playing→paused→playing and would previously have gone
+unnoticed, so the followed zone can change because the user opened the browse
+popup.
+
+## 17. Clicking away from the search field leaves the key catcher blocked
+
+`BrowsePane`'s `field.onActiveFocusChanged` handles only the gaining edge, so
+losing focus by mouse — clicking elsewhere in the popup — never clears
+`editing`. `PanelKeyCatcher` stays `blocked: true` while nothing holds field
+focus, so keyboard navigation goes dead until the field is focused and released
+again.
+
+Pre-existing and untouched by the browse work, but browse is what made the popup
+keyboard-driven enough for it to matter. The fix is to call `releaseSearch()` on
+the losing edge.
+
+## 18. Tidiness
 
 - The `(started_at, id)` ranking tuple is duplicated between `Arbiter.observe()`'s
   recompute and `select()`'s active branch.
