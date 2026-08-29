@@ -174,9 +174,9 @@ class Cache:
 
 
 class CachingSession:
-    """Wraps a session (anything with `.snapshot()` / `.command()`, i.e. a
-    `core.RoonSession`) to attach a locally-cached `art_path` to the
-    followed zone's `now_playing`, beside `image_key`.
+    """Wraps a session (anything with `.snapshot()` / `.command()` /
+    `.browse()`, i.e. a `core.RoonSession`) to attach a locally-cached
+    `art_path` to the followed zone's `now_playing`, beside `image_key`.
 
     Every consumer of `.snapshot()` -- the immediate reply to a new
     subscriber and every broadcast alike -- goes through this one method,
@@ -258,3 +258,22 @@ class CachingSession:
 
     def command(self, verb: str, arg=None) -> None:
         self._session.command(verb, arg)
+
+    def browse(self, key: str, op: str, **kwargs) -> dict:
+        # Deliberately NOT under self._lock, for two independent reasons:
+        #
+        # 1. A browse is a network round-trip to the Roon Core, far slower
+        #    than a snapshot. Holding this lock for its duration would stall
+        #    every subscriber's snapshot() call for as long as the browse
+        #    took. Keeping browse off the subscriber path is a core design
+        #    property of this feature, not an oversight.
+        #
+        # 2. The same reentrancy hazard documented above for command(): this
+        #    lock is non-reentrant, and a locked browse() risks the same
+        #    one-thread self-deadlock shape -- some future browse op that
+        #    ends up calling back into snapshot() on the same thread would
+        #    hang trying to reacquire a lock it already holds.
+        #
+        # Pure pass-through, no art logic: browse replies carry image_key,
+        # and it's the widget's job to build URLs from it, not this class's.
+        return self._session.browse(key, op, **kwargs)
