@@ -112,6 +112,24 @@ silently. These are not hypotheticals; each was measured.
 | **Overlapping siblings are hit-tested in REVERSE declaration order** — the last one declared wins. | The zone rows' transfer glyph is declared *after* the full-row pin `MouseArea` for this reason; declared before it, the glyph is painted but every click on it repins instead, with nothing logged. Any control placed inside a row that already has a full-bleed `MouseArea` has to come after it. |
 | **A `MouseArea` with negative margins is hit-tested outside its parent** as long as nothing on the path sets `clip`. | That is how a 3-unit seek track gets a usable click band. Give it a *shorter* bottom margin than top, though: at the same -8 it covers the top of the play button below. Paint order happens to resolve that correctly (later sibling wins), but a hit box that only works because of sibling ordering breaks silently the next time the column is reordered. |
 
+### Verified QML idiom
+
+Measured against the live shell, not read from the Quickshell docs — which
+describe a different component set. Do not substitute anything from them.
+
+| Need | Correct form | Notes |
+|---|---|---|
+| Popup window | `KeyboardPanel` from `qs.Ui` | Not `PopupWindow`. |
+| Keyboard focus | `KeyboardPanel.focusTarget: <catcher>` | |
+| Key dispatch | `PanelKeyCatcher` from `qs.Ui` | Signals: `moveRequested(int dx, int dy)`, `activateRequested()`, `returnRequested()`, `closeRequested()`, `deleteRequested()`, `tabRequested(int direction)`, `textKey(string text)`. |
+| Suppress key handling while typing | `PanelKeyCatcher.blocked: <editor is active>` | Gate on state, never on `activeFocus`. Precedent: the shell's own `plugins/panels/network/Panel.qml` uses `blocked: root.passwordSsid !== ""`. |
+| Text input | `TextField` from `qs.Ui` | `/usr/share/omarchy/shell/Ui/TextField.qml`. NOT `QtQuick.Controls`, which exports a `TextField` of its own — which one wins is decided by import order. |
+| Spacing / sizes | `Style.space(N)`, `Style.font.<token>` | Never hardcode pixels. Tokens: `caption`, `bodySmall`, `body`, `subtitle`, `title`, `heading`. There is no `Style.font.small`. |
+| Colours | `Color.foreground`, `Color.muted`, `Color.background`, `Color.accent` | `Color.muted` is `#707880`. There is no `Color.surfaceVariant`, `Color.red` or `Color.selection`; blend off `Color.foreground` with `Util.alpha()`. |
+| Panel sizing | `panel.fittedContentWidth(...)` / `fittedContentHeight(...)` | |
+| Column inside panel | Anchor `left`/`right`/`top` only | Anchoring `bottom` while `contentHeight` binds back to `implicitHeight` is a binding loop. |
+| Spawning a process | One `Process` per invocation | `Process.command` assigned mid-run is **silently ignored**. |
+
 ### Verification tooling
 
 | Trap | What happens |

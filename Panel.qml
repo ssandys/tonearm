@@ -5,7 +5,7 @@ import qs.Ui
 import "Model.js" as Model
 
 // Root is Ui/Panel.qml's `Panel`, NOT `PanelBase` (does not exist here) and
-// NOT `BarWidget` (no open/close/toggle lifecycle). See the plan's "Verified
+// NOT `BarWidget` (no open/close/toggle lifecycle). See AGENTS.md's "Verified
 // QML idiom" table and ~/Src/headway/Panel.qml, the structural reference.
 Panel {
   id: root
