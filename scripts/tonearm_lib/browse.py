@@ -93,14 +93,17 @@ def normalize_rows(items) -> list:
 
 PAGE = 100
 
-# Roon's action titles, measured on yavin (spec 2.4). Identical for albums
-# and tracks.
-ACTIONS = {
-    "play_now": "Play Now",
-    "add_next": "Add Next",
-    "queue": "Queue",
-    "start_radio": "Start Radio",
-}
+# Roon's action title, measured on yavin (spec 2.4). Identical for albums and
+# tracks.
+#
+# There used to be four of these -- "Add Next", "Queue" and "Start Radio"
+# alongside this one -- reached through an `action` argument threaded from the
+# CLI through the wire protocol into play(). Queue was removed from the widget
+# because the popup has no way to SHOW a queue, which left all four as
+# protocol surface with no consumer and no path to one. Play Now is the only
+# action anything invokes, so the argument that selected between them is gone
+# too: the map, the unknown-action error, and a wire field.
+PLAY_NOW = "Play Now"
 
 # How deep to hunt for an action list before giving up. Measured live
 # against a real Core (R12 fix round 3): a track is 1 descent from its row;
@@ -440,16 +443,14 @@ class BrowseSession:
         self.level_id += 1
         return self.current()
 
-    def play(self, index: int, action: str, level_id=None) -> dict:
-        """Resolve the row's action list, invoke `action`, return to the level.
+    def play(self, index: int, level_id=None) -> dict:
+        """Resolve the row's action list, invoke Play Now, return to the level.
 
         Resolution is LAZY (spec 4.3): precomputing which rows are playable
         would cost a descent per row per page. The cost is 2-3 extra
         round-trips before audio starts, ~100-300ms.
         """
-        title = ACTIONS.get(action)
-        if title is None:
-            raise BrowseError("bad_index", "unknown action %r" % (action,))
+        title = PLAY_NOW
         with self._lock:
             key = self._check(index, level_id)
             # After the stale check, which is the fail-safe one and must keep
@@ -509,7 +510,7 @@ class BrowseSession:
         with self._lock:
             self._check(index, level_id)
             try:
-                return self.play(index, "play_now", level_id)
+                return self.play(index, level_id)
             except BrowseError as exc:
                 # ONLY no_action falls back to a descend. `no_zone` in
                 # particular must propagate: descending into an album because

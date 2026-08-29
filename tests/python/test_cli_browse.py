@@ -26,12 +26,20 @@ class TestBrowseArgv(unittest.TestCase):
         self.assertEqual(request["index"], 2)
         self.assertEqual(request["level_id"], 7)
 
-    def test_play_carries_the_action(self):
-        request = cli.browse_request(["browse", "play", "0", "queue", "9"])
+    def test_play_takes_an_index_and_a_level_only(self):
+        request = cli.browse_request(["browse", "play", "0", "9"])
         self.assertEqual(request["op"], "play")
-        self.assertEqual(request["action"], "queue")
         self.assertEqual(request["index"], 0)
         self.assertEqual(request["level_id"], 9)
+        # No `action` field at all. Play Now is the only action there is, so
+        # the argument that used to select between actions is gone from the
+        # wire protocol, not merely defaulted.
+        self.assertNotIn("action", request)
+
+    def test_play_rejects_the_old_three_argument_form(self):
+        # `browse play 0 queue 9` used to parse. It must not silently succeed
+        # now by reading "queue" as the level id.
+        self.assertIsNone(cli.browse_request(["browse", "play", "0", "queue", "9"]))
 
     def test_back_needs_no_arguments(self):
         self.assertEqual(cli.browse_request(["browse", "back"])["op"], "back")

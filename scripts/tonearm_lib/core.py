@@ -567,9 +567,7 @@ class RoonSession:
         if op == "activate":
             return session.activate(kwargs.get("index"), kwargs.get("level_id"))
         if op == "play":
-            return session.play(kwargs.get("index"),
-                                kwargs.get("action") or "play_now",
-                                kwargs.get("level_id"))
+            return session.play(kwargs.get("index"), kwargs.get("level_id"))
         if op == "back":
             return session.back()
         if op == "page":

@@ -65,24 +65,16 @@ class TestPlayAlbum(unittest.TestCase):
         # spec 2.4: an album is 2 descents from its row to the action list.
         api, s, reply = at_albums()
         api.calls.clear()
-        s.play(0, "play_now", reply["level_id"])
+        s.play(0, reply["level_id"])
         titles = invoked_titles(api, yavin_levels())
         self.assertIn("Play Album", titles)
         self.assertIn("Play Now", titles)
-
-    def test_queue_invokes_queue_not_play_now(self):
-        api, s, reply = at_albums()
-        api.calls.clear()
-        s.play(0, "queue", reply["level_id"])
-        titles = invoked_titles(api, yavin_levels())
-        self.assertIn("Queue", titles)
-        self.assertNotIn("Play Now", titles)
 
     def test_returns_to_the_level_the_user_was_on(self):
         # The user must not be teleported into the action list.
         api, s, reply = at_albums()
         api.calls.clear()
-        out = s.play(0, "play_now", reply["level_id"])
+        out = s.play(0, reply["level_id"])
         self.assertEqual(out["path"], ["Search", "Albums"])
         self.assertEqual([r["title"] for r in out["rows"]],
                          ["Dead Man's Party", "Nothing To Fear"])
@@ -107,15 +99,8 @@ class TestPlayAlbum(unittest.TestCase):
         api, s, reply = at_albums()
         api.calls.clear()
         with self.assertRaises(browse.BrowseError) as caught:
-            s.play(0, "play_now", reply["level_id"] + 99)
+            s.play(0, reply["level_id"] + 99)
         self.assertEqual(caught.exception.token, "stale")
-        self.assertEqual(api.calls, [])
-
-    def test_an_unknown_action_is_rejected_before_touching_roon(self):
-        api, s, reply = at_albums()
-        api.calls.clear()
-        with self.assertRaises(browse.BrowseError):
-            s.play(0, "delete_everything", reply["level_id"])
         self.assertEqual(api.calls, [])
 
 
@@ -124,7 +109,7 @@ class TestPlayTrack(unittest.TestCase):
         # spec 2.4: a track is 1 descent, an album is 2. Same code path.
         api, s, reply = at_tracks()
         api.calls.clear()
-        s.play(0, "play_now", reply["level_id"])
+        s.play(0, reply["level_id"])
         self.assertIn("Play Now", invoked_titles(api, yavin_levels()))
         # Ground truth on the unwind depth, same reasoning as the album
         # test above: a track's row IS its own action list (1 descent),
@@ -140,13 +125,13 @@ class TestNoAction(unittest.TestCase):
         api, s, reply = at_albums()
         # "Nothing To Fear" has _goes_to None -- a dead end.
         with self.assertRaises(browse.BrowseError) as caught:
-            s.play(1, "play_now", reply["level_id"])
+            s.play(1, reply["level_id"])
         self.assertEqual(caught.exception.token, "no_action")
 
     def test_a_failed_play_leaves_the_user_where_they_were(self):
         api, s, reply = at_albums()
         try:
-            s.play(1, "play_now", reply["level_id"])
+            s.play(1, reply["level_id"])
         except browse.BrowseError:
             pass
         self.assertEqual(s.current()["path"], ["Search", "Albums"])
@@ -200,7 +185,7 @@ class TestZoneTargeting(unittest.TestCase):
         api, s, reply = at_albums()
         api.calls.clear()
         api.load_calls.clear()
-        s.play(0, "play_now", reply["level_id"])
+        s.play(0, reply["level_id"])
         self.assertTrue(api.calls, "the play made no browse calls at all")
         self.assertTrue(api.load_calls, "the play made no load calls at all")
         for call in api.calls + api.load_calls:
@@ -224,7 +209,7 @@ class TestZoneTargeting(unittest.TestCase):
         api, s, reply = at_albums(zone=ZoneHolder(None))
         api.calls.clear()
         with self.assertRaises(browse.BrowseError) as caught:
-            s.play(0, "play_now", reply["level_id"])
+            s.play(0, reply["level_id"])
         self.assertEqual(caught.exception.token, "no_zone")
         self.assertEqual(api.calls, [])
 
@@ -260,7 +245,7 @@ class TestZoneTargeting(unittest.TestCase):
         holder.zone_id = "zone-study-04d1"
         api.calls.clear()
         api.load_calls.clear()
-        s.play(0, "play_now", reply["level_id"])
+        s.play(0, reply["level_id"])
         self.assertTrue(api.calls)
         for call in api.calls + api.load_calls:
             self.assertEqual(call.get("zone_or_output_id"), "zone-study-04d1")
@@ -348,7 +333,7 @@ class TestUnwindOnDeepDeadEnd(unittest.TestCase):
         reply = s.search("oingo boingo")
 
         with self.assertRaises(browse.BrowseError) as caught:
-            s.play(0, "play_now", reply["level_id"])
+            s.play(0, reply["level_id"])
         self.assertEqual(caught.exception.token, "no_action")
 
         # The session's own cache was never touched -- true regardless of
@@ -462,7 +447,7 @@ class TestWrapperLevel(unittest.TestCase):
         s = browse.BrowseSession(api, "widget", ZoneHolder())
         reply = s.search("oingo boingo")
         api.calls.clear()
-        out = s.play(0, "play_now", reply["level_id"])  # "Wrapped Album"
+        out = s.play(0, reply["level_id"])  # "Wrapped Album"
         self.assertIs(out["played"], True)
         self.assertIn("Play Now", invoked_titles(api, deep_wrapper_levels()))
         # Ground truth: initial browse into the row (1) + wrapper->contents
@@ -574,7 +559,7 @@ class TestActionDepthMargin(unittest.TestCase):
         s = browse.BrowseSession(api, "widget", ZoneHolder())
         reply = s.search("oingo boingo")
         api.calls.clear()
-        out = s.play(0, "play_now", reply["level_id"])
+        out = s.play(0, reply["level_id"])
         self.assertIs(out["played"], True)
         pop_calls = [c["pop_levels"] for c in api.calls if "pop_levels" in c]
         self.assertEqual(pop_calls, [5])

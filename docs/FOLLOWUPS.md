@@ -282,8 +282,11 @@ Closed by the popup redesign:
   effect was invisible. Removing it from the UI also deleted
   `BrowsePane.hasSelection` and `Panel.qml`'s context-sensitive `q` branch —
   which existed only because `q` is both the queue key and the first letter of
-  Queen. The daemon keeps the action (`play <n> queue`), still tested; the
-  widget just never asks for it, same posture as item 10's `page`.
+  Queen. The daemon no longer carries it either: keeping it there was protocol
+  surface with no consumer and no path to one, so the `action` argument that
+  selected between Play Now, Add Next, Queue and Start Radio was removed from
+  `browse.py`, the wire protocol and the CLI. `play` now takes an index and a
+  level.
 
 Closed after the final review:
 

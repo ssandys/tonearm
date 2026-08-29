@@ -246,9 +246,10 @@ Item {
   // trickiest piece of key handling in that file, which existed solely because
   // `q` is both the queue shortcut and the first letter of Queen.
   //
-  // The DAEMON keeps the queue action: `play <n> queue` and
-  // `tonearmctl browse play N queue` still work and are still tested. Only the
-  // widget stops reaching for it -- same posture as `page` (FOLLOWUPS 10).
+  // The daemon does not carry it either. Keeping a queue action there would
+  // have left protocol surface with no consumer and no path to one, so the
+  // whole action-selection argument went with it: `play` now takes an index
+  // and a level, and Play Now is the only action browse.py invokes.
 
   // Returns true when it consumed the key. Panel.qml uses that to decide
   // whether Esc should close the popup instead (spec 7.2).

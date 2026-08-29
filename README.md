@@ -113,9 +113,8 @@ Playing a row closes the popup.
 
 **Play Now is the only action.** There's no Queue button and no queue key,
 because the popup has no way to show you a queue — so queuing would be a
-control whose effect you could never see. The daemon still supports it if you
-want it from a script: `tonearmctl browse play <n> queue <level_id>` (the
-`level_id` comes back with every browse reply).
+control whose effect you could never see. It isn't in the daemon either: Play
+Now is the only action tonearm invokes.
 
 ## Settings
 

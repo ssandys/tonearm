@@ -45,7 +45,7 @@ def to_request(argv: list[str]) -> dict:
         if request is None:
             raise ValueError(
                 "usage: tonearmctl browse search <term> | enter <i> <level_id>"
-                " | activate <i> <level_id> | play <i> <action> <level_id>"
+                " | activate <i> <level_id> | play <i> <level_id>"
                 " | back | page <offset> | reset")
         return request
 
@@ -73,20 +73,14 @@ def browse_request(argv):
     if op == "search":
         # Joined, so an unquoted multi-word term works from a shell.
         return dict(base, term=" ".join(rest))
-    if op in ("enter", "activate"):
+    if op in ("enter", "activate", "play"):
         if len(rest) < 2:
             return None
         index, level = _int(rest[0]), _int(rest[1])
         if index is None or level is None:
             return None
         return dict(base, index=index, level_id=level)
-    if op == "play":
-        if len(rest) < 3:
-            return None
-        index, level = _int(rest[0]), _int(rest[2])
-        if index is None or level is None:
-            return None
-        return dict(base, index=index, action=rest[1], level_id=level)
+
     if op == "page":
         offset = _int(rest[0]) if rest else None
         if offset is None:
