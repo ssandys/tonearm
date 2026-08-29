@@ -829,8 +829,6 @@ Panel {
           // TextField keeps focus after a search and every navigation key is
           // eaten by the text input instead of reaching the catcher.
           keyTarget: keyCatcher
-          onPlayStarted: root.close()
-          onCloseRequested: root.close()
         }
       }
     }

@@ -71,9 +71,6 @@ Item {
   readonly property bool hasContent: root.editing || root.hasResults || root.errorText.length > 0
                                       || root.busy || root.path.length > 0
 
-  signal playStarted()
-  signal closeRequested()
-
   implicitHeight: column.implicitHeight
   // Idle (no rows, no error, not editing) must contribute NOTHING to the
   // popup -- not just zero height. Panel.qml:201 binds contentHeight back to
@@ -219,16 +216,29 @@ Item {
   // both hint "list" and indistinguishable before descending, so any rule here
   // would be a guess that fails on art-less albums.
   //
-  // The popup closes only when the daemon reports it actually PLAYED
-  // (spec 7.3). Emitting playStarted() unconditionally would close the popup
-  // on Enter over a category -- which descends -- so the user would see the
-  // right thing happen and the window vanish on top of it.
+  // On a PLAY, the search clears and the popup stays open. This reverses spec
+  // 7.3, which closed it. That made sense while Queue existed: playing was the
+  // terminal action and queuing was the one you repeated, so closing on play
+  // was "done, get out of the way". With Queue gone, Play Now is the ONLY
+  // action -- so closing on it meant every selection ended the session and a
+  // second one cost a reopen and a retype.
+  //
+  // Clearing rather than merely leaving the results up: the reset shrinks the
+  // pane back to idle height, which is the visible confirmation that something
+  // was picked, and it lands the popup in the same state a fresh open would --
+  // no stale cursor pointing into a level the user has moved on from.
+  //
+  // Only when the daemon reports it actually PLAYED. Resetting unconditionally
+  // would wipe the search the moment Enter descended into a category, throwing
+  // away the very list the user was navigating.
   function handleActivate() {
     if (root.editing || root.cursor < 0) return
     _send(["activate", String(root.cursor), String(root.levelId)],
           function (reply) {
             if (reply && reply.ok !== false && reply.played === true) {
-              root.playStarted()
+              // Safe from inside an `after` callback: _apply has already
+              // cleared `busy`, so resetPane's own _send is not suppressed.
+              root.resetPane()
             }
           })
   }

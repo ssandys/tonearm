@@ -158,7 +158,9 @@ first and type them into the field.
 | `←` | Back one level |
 | `Esc` | Back one level; closes the popup at the top level |
 
-Playing a row closes the popup.
+Playing a row clears the search and leaves the popup open, so you can pick
+something else without reopening it. The now-playing card above updates to
+whatever just started, which is your confirmation it worked.
 
 **Play Now is the only action.** There's no Queue button and no queue key,
 because the popup has no way to show you a queue — so queuing would be a
