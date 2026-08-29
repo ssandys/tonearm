@@ -9,6 +9,7 @@ both have regression tests in tests/python/test_core.py.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -23,10 +24,45 @@ from . import browse, config, sood, state, zones  # noqa: E402
 
 LOG = logging.getLogger("tonearmd.core")
 
+VERSION_FALLBACK = "0.0.0"
+
+
+def manifest_path() -> str:
+    """The plugin manifest, two levels up from this module.
+
+    A function rather than a constant so a test can point the reader below at
+    a file that is missing or malformed and actually exercise the fallback,
+    instead of only asserting it is not being used.
+    """
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "..", "manifest.json")
+
+
+def plugin_version(path: str | None = None) -> str:
+    """The plugin's own version, read from the manifest rather than restated.
+
+    Roon shows this in Settings -> Extensions. It drifted for exactly the
+    reason two copies of a fact always do: the manifest reached 0.9.0 while
+    this stayed at the 0.1.0 it was first written with, because nothing
+    connected them and nothing could notice. The manifest ships in the same
+    directory tree as this file, so there is no reason for a second copy.
+
+    Falls back rather than raising. A daemon that refuses to start because it
+    cannot read its own version number is a worse failure than one reporting
+    the wrong one -- and the version reaches nothing but a label in Roon's
+    extension list.
+    """
+    try:
+        with open(path or manifest_path()) as handle:
+            return json.load(handle).get("version") or VERSION_FALLBACK
+    except (OSError, ValueError):
+        return VERSION_FALLBACK
+
+
 APPINFO = {
     "extension_id": "com.onemanposse.tonearm",
     "display_name": "tonearm",
-    "display_version": "0.1.0",
+    "display_version": plugin_version(),
     "publisher": "Sean Sandys",
     "email": "sean@onemanposse.com",
 }
