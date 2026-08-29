@@ -4,7 +4,7 @@ For `HANCORE-linux/omarchy-plugin-marketplace`, issue template **"Submit a
 plugin"** (`.github/ISSUE_TEMPLATE/submit-plugin.yml`). Fields below map 1:1
 to that form. Not yet filed.
 
-Target commit at drafting: `1ca8962735b9de33eb495228ce8ce97b7ab9f70c`.
+Target commit: set to `git rev-parse master` at filing time.
 
 ---
 
@@ -90,7 +90,7 @@ and no user configuration outside tonearm's own directories is modified.
 `scripts/vendor/README.md`. tonearm's own code is MIT. `LICENSE` carries the
 dependency breakdown below the grant.
 
-**Tests.** `./bin/test` runs 249 Python and 82 JS tests; CI runs it on every
+**Tests.** `./bin/test` runs 256 Python and 82 JS tests; CI runs it on every
 push.
 
 ## Submission checklist
@@ -110,6 +110,14 @@ push.
 
 ---
 
+## Repository description
+
+For the GitHub repo's description field, which the marketplace links to:
+
+> Omarchy shell bar widget for Roon: now-playing, transport, library search,
+> zone switching and transfer. Backed by a Python daemon that speaks Roon's
+> MOO protocol and publishes MPRIS.
+
 ## Open before filing
 
 1. **`preview.png` shows third-party album artwork.** It is a screenshot of the
@@ -120,13 +128,15 @@ push.
    capture the "Nothing playing" state, which shows the layout but no art and
    makes a weaker listing image.
 
-2. **`setup.sh:45` copies onto a predictable path unguarded** —
-   `cp "$source_unit" "$target_unit"`. `cp` follows a symlink at the
-   destination, so a link planted at `~/.config/systemd/user/tonearmd.service`
-   redirects the write. This is the same class as the two findings on Headway
-   (#2659), and `docs/FOLLOWUPS.md` item 4 already records that the script this
-   was modelled on guards against replacing an unrelated service file. Worth
-   closing before inviting a reviewer who has flagged this pattern twice.
+2. **Set the repository description** to the text above. It is currently empty.
 
-3. **The GitHub repository has no description.** The marketplace links to the
-   repo; an empty description is the first thing a stranger sees.
+## Closed while drafting
+
+- **`setup.sh` copied onto a predictable path unguarded.** `cp` follows a
+  symlink at its destination, so a link planted at
+  `~/.config/systemd/user/tonearmd.service` redirected the write — the same
+  class as both findings in #2659. The script now refuses a symlink, refuses a
+  non-regular file, refuses a regular file that is not tonearm's own unit, and
+  writes through `mktemp` plus an atomic rename. Seven tests run `setup.sh` for
+  real against a `systemctl` shim; reverting to the bare `cp` fails three of
+  them. Closes `docs/FOLLOWUPS.md` item 4.

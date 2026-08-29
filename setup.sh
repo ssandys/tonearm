@@ -42,7 +42,41 @@ if [[ $(realpath -m "$plugin_root") != $(realpath -m "$installed_root") ]]; then
 fi
 
 mkdir -p "$unit_dir"
-cp "$source_unit" "$target_unit"
+
+# `cp` FOLLOWS a symlink at its destination, so a link planted at the unit path
+# would redirect this write to whatever it names. Refuse rather than write.
+if [[ -L "$target_unit" ]]; then
+  printf 'Refusing to install: %s is a symlink.\n' "$target_unit" >&2
+  printf 'Remove it and re-run if you did not put it there on purpose.\n' >&2
+  exit 1
+fi
+
+# A socket, FIFO or directory at that path is equally not something to write
+# through.
+if [[ -e "$target_unit" && ! -f "$target_unit" ]]; then
+  printf 'Refusing to install: %s exists and is not a regular file.\n' "$target_unit" >&2
+  exit 1
+fi
+
+# An existing regular file has to be OUR unit. The name is tonearm-specific, so
+# an unrelated service sitting there means something unexpected is going on and
+# clobbering it would be destructive. The script this was modelled on
+# (stappmus.audio) guards the same way.
+if [[ -f "$target_unit" ]] && ! grep -q 'tonearmd' -- "$target_unit"; then
+  printf 'Refusing to overwrite an unrelated service file: %s\n' "$target_unit" >&2
+  exit 1
+fi
+
+# Unpredictable name, created O_EXCL by mktemp, in the destination's own
+# directory so the rename is atomic. Nothing can be pre-planted at a name
+# nobody can guess, and systemd never observes a half-written unit.
+readonly tmp_unit=$(mktemp -- "$unit_dir/.tonearmd.service.XXXXXXXX")
+trap 'rm -f -- "$tmp_unit"' EXIT
+cat -- "$source_unit" > "$tmp_unit"
+chmod 0644 -- "$tmp_unit"
+mv -f -- "$tmp_unit" "$target_unit"
+trap - EXIT
+
 systemctl --user daemon-reload
 systemctl --user enable --now tonearmd.service
 

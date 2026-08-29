@@ -6,7 +6,7 @@ re-deriving it. Roughly ordered by whether a user can notice.
 **The numbers are permanent identifiers, not positions.** Code comments cite
 them (`browse.py`, `server.py`, `Panel.qml`), so a closed item's number is
 retired rather than reused and the sequence is expected to have gaps. 1 and 12
-are retired.
+are retired. So is 4.
 
 Closed items are recorded at the bottom so a future reader does not re-open
 them.
@@ -35,14 +35,6 @@ during normal use, not occasionally — raising the odds that a slow or
 stalled peer's `sendall()` actually coincides with a subscribe handshake or
 a broadcast. This work does not fix it; revisit if a subscriber is ever slow
 or remote.
-
-## 4. `setup.sh` uses `cp` where the modelled script uses `ln -s`
-
-`stappmus.audio:51-57` symlinks the unit and guards against replacing an
-unrelated service file. `cp` is non-atomic (an interrupted copy leaves a
-truncated unit) and will clobber whatever sits at the target. Low practical risk
-given the unique unit name, but the script we modelled on deliberately does
-better.
 
 ## 5. `Cache._prune()`'s `getmtime` is unguarded
 
@@ -223,6 +215,13 @@ work rather than a line in the transfer change.
 Recorded so they are not re-opened.
 
 Closed by the marketplace-review pass:
+
+- **`setup.sh` clobbered the unit file with an unguarded `cp`.** `cp` follows a
+  symlink at its destination, so a link planted at the unit path redirected the
+  write. It now refuses a symlink, a non-regular file, or a regular file that
+  is not tonearm's own unit, and installs through `mktemp` plus an atomic
+  rename. This was item 4, and the non-atomicity it also noted is closed by the
+  same change.
 
 - **`tonearmctl` set no socket timeout anywhere.** A daemon that accepted the
   connection and then wedged left `readline()` blocked forever — including
