@@ -671,7 +671,8 @@ Panel {
 
           // The caption line carries the search hint on its right, which is
           // the whole fix for "nothing on screen says search exists"
-          // (FOLLOWUPS 12) at a cost of zero added height: this row already
+          // (the closed "search was undiscoverable" follow-up) at a cost of
+          // zero added height: this row already
           // existed and its right half was empty. It also sits directly above
           // where results appear, so the hint is next to its own output.
           //

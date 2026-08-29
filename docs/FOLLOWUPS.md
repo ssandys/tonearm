@@ -1,33 +1,15 @@
 # Follow-ups
 
 Known gaps carried past the MVP, with enough context to act on each without
-re-deriving it. Ordered by whether a user can notice.
+re-deriving it. Roughly ordered by whether a user can notice.
 
-Items closed by the final review's fix wave are recorded at the bottom so a
-future reader does not re-open them.
+**The numbers are permanent identifiers, not positions.** Code comments cite
+them (`browse.py`, `server.py`, `Panel.qml`), so a closed item's number is
+retired rather than reused and the sequence is expected to have gaps. 1 and 12
+are retired.
 
-## 1. The daemon never detects a *live* Roon disconnect
-
-`_status` is set to `"unreachable"` only inside `RoonSession.start()`'s connect
-attempts. Once it reaches `"ok"`, nothing sets it back. If the websocket drops
-while the daemon is running, `status` stays `ok` and the zone data simply goes
-stale — the bar keeps showing the last track as though nothing happened,
-instead of the error state the spec's §7.4 promises (`unreachable` → error
-glyph → "Roon Core unreachable").
-
-This has not bitten in testing because `roonapi` reconnects underneath; a
-transient `AttributeError` was observed during live verification doing exactly
-that, self-healing. A Core that goes down properly — ROCK rebooting, network
-dropping — would leave the widget confidently wrong rather than honestly
-broken, which is the failure mode the whole severity design exists to avoid.
-
-It also blocks a spec requirement: "on losing the Roon connection, withdraw the
-MPRIS name" is currently wired only to daemon shutdown, because there is no
-live-disconnect signal to wire it to.
-
-**Fixing it** means giving `RoonSession` a way to observe the websocket dying
-(roonapi exposes callbacks) and distinguishing a durable loss from a reconnect
-blip. This is the highest-value item here.
+Closed items are recorded at the bottom so a future reader does not re-open
+them.
 
 ## 2. `position()` clamps to `length` only while playing
 
@@ -137,19 +119,6 @@ But nothing on screen says work is happening, so a slow search — a large
 library, a loaded Core — reads as a hang. The fix is a busy indicator bound
 to the existing `busy` property; no new state is needed, just something
 visible while it's true.
-
-## 12. Zone transfer is mouse-only
-
-`transfer` is reachable from the CLI and from the cast icon on each zone row,
-but not from the keyboard. The popup's cursor model (`BrowsePane`'s `cursor`,
-driven by `PanelKeyCatcher.moveRequested`) covers only browse result rows —
-the zone list is not in it at all, so there is nothing for a key to act on.
-
-Adding it means extending the cursor over two structurally different row
-kinds in two different files, and finding a free key: `h j k l x X` and Space
-are taken by the shell before the widget sees them, and every other printable
-key opens search. Neither half is hard; together they are their own piece of
-work rather than a line in the transfer change.
 
 ## 13. `tonearmctl` sets no socket timeout anywhere
 
@@ -263,9 +232,43 @@ the losing edge.
 - `THEME_BACKGROUND` and `CONTRAST_FLOOR` are exported beyond the interface the
   plan specified.
 
+## 19. Zone transfer is mouse-only
+
+`transfer` is reachable from the CLI and from the cast icon on each zone row,
+but not from the keyboard. The popup's cursor model (`BrowsePane`'s `cursor`,
+driven by `PanelKeyCatcher.moveRequested`) covers only browse result rows —
+the zone list is not in it at all, so there is nothing for a key to act on.
+
+Adding it means extending the cursor over two structurally different row
+kinds in two different files, and finding a free key: `h j k l x X` and Space
+are taken by the shell before the widget sees them, and every other printable
+key opens search. Neither half is hard; together they are their own piece of
+work rather than a line in the transfer change.
+
 ## Closed
 
 Recorded so they are not re-opened.
+
+Closed by disconnect detection:
+
+- **A live Roon disconnect went unnoticed.** `_status` became `unreachable`
+  only during `start()`'s initial connect and never reverted, so a Core that
+  died left the daemon reporting `ok` forever with zone data quietly going
+  stale. `RoonSession._check_connection()` now samples the live socket every
+  2s and flips the status on a transition, and `snapshot()` publishes no zone
+  while the status is not `ok`.
+
+  It observes rather than exiting, because roonapi's own `_socket_watcher` is
+  already a reconnect loop (rebuild ~21s after a failure, forever) — exiting
+  the way `start()` does would discard a working recovery path and churn the
+  process for the length of an outage.
+
+  Still open from the original item: **the MPRIS name is not withdrawn on a
+  live disconnect.** The signal to hang it on now exists; wiring it means
+  driving `request_name`/`release_name` across the asyncio boundary from a
+  polling thread and re-publishing cleanly on every recovery, which is its own
+  piece of work. Media keys currently keep routing to tonearm through an
+  outage and silently do nothing.
 
 Closed by the popup redesign:
 

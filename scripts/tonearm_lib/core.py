@@ -13,6 +13,7 @@ import logging
 import os
 import sys
 import threading
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vendor"))
 
@@ -162,6 +163,14 @@ def _connect_timeout(token) -> float:
     return PAIRING_TIMEOUT if token is None else CONNECT_TIMEOUT
 
 
+# How often the connection watcher samples, and how many consecutive down
+# samples it takes to report a fault. 2s x 2 = ~4s to surface a drop, well
+# inside roonapi's own ~21s reconnect backoff, while still riding out a socket
+# that closes and reopens between polls.
+POLL_INTERVAL = 2.0
+DOWN_SAMPLES = 2
+
+
 class RoonSession:
     """Owns the Roon connection and publishes normalized state on change."""
 
@@ -177,6 +186,10 @@ class RoonSession:
         # would stall subscribers (spec 7.5).
         self._browse_lock = threading.Lock()
         self._browse_sessions: dict = {}
+        # Consecutive polls that found the socket down. A drop is only
+        # reported once this reaches DOWN_SAMPLES, so a socket that closes and
+        # reopens between two polls never reaches the bar.
+        self._down_samples = 0
 
     @property
     def status(self) -> str:
@@ -188,6 +201,13 @@ class RoonSession:
             core = {"host": self._cfg["host"],
                     "http_port": self._cfg.get("http_port", 9330),
                     "name": self._cfg.get("name") or self._cfg["host"]}
+        # A snapshot that is not "ok" carries no zone. roonapi keeps its last
+        # zone dict through a disconnect, so without this the payload still
+        # describes a track -- and the popup renders it in the card while the
+        # header directly above reads "Roon Core unreachable". Two halves of
+        # one popup contradicting each other is worse than an empty card.
+        if self._status != "ok":
+            return state.build(self._status, core, None, [])
         listing, selected = self._zones()
         return state.build(self._status, core, selected, listing)
 
@@ -238,6 +258,60 @@ class RoonSession:
             except RuntimeError:
                 continue
         return []
+
+    def _check_connection(self) -> None:
+        """One poll of the live socket. Flips `_status` on a transition only.
+
+        Called on a timer by `_watch_connection`, but kept separate from it so
+        the decision is testable without threads or sleeps.
+
+        `getattr` every call, never a captured reference: roonapi's reconnect
+        does NOT revive the old socket -- `_server_setup` builds a brand new
+        `RoonApiWebSocket` and rebinds `_roonsocket`. Code holding the original
+        object would read the dead one's `connected = False` forever and report
+        unreachable for the rest of the process's life, starting from the first
+        successful reconnect.
+
+        Statuses other than "ok"/"unreachable" belong to `start()`: a daemon
+        still waiting to be enabled in Roon Remote is "unpaired", and a socket
+        existing does not make it paired.
+        """
+        if self._status not in ("ok", "unreachable"):
+            return
+
+        sock = getattr(self._api, "_roonsocket", None) if self._api else None
+        up = bool(sock is not None and getattr(sock, "connected", False))
+
+        if up:
+            self._down_samples = 0
+            if self._status != "ok":
+                LOG.info("Roon connection restored")
+                self._status = "ok"
+                self._publish()
+            return
+
+        self._down_samples += 1
+        if self._status == "ok" and self._down_samples >= DOWN_SAMPLES:
+            LOG.warning("Roon connection lost after %d polls", self._down_samples)
+            self._status = "unreachable"
+            self._publish()
+
+    def _watch_connection(self) -> None:
+        """Timing only; every decision lives in `_check_connection`.
+
+        This observes and reports -- it deliberately does NOT exit the way
+        `start()` does on a failed initial connect. roonapi's own
+        `_socket_watcher` is already a reconnect loop (poll every 2s, rebuild
+        the socket ~21s after a failure, forever), so exiting here would throw
+        away a recovery path that works and churn the whole process every
+        ~23 seconds for the length of an outage.
+        """
+        while True:
+            time.sleep(POLL_INTERVAL)
+            try:
+                self._check_connection()
+            except Exception:
+                LOG.exception("connection check failed")
 
     def _publish(self, *_args) -> None:
         try:
@@ -303,6 +377,13 @@ class RoonSession:
         self._status = "ok"
         self._api.register_state_callback(self._publish)
         self._publish()
+
+        # daemon=True: this must never hold the process open. There is no stop
+        # flag because there is nothing to stop it for -- `stop()` tears the
+        # process down, and a watcher that outlives its own session by one
+        # poll is harmless.
+        threading.Thread(target=self._watch_connection,
+                         name="conn-watch", daemon=True).start()
 
     def _candidate_ports(self) -> list[int]:
         """MOO/WS ports to try, in order.

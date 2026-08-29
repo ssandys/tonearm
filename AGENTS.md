@@ -65,7 +65,8 @@ silently. These are not hypotheticals; each was measured.
 | **`roonapi`'s declared dependencies are over-declared** — it imports only `websocket`. | `test_vendor.py` guards this across refreshes. |
 | **Two independent Tailscale hazards.** | An exit node can route the LAN address into the tunnel, making the Core unreachable even though it is on the same wire; and the UDP-connect-then-`getsockname()` trick for finding the local subnet returns the *tailnet* address instead, so `sood.discover()` enumerates interfaces directly rather than trusting that trick. |
 | **Multicast SOOD draws no reply on this LAN.** Unicast does. | `RoonDiscovery` cannot find the Core here; `sood.discover()` falls back to a `/24` scan. If discovery ever returns `via: "multicast"`, the network changed. |
-| **`_status` only becomes `unreachable` during initial connect.** | It never reverts once `"ok"`. A live Roon disconnect leaves `status: "ok"` in the daemon's snapshot with zone data going stale — this is a known limitation, documented in the README, not (yet) fixed. |
+| **roonapi reconnects by itself; do not exit on a dropped socket.** | `_socket_watcher` polls every 2s and, on `failed_state`, rebuilds the socket ~21s later, forever. `RoonSession._check_connection()` therefore observes and reports rather than exiting the way `start()` does — exiting would discard a working recovery path and churn the process every ~23s for the length of an outage. |
+| **`_roonsocket` is REPLACED on every reconnect — re-read it, never capture it.** | `_server_setup` builds a brand new `RoonApiWebSocket` and rebinds the attribute; the old object keeps `connected = False` forever. Code holding the original reference reports `unreachable` for the rest of the process's life starting from the first successful reconnect, and no test that only downs-and-raises a single socket object will catch it. `test_core_connection.py` swaps the object for exactly this reason. |
 
 ### Browse and search
 

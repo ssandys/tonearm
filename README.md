@@ -137,18 +137,17 @@ a local music player, etc.), your media keys follow whichever your desktop's
 existing MPRIS arbitration considers active, the same as any other MPRIS
 player.
 
-## Known limitation
+## If your Roon Core goes away
 
-If your Roon Core goes offline *after* tonearm has already connected to it,
-tonearm does not currently notice. The daemon's status stays `ok` and the
-displayed zone/track data simply goes stale — it doesn't switch to an error
-state until the connection is retried from a cold start (for example, a
-restart of `tonearmd.service`). If the widget looks "stuck," restarting the
-service is the workaround:
+Tonearm notices within a few seconds. The bar icon switches to the alert
+glyph in the error colour, and the popup's header says **Roon Core
+unreachable** in place of the Core's name. The popup stops showing a track
+rather than leaving the last one on screen, because a stale track under an
+error header is the widget being confidently wrong.
 
-```bash
-systemctl --user restart tonearmd.service
-```
+Recovery is automatic — the underlying Roon library retries about every 20
+seconds, and tonearm goes back to normal on its own when the Core answers
+again. There is nothing to restart.
 
 ## Removal
 
