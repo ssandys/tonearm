@@ -211,11 +211,19 @@ def deep_dead_end_levels():
             ],
         },
         "dead_end": {
-            "list": {"title": "Still Nothing", "count": 1, "level": 5},
+            # TWO items, deliberately: after R12's single-item wrapper rule
+            # (fix round 3), a lone "list" item at a level IS followed, on
+            # the same measured basis that distinguishes a wrapper from a
+            # category. A genuine dead end must therefore have more than one
+            # item too, or it stops being a dead end under the new rule and
+            # this fixture would no longer test what it says it tests.
+            "list": {"title": "Still Nothing", "count": 2, "level": 5},
             "items": [
                 # hint "list", not "action_list" or "action": nothing here
                 # continues the hunt and nothing here is itself playable.
                 {"title": "Not An Action", "item_key": "9:3",
+                 "hint": "list", "_goes_to": None},
+                {"title": "Also Not An Action", "item_key": "9:4",
                  "hint": "list", "_goes_to": None},
             ],
         },
@@ -252,6 +260,221 @@ class TestUnwindOnDeepDeadEnd(unittest.TestCase):
         self.assertEqual(api.current, "results")
         pop_calls = [c["pop_levels"] for c in api.calls if "pop_levels" in c]
         self.assertEqual(pop_calls, [3])
+
+
+def deep_wrapper_levels():
+    """A local fixture (not fakes.py) reproducing the shape MEASURED live
+    against a real Roon Core (R12 fix round 3), which neither yavin_levels()
+    nor deep_dead_end_levels() modelled -- exactly why 13 passing tests still
+    shipped a broken "play an album" feature:
+
+        1. album row in the Albums list        hint: "list"
+        2. -> WRAPPER level, count == 1         hint: "list" (its one item)
+        3. -> album contents, count == 10       "Play Album" (action_list)
+                                                  + 9 track rows (action_list)
+        4. -> "Play Album" actions               Play Now, Add Next, Queue,
+                                                  Start Radio
+
+    "results" also carries an "Albums" CATEGORY row (many items, none
+    action_list) alongside the album row, so the R12 regression guard --
+    a category must still dead-end rather than wander into its first
+    child -- can be verified against this same, more realistic shape.
+    """
+    return {
+        "root": {
+            "list": {"title": "Explore", "count": 1, "level": 0},
+            "items": [
+                {"title": "Library", "item_key": "1:0", "hint": "list",
+                 "image_key": None, "_goes_to": "library"},
+            ],
+        },
+        "library": {
+            "list": {"title": "Library", "count": 1, "level": 1},
+            "items": [
+                {"title": "Search", "item_key": "2:0", "hint": "list",
+                 "image_key": None,
+                 "input_prompt": {"prompt": "Search", "action": "Go"},
+                 "_goes_to": lambda text: "results"},
+            ],
+        },
+        "results": {
+            "list": {"title": "Search", "count": 2, "level": 2},
+            "items": [
+                {"title": "Wrapped Album", "item_key": "8:0",
+                 "image_key": "abcd", "hint": "list", "_goes_to": "wrapper"},
+                {"title": "Albums", "item_key": "8:1",
+                 "image_key": None, "hint": "list", "_goes_to": "category"},
+            ],
+        },
+        "wrapper": {
+            # count == 1, ONE keyed item, hint "list" -- the measured shape
+            # that a plain "action_list only" continuation cannot cross.
+            "list": {"title": "Wrapped Album", "count": 1, "level": 3},
+            "items": [
+                {"title": "Wrapped Album", "item_key": "8:2",
+                 "hint": "list", "_goes_to": "contents"},
+            ],
+        },
+        "contents": {
+            "list": {"title": "Wrapped Album", "count": 10, "level": 4},
+            "items": [
+                {"title": "Play Album", "item_key": "8:3",
+                 "hint": "action_list", "_goes_to": "play_album_actions"},
+            ] + [
+                {"title": "Track %d" % n, "item_key": "8:%d" % (10 + n),
+                 "hint": "action_list", "_goes_to": "track_actions"}
+                for n in range(1, 10)
+            ],
+        },
+        "play_album_actions": {
+            "list": {"title": "Play Album", "count": 4, "level": 5,
+                     "hint": "action_list"},
+            "items": [
+                {"title": "Play Now", "item_key": "8:20", "hint": "action"},
+                {"title": "Add Next", "item_key": "8:21", "hint": "action"},
+                {"title": "Queue", "item_key": "8:22", "hint": "action"},
+                {"title": "Start Radio", "item_key": "8:23", "hint": "action"},
+            ],
+        },
+        "category": {
+            # Multi-item (3, standing in for the measured 21), hint "list",
+            # NO action_list anywhere -- the R12 regression guard. Must
+            # still dead-end, never wander into "Album One".
+            "list": {"title": "Albums", "count": 3, "level": 3},
+            "items": [
+                {"title": "Album One", "item_key": "8:30",
+                 "hint": "list", "_goes_to": None},
+                {"title": "Album Two", "item_key": "8:31",
+                 "hint": "list", "_goes_to": None},
+                {"title": "Album Three", "item_key": "8:32",
+                 "hint": "list", "_goes_to": None},
+            ],
+        },
+    }
+
+
+class TestWrapperLevel(unittest.TestCase):
+    def test_play_reaches_play_now_through_the_single_item_wrapper(self):
+        api = FakeRoon(deep_wrapper_levels())
+        s = browse.BrowseSession(api, "widget")
+        reply = s.search("oingo boingo")
+        api.calls.clear()
+        out = s.play(0, "play_now", reply["level_id"])  # "Wrapped Album"
+        self.assertIs(out["played"], True)
+        self.assertIn("Play Now", invoked_titles(api, deep_wrapper_levels()))
+        # Ground truth: initial browse into the row (1) + wrapper->contents
+        # (2) + contents->"Play Album" (3) + "Play Album"->Play Now (4) = 4.
+        # Not merely "some pop_levels happened" -- a wrong depth is the
+        # exact bug fixed in round 1, and this is the deeper path it must
+        # still get right.
+        pop_calls = [c["pop_levels"] for c in api.calls if "pop_levels" in c]
+        self.assertEqual(pop_calls, [4])
+
+    def test_activate_plays_the_album_rather_than_descending(self):
+        api = FakeRoon(deep_wrapper_levels())
+        s = browse.BrowseSession(api, "widget")
+        reply = s.search("oingo boingo")
+        out = s.activate(0, reply["level_id"])  # "Wrapped Album"
+        self.assertIs(out["played"], True)
+
+    def test_activate_still_descends_a_multi_item_category_with_no_action_list(self):
+        # The R12 regression guard: this must not weaken. A category (here,
+        # 3 items, none action_list -- standing in for the measured 21) has
+        # no single keyed item for the new fallback rule to catch, so it
+        # must still dead-end and activate must still fall back to enter().
+        api = FakeRoon(deep_wrapper_levels())
+        s = browse.BrowseSession(api, "widget")
+        reply = s.search("oingo boingo")
+        out = s.activate(1, reply["level_id"])  # "Albums" category
+        self.assertIs(out["played"], False)
+        self.assertEqual(out["path"], ["Search", "Albums"])
+        self.assertEqual([r["title"] for r in out["rows"]],
+                         ["Album One", "Album Two", "Album Three"])
+
+
+def double_wrapper_levels():
+    """SYNTHETIC -- not measured against a real Core, unlike
+    deep_wrapper_levels() above. Exists solely to prove MAX_ACTION_DEPTH's
+    margin actually functions: one MORE single-item wrapper than the real,
+    measured shape, so reaching Play Now takes 4 real descents inside
+    _descend_to_action's loop (5 total with the initial browse) rather than
+    3. This is exactly the "one more wrapper level anywhere in Roon's
+    hierarchy" scenario the raised depth exists to survive.
+    """
+    return {
+        "root": {
+            "list": {"title": "Explore", "count": 1, "level": 0},
+            "items": [
+                {"title": "Library", "item_key": "1:0", "hint": "list",
+                 "image_key": None, "_goes_to": "library"},
+            ],
+        },
+        "library": {
+            "list": {"title": "Library", "count": 1, "level": 1},
+            "items": [
+                {"title": "Search", "item_key": "2:0", "hint": "list",
+                 "image_key": None,
+                 "input_prompt": {"prompt": "Search", "action": "Go"},
+                 "_goes_to": lambda text: "results"},
+            ],
+        },
+        "results": {
+            "list": {"title": "Search", "count": 1, "level": 2},
+            "items": [
+                {"title": "Double Wrapped Album", "item_key": "7:0",
+                 "image_key": "abcd", "hint": "list", "_goes_to": "wrapper1"},
+            ],
+        },
+        "wrapper1": {
+            "list": {"title": "Double Wrapped Album", "count": 1, "level": 3},
+            "items": [
+                {"title": "Double Wrapped Album", "item_key": "7:1",
+                 "hint": "list", "_goes_to": "wrapper2"},
+            ],
+        },
+        "wrapper2": {
+            "list": {"title": "Double Wrapped Album", "count": 1, "level": 4},
+            "items": [
+                {"title": "Double Wrapped Album", "item_key": "7:2",
+                 "hint": "list", "_goes_to": "contents"},
+            ],
+        },
+        "contents": {
+            "list": {"title": "Double Wrapped Album", "count": 2, "level": 5},
+            "items": [
+                {"title": "Play Album", "item_key": "7:3",
+                 "hint": "action_list", "_goes_to": "play_album_actions"},
+                {"title": "Track 1", "item_key": "7:4",
+                 "hint": "action_list", "_goes_to": "track_actions"},
+            ],
+        },
+        "play_album_actions": {
+            "list": {"title": "Play Album", "count": 4, "level": 6,
+                     "hint": "action_list"},
+            "items": [
+                {"title": "Play Now", "item_key": "7:20", "hint": "action"},
+                {"title": "Add Next", "item_key": "7:21", "hint": "action"},
+                {"title": "Queue", "item_key": "7:22", "hint": "action"},
+                {"title": "Start Radio", "item_key": "7:23", "hint": "action"},
+            ],
+        },
+    }
+
+
+class TestActionDepthMargin(unittest.TestCase):
+    def test_a_second_wrapper_level_still_resolves_within_the_raised_depth(self):
+        # The real, measured album path (deep_wrapper_levels above) needs
+        # exactly 3 loop passes -- range(3) already covers it, so that
+        # fixture alone cannot tell MAX_ACTION_DEPTH=3 apart from 4. This
+        # one needs 4 passes, genuinely exercising the raised limit.
+        api = FakeRoon(double_wrapper_levels())
+        s = browse.BrowseSession(api, "widget")
+        reply = s.search("oingo boingo")
+        api.calls.clear()
+        out = s.play(0, "play_now", reply["level_id"])
+        self.assertIs(out["played"], True)
+        pop_calls = [c["pop_levels"] for c in api.calls if "pop_levels" in c]
+        self.assertEqual(pop_calls, [5])
 
 
 if __name__ == "__main__":

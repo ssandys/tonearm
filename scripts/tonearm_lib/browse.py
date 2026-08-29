@@ -102,10 +102,17 @@ ACTIONS = {
     "start_radio": "Start Radio",
 }
 
-# How deep to hunt for an action list before giving up. Measured: a track is
-# 1 descent from its row, an album is 2 (album -> "Play Album" -> actions).
-# 3 leaves headroom without letting a pathological hierarchy walk forever.
-MAX_ACTION_DEPTH = 3
+# How deep to hunt for an action list before giving up. Measured live
+# against a real Core (R12 fix round 3): a track is 1 descent from its row;
+# an album is 3 -- row -> single-item wrapper -> contents (1), contents ->
+# "Play Album" (2), "Play Album" -> Play Now (3) -- one level deeper than
+# either fixture in this file modelled, which is exactly why the earlier
+# value of 3 sat precisely on the limit with zero headroom and 13 passing
+# tests still shipped a broken "play an album" feature. 4 gives one level of
+# margin, since Roon has already surprised us once with a level our fixtures
+# did not model and a silent, identical failure is worse than a slightly
+# slower give-up.
+MAX_ACTION_DEPTH = 4
 
 
 class BrowseError(Exception):
@@ -374,19 +381,37 @@ class BrowseSession:
                     return True
             nxt = None
             for item in items:
-                # hint "action_list" only, never "list": "list" is a row of
-                # DIFFERENT sibling items (spec 2.4's can_descend=True taxonomy
-                # in capabilities_from_hint above) -- wandering into one would
-                # silently walk from a category into its first child's own
-                # action list and invoke THAT item's action instead of
-                # reporting no_action, which is exactly the ambiguity
-                # activate() exists to resolve deliberately, not by accident.
-                # "action_list" instead means "leads onward to actions for
-                # THIS SAME item" (can_descend=False) -- the one continuation
-                # that is safe to follow automatically.
+                # hint "action_list" preferred, never a "list" among SEVERAL:
+                # "list" is a row of DIFFERENT sibling items (spec 2.4's
+                # can_descend=True taxonomy in capabilities_from_hint above)
+                # -- wandering into one would silently walk from a category
+                # into its first child's own action list and invoke THAT
+                # item's action instead of reporting no_action, which is
+                # exactly the ambiguity activate() exists to resolve
+                # deliberately, not by accident. "action_list" instead means
+                # "leads onward to actions for THIS SAME item"
+                # (can_descend=False) -- the one continuation that is always
+                # safe to follow automatically.
                 if item.get("hint") == "action_list" and item.get("item_key"):
                     nxt = item["item_key"]
                     break
+            if nxt is None:
+                # Measured live against a real Core (R12 fix round 3): a
+                # SINGLE-ITEM "list" wrapper sits between an album row and
+                # its contents (album row -> wrapper, count 1 -> contents,
+                # count 10: "Play Album" + 9 tracks). Its one item has no
+                # "action_list" hint to prefer above, yet it must still be
+                # followed or a real album can never be played. A CATEGORY
+                # level (e.g. "Albums", 21 items) has no such single item --
+                # only that count distinguishes the two, since both are hint
+                # "list" and neither carries any other structural signal
+                # (spec 2.4). So: follow a "list" item, but ONLY when it is
+                # the level's one and only keyed item -- never when there are
+                # several, which is exactly the category-wandering bug this
+                # method exists not to reintroduce.
+                keyed = [i for i in items if i.get("item_key")]
+                if len(keyed) == 1 and keyed[0].get("hint") == "list":
+                    nxt = keyed[0]["item_key"]
             if nxt is None:
                 return False
             self._browse(item_key=nxt)
