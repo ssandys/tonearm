@@ -11,8 +11,23 @@ configuration required.
 
 ## Install
 
-1. Install the one runtime dependency this plugin needs that Omarchy doesn't
-   already ship:
+1. Add the plugin and put it in the bar:
+
+   ```bash
+   omarchy plugin add https://github.com/ssandys/tonearm.git --enable
+   ```
+
+   This clones tonearm into `~/.config/omarchy/plugins/ssandys.tonearm/` and
+   enables the bar widget. It appears on the right of the bar straight away,
+   showing an error glyph — there's no daemon behind it yet, which the next
+   two steps fix. Open the popup at any point and its header tells you what
+   it's currently waiting on.
+
+   (`omarchy plugin install` is an alias for the same thing. To place it
+   somewhere other than the default: `omarchy plugin enable ssandys.tonearm
+   --section left`.)
+
+2. Install the one runtime dependency Omarchy doesn't already ship:
 
    ```bash
    omarchy pkg add python-dbus-next
@@ -21,7 +36,7 @@ configuration required.
    (The other Python dependency, `websocket-client`, is already present on a
    stock Omarchy install.)
 
-2. From the installed plugin's directory, run setup:
+3. Run setup:
 
    ```bash
    ~/.config/omarchy/plugins/ssandys.tonearm/setup.sh
@@ -31,20 +46,24 @@ configuration required.
    your Roon Core, as a systemd user service (`tonearmd.service`). It starts
    automatically on every login from then on.
 
-3. Open **Roon Remote → Settings → Extensions** and enable **tonearm**.
+4. Open **Roon Remote → Settings → Extensions** and enable **tonearm**.
    `tonearmd` registers itself with your Roon Core as soon as it starts, but
    Roon will not talk to it until you approve it here — this is a one-time
-   pairing step per Roon Core.
+   pairing step per Roon Core. Until you do, the popup header reads
+   *Enable tonearm in Roon → Settings → Extensions*.
 
-4. Check that everything came up correctly:
+5. Check that everything came up correctly:
 
    ```bash
    ~/.config/omarchy/plugins/ssandys.tonearm/setup.sh --check
    ```
 
    This confirms the service is running, the daemon is answering on its
-   socket, and — until you complete step 3 — will tell you it's running but
+   socket, and — until you complete step 4 — will tell you it's running but
    not yet paired.
+
+To update later: `omarchy plugin update ssandys.tonearm`, then re-run
+`setup.sh` if the daemon changed.
 
 Once paired, the bar widget starts showing whatever is playing on your
 followed Roon zone.
