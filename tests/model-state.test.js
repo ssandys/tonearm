@@ -20,8 +20,15 @@ test("glyph codepoints are asserted, not shape-checked", () => {
   // and a shape check passes just as happily on the wrong glyph.
   assert.strictEqual(M.GLYPH_PLAYING.codePointAt(0), 0xf040a)
   assert.strictEqual(M.GLYPH_PAUSED.codePointAt(0), 0xf03e4)
-  assert.strictEqual(M.GLYPH_IDLE.codePointAt(0), 0xf0387)
+  assert.strictEqual(M.GLYPH_VINYL.codePointAt(0), 0xefbd)
   assert.strictEqual(M.GLYPH_FAULT.codePointAt(0), 0xf0026)
+})
+
+test("GLYPH_IDLE is gone, not merely unused", () => {
+  // The bar's three healthy states now share one product icon, so the old
+  // nf-md-music idle glyph has no consumer. Left exported it would be dead
+  // surface that a future reader assumes is live.
+  assert.strictEqual(M.GLYPH_IDLE, undefined)
 })
 
 test("popup transport/volume glyph codepoints are asserted, not shape-checked", () => {
@@ -38,26 +45,59 @@ test("popup transport/volume glyph codepoints are asserted, not shape-checked", 
 test("playing is ok severity with art", () => {
   const s = M.barState(PLAYING, 1000, 1000)
   assert.strictEqual(s.severity, "ok")
-  assert.strictEqual(s.glyph, M.GLYPH_PLAYING)
+  assert.strictEqual(s.glyph, M.GLYPH_VINYL)
   assert.strictEqual(s.showArt, true)
   assert.strictEqual(s.playing, true)
 })
 
-test("paused keeps ok severity but changes glyph", () => {
+test("paused keeps ok severity and the same glyph; only `playing` moves", () => {
   const st = JSON.parse(JSON.stringify(PLAYING))
   st.zone.state = "paused"
   const s = M.barState(st, 1000, 1000)
   assert.strictEqual(s.severity, "ok")
-  assert.strictEqual(s.glyph, M.GLYPH_PAUSED)
+  assert.strictEqual(s.glyph, M.GLYPH_VINYL)
   assert.strictEqual(s.playing, false)
 })
 
 test("connected but idle is ok severity with no art", () => {
   const s = M.barState({ v: 1, status: "ok", core: CORE, zone: null, zones: [] }, 1000, 1000)
   assert.strictEqual(s.severity, "ok")
-  assert.strictEqual(s.glyph, M.GLYPH_IDLE)
+  assert.strictEqual(s.glyph, M.GLYPH_VINYL)
   assert.strictEqual(s.showArt, false)
   assert.strictEqual(s.playing, false)
+})
+
+test("every healthy state shows the SAME product icon", () => {
+  // The bar identifies tonearm, it no longer mimes the transport. Playback
+  // state reaches the bar through `playing` (which Panel.qml renders as
+  // brightness), so a glyph that still varied across healthy states would put
+  // that state in two channels -- and would restore the ambiguity the swap
+  // exists to remove: the bar's glyph is a STATUS while the popup button's
+  // identical glyph is an ACTION, so paused meant "paused" in one place and
+  // "press to play" a hundred pixels away.
+  const glyphFor = (zoneState) => {
+    const st = JSON.parse(JSON.stringify(PLAYING))
+    st.zone.state = zoneState
+    return M.barState(st, 1000, 1000).glyph
+  }
+  const idle = M.barState({ v: 1, status: "ok", core: CORE, zone: null, zones: [] }, 1, 1).glyph
+  for (const s of ["playing", "paused", "loading", "stopped"]) {
+    assert.strictEqual(glyphFor(s), M.GLYPH_VINYL, `zone state ${s}`)
+  }
+  assert.strictEqual(idle, M.GLYPH_VINYL)
+})
+
+test("a fault still changes the glyph's SHAPE, not only its colour", () => {
+  // The product-icon swap deliberately stops short of the failure states.
+  // Severity reaches the bar as a colour (Panel.qml's `foreground`), and
+  // colour alone is a poor sole channel for "this is broken" -- so the three
+  // healthy states share the vinyl icon while warn/error keep the alert
+  // glyph, which is the one case where a shape change is worth more than
+  // brand consistency.
+  assert.strictEqual(M.barState({ status: "unpaired", zone: null }, 1, 1).glyph, M.GLYPH_FAULT)
+  assert.strictEqual(M.barState({ status: "unreachable", zone: null }, 1, 1).glyph, M.GLYPH_FAULT)
+  assert.strictEqual(M.barState(null, 1, 1).glyph, M.GLYPH_FAULT)
+  assert.notStrictEqual(M.GLYPH_FAULT, M.GLYPH_VINYL)
 })
 
 test("a loading (buffering) zone is not playing", () => {

@@ -138,17 +138,6 @@ library, a loaded Core — reads as a hang. The fix is a busy indicator bound
 to the existing `busy` property; no new state is needed, just something
 visible while it's true.
 
-## 12. Search is undiscoverable in the UI
-
-The search field is hidden until `/` or a letter is pressed
-(`Panel.qml:219-227`, gated through `BrowsePane.qml`'s `editing` /
-`hasContent`), a deliberate choice so the popup keeps its idle height rather
-than growing to fit a search box most sessions never use. The cost: nothing
-in the popup itself hints that search exists. Currently the README is the
-only place a user can learn about it. A discoverability affordance — a
-placeholder hint row, a `/` glyph near the popup header — would close this
-without giving up the idle-height goal, but nothing does yet.
-
 ## 13. `tonearmctl` sets no socket timeout anywhere
 
 `scripts/tonearmctl` calls `socket.connect()`, `sendall()` and
@@ -264,6 +253,21 @@ the losing edge.
 ## Closed
 
 Recorded so they are not re-opened.
+
+Closed by the popup redesign:
+
+- **Search was undiscoverable.** The field is still hidden until `/` or a
+  letter is pressed — the idle-height goal is intact — but the `ZONES` caption
+  line now carries a `/  search` hint on its right, which was empty space, so
+  the affordance cost no height at all. The hint is also clickable. This was
+  item 12, and it means the README is no longer the only place a user can
+  learn search exists.
+- **Queue was a write-only control.** The popup can't show a queue, so its
+  effect was invisible. Removing it from the UI also deleted
+  `BrowsePane.hasSelection` and `Panel.qml`'s context-sensitive `q` branch —
+  which existed only because `q` is both the queue key and the first letter of
+  Queen. The daemon keeps the action (`play <n> queue`), still tested; the
+  widget just never asks for it, same posture as item 10's `page`.
 
 Closed after the final review:
 

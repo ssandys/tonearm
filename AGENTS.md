@@ -86,6 +86,8 @@ silently. These are not hypotheticals; each was measured.
 | **`ColorQuantizer` is used nowhere else in the Omarchy shell.** | Live-shell verification only; there is no first-party reference usage to lean on. |
 | **systemd's `RuntimeDirectory=tonearm` deletes the directory on stop.** | The art cache is wiped on every restart, so `art/` must be created on start, not lazily on first fetch. |
 | **Album art does not work at bar-icon size.** | A cover thumbnail in the bar button is ~10px of image and reads as a coloured blur, not art. It was built, deployed, looked at, and removed. Art belongs in the popup, where it has room. |
+| **The bar glyph is a PRODUCT icon, not transport state.** | `barState` returns `GLYPH_VINYL` for all three healthy states; playback reaches the bar only through `playing`, which `Panel.qml` renders as brightness. Do not "restore" per-state glyphs: that puts the same fact in two channels, and it re-creates the collision where the identical glyph meant a *status* in the bar (paused ⇒ pause bars) and an *action* in the popup (paused ⇒ offers play). Faults are the deliberate exception — they keep `GLYPH_FAULT`, because colour alone is a poor sole channel for "broken". |
+| **Verify a new PUA codepoint with `fc-list :charset=<hex>`, not by eye.** | A missing Nerd Font glyph is an invisible widget with nothing logged. `efbd` (record_vinyl) resolves to the same family already serving the bar, which is what made the swap safe. |
 
 ### MPRIS and dbus-next
 
@@ -104,6 +106,8 @@ silently. These are not hypotheticals; each was measured.
 | **`tonearmctl subscribe` exits immediately when the daemon is down**, so `Service.qml` must back off. | Respawn-on-exit with no delay is a fork loop. |
 | **Resolve paths with `pathFromUrl`/`decodeURIComponent`, never `.replace("file://", "")`.** | `Qt.resolvedUrl` percent-encodes, so a home directory containing a space leaves `%20` in the path, the spawn fails, and — because a failed spawn emits no `exited()` — the relay retries forever with nothing logged. `galley` and `colophon` both carry the helper; copy it verbatim. |
 | **Do not name a root property `bar`.** | `Ui/Panel.qml` injects its own `bar` (the reference `BarIconButton { bar: root.bar }` needs). Declaring another is a QML duplicate-property error and the file will not compile at all. The computed bar state is named `display` for exactly this reason. |
+| **Align a column to a fixed-size neighbour by ANCHORING, not by tuning a spacer.** | The popup's now-playing card puts text and controls in one `Item` sized `Math.max(artPx, …)`, with the text anchored top and the controls anchored bottom. A hand-tuned spacer was tried first and still left ~18 units of art sticking out below the transport — and any font-size change moves the number again, because `artPx` is a raw pixel setting while everything else scales with the theme's base font. |
+| **A `MouseArea` with negative margins is hit-tested outside its parent** as long as nothing on the path sets `clip`. | That is how a 3-unit seek track gets a usable click band. Give it a *shorter* bottom margin than top, though: at the same -8 it covers the top of the play button below. Paint order happens to resolve that correctly (later sibling wins), but a hit box that only works because of sibling ordering breaks silently the next time the column is reordered. |
 
 ### Verification tooling
 

@@ -50,14 +50,6 @@ Item {
   readonly property int rowCount: rows.length
   readonly property bool hasResults: rows.length > 0
 
-  // "q" is ambiguous: it is both the queue shortcut and the first letter of
-  // Queen. PanelKeyCatcher already eats h/j/k/l/x/X/Space before onTextKey
-  // ever fires, so those letters cannot start a search at all; "q" is one of
-  // the few tonearm itself was throwing away, and it did so unconditionally.
-  // With a row selected it queues; with nothing selected there is nothing to
-  // queue, so it starts a search instead.
-  readonly property bool hasSelection: !root.editing && root.cursor >= 0
-
   // Single source of truth for "does this pane have anything to show right
   // now" -- bound by both this Item's own `visible` below and Panel.qml's
   // PanelSeparator, so the two can never disagree about whether the popup
@@ -247,10 +239,16 @@ Item {
     _send(["enter", String(root.cursor), String(root.levelId)])
   }
 
-  function handleQueue() {
-    if (root.editing || root.cursor < 0) return
-    _send(["play", String(root.cursor), "queue", String(root.levelId)])
-  }
+  // No handleQueue(). Play Now is the only action the UI offers, because the
+  // popup has no way to SHOW a queue -- so queuing was a write-only control
+  // whose effect the user could never see. Removing it also deleted the
+  // `hasSelection` property and Panel.qml's context-sensitive `q` branch, the
+  // trickiest piece of key handling in that file, which existed solely because
+  // `q` is both the queue shortcut and the first letter of Queen.
+  //
+  // The DAEMON keeps the queue action: `play <n> queue` and
+  // `tonearmctl browse play N queue` still work and are still tested. Only the
+  // widget stops reaching for it -- same posture as `page` (FOLLOWUPS 10).
 
   // Returns true when it consumed the key. Panel.qml uses that to decide
   // whether Esc should close the popup instead (spec 7.2).

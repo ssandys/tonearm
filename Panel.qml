@@ -30,7 +30,7 @@ Panel {
   // these three. A missing one is a ReferenceError raised inside a property
   // binding, invisible to qmllint, that fails as a silently unstyled/absent
   // element rather than a compile error.
-  readonly property string barIcon: Model.GLYPH_IDLE
+  readonly property string barIcon: Model.GLYPH_VINYL
   readonly property color dim: Qt.darker(root.barForeground, 1.45)
   readonly property string fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
 
@@ -154,10 +154,22 @@ Panel {
   // No album art here. An earlier version overlaid a cover-art thumbnail in
   // the glyph's corner, but at icon-slot resolution (a ~16-27px square) it
   // read as an indistinct smear, not art -- illegible rather than useful.
-  // The bar button stays a single static Nerd Font glyph (play/pause/idle/
-  // alert), which is legible at this size and is what actually carries the
-  // state. Model.artUrl still exists and is tested; the popup (Task 16) is
-  // where the art has room to mean something.
+  // Model.artUrl still exists and is tested; the popup is where the art has
+  // room to mean something.
+  //
+  // The glyph is now tonearm's PRODUCT icon (a record), not a transport mime.
+  // Two things made that worth the swap. First, dropping the art badge left
+  // the widget indistinguishable from its eighteen monochrome neighbours until
+  // you memorised its position; a record restores that without the
+  // unreadable-at-10px problem the art had. Second, the old glyph set meant a
+  // STATUS here (paused => pause bars) and an ACTION in the popup (paused =>
+  // offers play), so the same two glyphs read as opposites a hundred pixels
+  // apart.
+  //
+  // Transport state is NOT lost -- it moves entirely into `foreground` below,
+  // where it already lived: playing renders bright, everything else dim. Only
+  // paused-vs-idle stops being distinguishable at a glance, and both were
+  // already dim; the tooltip still names the difference.
   BarIconButton {
     id: button
     anchors.fill: parent
@@ -225,11 +237,14 @@ Panel {
       // stray Esc must not discard a whole navigation.
       onCloseRequested: { if (!browsePane.handleBack()) root.close() }
 
-      // Order matters. `/` is unambiguous and goes first. `q` is BOTH the
-      // queue shortcut and the first letter of Queen, so it is resolved by
-      // context: with a row selected it queues, with nothing selected it
-      // starts a search. Taking "q" unconditionally (as this did) meant no
-      // Queen and no Queens of the Stone Age from an idle popup.
+      // `/` is explicit; everything else printable starts a search SEEDED with
+      // that character, so typing goes straight into the field without a
+      // preparatory keystroke and without losing the first letter.
+      //
+      // There used to be a third branch here: `q` queued the selected row, and
+      // because `q` is also the first letter of Queen it had to be resolved by
+      // whether a row was selected. Dropping Queue from the UI deleted that
+      // branch outright -- `q` is an ordinary search letter again.
       //
       // h j k l x X and Space never arrive here at all -- PanelKeyCatcher
       // consumes them for move/delete/activate before onTextKey is emitted --
@@ -237,13 +252,6 @@ Panel {
       // so rather than promising "any letter".
       onTextKey: function (text) {
         if (text === "/") { browsePane.focusSearch(""); return }
-        if (text === "q" && browsePane.hasSelection) {
-          browsePane.handleQueue()
-          return
-        }
-        // Any other printable key starts a search SEEDED with that character,
-        // so typing goes straight into the field without a preparatory
-        // keystroke and without losing the first letter.
         if (text && text.length === 1 && text >= " ") {
           browsePane.focusSearch(text)
         }
@@ -259,7 +267,10 @@ Panel {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
-        spacing: Style.space(13)
+        // 10, not 13. With the transport folded into the card above there are
+        // three blocks here instead of four, and the separators already do the
+        // grouping this gap was over-doing.
+        spacing: Style.space(10)
 
         Row {
           spacing: Style.space(14)
@@ -286,51 +297,78 @@ Panel {
             }
           }
 
-          Column {
+          // An Item with two ANCHORED groups, not one Column with a fixed
+          // spacer between them. The text hangs off the top, the controls off
+          // the bottom, and the whole thing is exactly as tall as the art -- so
+          // the card is one block, flush on both edges, with no leftover
+          // rectangle beside the art. That is the defect this whole redesign
+          // started from, and a fixed spacer only ever approximates the fix:
+          // measured live, tuning the gap by hand still left ~18 units of art
+          // sticking out below the transport, and any font-size change would
+          // have moved the number again.
+          //
+          // The Math.max is the guard on that: `artPx` is a raw pixel setting
+          // (96-256) while every other measurement here scales with the theme's
+          // base font size, so a large font against a small art size is the one
+          // combination where the two groups could otherwise overlap. Then the
+          // card grows instead, and the art is the short edge.
+          Item {
             width: parent.width - root.artPx - Style.space(14)
-            spacing: Style.space(3)
+            height: Math.max(root.artPx,
+                             trackText.implicitHeight + controls.implicitHeight + Style.space(8))
 
-            Text {
-              width: parent.width
-              text: root.np ? (root.np.title || "Nothing playing") : "Nothing playing"
-              color: Color.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.title
-              font.weight: Font.DemiBold
-              // wrapMode does not constrain a Text: a wrapping Text still
-              // reports its full single-line implicitWidth. Elide instead.
-              elide: Text.ElideRight
-            }
-            Text {
-              width: parent.width
-              text: root.np ? (root.np.artist || "") : ""
-              color: root.fgMid
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              elide: Text.ElideRight
-            }
-            Text {
-              width: parent.width
-              text: root.np ? (root.np.album || "") : ""
-              color: root.fgFaint
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              elide: Text.ElideRight
+            Column {
+              id: trackText
+              anchors.top: parent.top
+              anchors.left: parent.left
+              anchors.right: parent.right
+              spacing: Style.space(3)
+
+              Text {
+                width: parent.width
+                text: root.np ? (root.np.title || "Nothing playing") : "Nothing playing"
+                color: Color.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+                font.weight: Font.DemiBold
+                // wrapMode does not constrain a Text: a wrapping Text still
+                // reports its full single-line implicitWidth. Elide instead.
+                elide: Text.ElideRight
+              }
+              Text {
+                width: parent.width
+                text: root.np ? (root.np.artist || "") : ""
+                color: root.fgMid
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                elide: Text.ElideRight
+              }
+              Text {
+                width: parent.width
+                text: root.np ? (root.np.album || "") : ""
+                color: root.fgFaint
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                elide: Text.ElideRight
+              }
             }
 
-            Item { width: 1; height: Style.space(6) }
-
-            // -- seek ------------------------------------------------------
-            Item {
-              width: parent.width
-              height: Style.space(22)
+            Column {
+              id: controls
+              anchors.bottom: parent.bottom
+              anchors.left: parent.left
+              anchors.right: parent.right
+              spacing: Style.space(6)
               visible: root.hasZone
 
+              // -- seek ------------------------------------------------------
+              // A bare track now, not a 22-unit Item carrying the time labels
+              // underneath it. The labels moved down onto the transport row,
+              // which is what freed the vertical room for the transport to come
+              // up into this column at all.
               Rectangle {
                 id: seekTrack
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
+                width: parent.width
                 height: Style.space(3)
                 radius: height / 2
                 color: root.trackEmpty
@@ -341,106 +379,138 @@ Panel {
                   radius: parent.radius
                   color: root.artAccent          // the one art-derived element
                 }
-              }
 
-              MouseArea {
-                anchors.fill: seekTrack
-                anchors.margins: -Style.space(8)
-                enabled: root.length > 0
-                onClicked: function (mouse) {
-                  // mouse.x is relative to THIS MouseArea's origin, not
-                  // seekTrack's: the negative margin above expands the
-                  // MouseArea Style.space(8) past the track on every side, so
-                  // its origin sits that far before the track's visual left
-                  // edge. Subtract the margin back out, or a click at the
-                  // visual start of the bar reports mouse.x as the margin
-                  // width instead of 0 -- a several-second offset that only
-                  // shows up as "clicking near the beginning doesn't go to
-                  // the beginning."
-                  var frac = Math.max(0, Math.min(1, (mouse.x - Style.space(8)) / seekTrack.width))
-                  service.send("seek", Math.floor(frac * root.length))
+                // A CHILD of the track now rather than a sibling filling it.
+                // Negative margins still expand a 3-unit track into a clickable
+                // band; an item outside its parent's bounds is still hit-tested
+                // because nothing on the path up to the panel sets `clip`.
+                //
+                // The bottom margin is deliberately shorter than the rest. At -8
+                // this band reached into the transport row below and covered the
+                // top of the play button. Paint order would in fact have resolved
+                // that in the button's favour (it is a later sibling), but a
+                // control whose hit box only works because of sibling ordering is
+                // a trap for whoever next reorders this column.
+                MouseArea {
+                  anchors.fill: parent
+                  anchors.leftMargin: -Style.space(8)
+                  anchors.rightMargin: -Style.space(8)
+                  anchors.topMargin: -Style.space(8)
+                  anchors.bottomMargin: -Style.space(3)
+                  enabled: root.length > 0
+                  onClicked: function (mouse) {
+                    // mouse.x is relative to THIS MouseArea's origin, not
+                    // seekTrack's: the left margin above puts that origin
+                    // Style.space(8) before the track's visual left edge.
+                    // Subtract it back out, or a click at the visual start of the
+                    // bar reports mouse.x as the margin width instead of 0 -- a
+                    // several-second offset that only shows up as "clicking near
+                    // the beginning doesn't go to the beginning."
+                    var frac = Math.max(0, Math.min(1, (mouse.x - Style.space(8)) / seekTrack.width))
+                    service.send("seek", Math.floor(frac * root.length))
+                  }
                 }
               }
 
-              Text {
-                anchors.left: parent.left
-                anchors.top: seekTrack.bottom
-                anchors.topMargin: Style.space(5)
-                text: Model.formatTime(root.pos)
-                color: root.fgFaint
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
+              // -- transport + times -----------------------------------------
+              // Inside the art's own column, not a full-width band below it. The
+              // old layout left two empty regions that were really one mistake: a
+              // dead rectangle beside the bottom of the art (this text column
+              // filled only ~87 of the art's 118 units) and a 400-wide row
+              // holding three small centred controls. Folding the transport into
+              // the dead rectangle closes both at once, takes ~50 units off the
+              // panel's height, and puts the buttons beside the seek bar and
+              // times they actually act on.
+              //
+              // The times flank the controls on this line instead of sitting
+              // under the track, which is what buys the vertical room for this
+              // row to fit beside the art at all. Landing flush with the art is
+              // the enclosing Item's anchoring, not this row's height.
+              Item {
+                width: parent.width
+                height: Style.space(36)
+
+                Text {
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: Model.formatTime(root.pos)
+                  color: root.fgFaint
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                Row {
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(18)
+
+                  Text {
+                    // Model.GLYPH_PREV, not a typed "⏮" -- plain Unicode media
+                    // symbols (U+23EE here) carry emoji presentation in the
+                    // deployed font and render as a colour block, not a
+                    // monochrome glyph. Built with String.fromCodePoint in
+                    // Model.js, same as the bar's own icon.
+                    text: Model.GLYPH_PREV
+                    color: root.fgMid
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.heading
+                    // Row only manages x and leaves children top-aligned by
+                    // default, so without this the ~20px glyph sits at the row's
+                    // top while the 36px play circle spans the full row height --
+                    // putting the circle's centre visibly below the glyph.
+                    anchors.verticalCenter: parent.verticalCenter
+                    MouseArea {
+                      anchors.fill: parent
+                      anchors.margins: -Style.space(6)
+                      onClicked: service.send("previous")
+                    }
+                  }
+
+                  Rectangle {
+                    width: Style.space(36)
+                    height: Style.space(36)
+                    radius: width / 2
+                    // Theme accent, not root.artAccent -- Direction C reserves
+                    // the art-derived color for the seek fill alone.
+                    color: Color.accent
+                    Text {
+                      anchors.centerIn: parent
+                      // These two glyphs are an ACTION here: paused offers play.
+                      // The bar no longer uses either one (it shows the product
+                      // icon in every healthy state), which is what removed the
+                      // old collision where the same glyph meant "is paused" in
+                      // the bar and "press to play" in the popup.
+                      text: root.playing ? Model.GLYPH_PAUSED : Model.GLYPH_PLAYING
+                      color: Color.background
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.title
+                    }
+                    MouseArea { anchors.fill: parent; onClicked: service.send("playpause") }
+                  }
+
+                  Text {
+                    text: Model.GLYPH_NEXT
+                    color: root.fgMid
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.heading
+                    anchors.verticalCenter: parent.verticalCenter
+                    MouseArea {
+                      anchors.fill: parent
+                      anchors.margins: -Style.space(6)
+                      onClicked: service.send("next")
+                    }
+                  }
+                }
+
+                Text {
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: Model.formatRemaining(root.pos, root.length)
+                  color: root.fgFaint
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
               }
-              Text {
-                anchors.right: parent.right
-                anchors.top: seekTrack.bottom
-                anchors.topMargin: Style.space(5)
-                text: Model.formatRemaining(root.pos, root.length)
-                color: root.fgFaint
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-            }
-          }
-        }
-
-        // -- transport -----------------------------------------------------
-        Row {
-          anchors.horizontalCenter: parent.horizontalCenter
-          spacing: Style.space(20)
-          visible: root.hasZone
-
-          Text {
-            // Model.GLYPH_PREV, not a typed "⏮" -- plain Unicode media symbols
-            // (U+23EE here) carry emoji presentation in the deployed font and
-            // render as a colour block, not a monochrome glyph. Built with
-            // String.fromCodePoint in Model.js, same as the bar's own glyphs.
-            text: Model.GLYPH_PREV
-            color: root.fgMid
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.heading
-            // Row only manages x and leaves children top-aligned by default,
-            // so without this the ~20px glyph sits at the row's top while the
-            // 36px play circle spans the full row height -- putting the
-            // circle's centre visibly below the glyph.
-            anchors.verticalCenter: parent.verticalCenter
-            MouseArea {
-              anchors.fill: parent
-              anchors.margins: -Style.space(6)
-              onClicked: service.send("previous")
-            }
-          }
-
-          Rectangle {
-            width: Style.space(36)
-            height: Style.space(36)
-            radius: width / 2
-            // Theme accent, not root.artAccent -- Direction C reserves the
-            // art-derived color for the seek fill alone.
-            color: Color.accent
-            Text {
-              anchors.centerIn: parent
-              // Model.GLYPH_PAUSED/GLYPH_PLAYING, the exact glyphs the bar
-              // button already uses to pick the same state -- not a re-typed
-              // "⏸"/"▶", for the same emoji-presentation reason as above.
-              text: root.playing ? Model.GLYPH_PAUSED : Model.GLYPH_PLAYING
-              color: Color.background
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.title
-            }
-            MouseArea { anchors.fill: parent; onClicked: service.send("playpause") }
-          }
-
-          Text {
-            text: Model.GLYPH_NEXT
-            color: root.fgMid
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.heading
-            anchors.verticalCenter: parent.verticalCenter
-            MouseArea {
-              anchors.fill: parent
-              anchors.margins: -Style.space(6)
-              onClicked: service.send("next")
             }
           }
         }
@@ -526,12 +596,49 @@ Panel {
           PanelSeparator { foreground: Color.foreground }
           Item { width: 1; height: Style.space(6) }
 
-          Text {
-            text: "ZONES"
-            color: root.fgFaint
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            font.letterSpacing: 0.9
+          // The caption line carries the search hint on its right, which is
+          // the whole fix for "nothing on screen says search exists"
+          // (FOLLOWUPS 12) at a cost of zero added height: this row already
+          // existed and its right half was empty. It also sits directly above
+          // where results appear, so the hint is next to its own output.
+          //
+          // An Item, not a Row: "ZONES" must stay hard left and the hint hard
+          // right regardless of the panel's width.
+          Item {
+            width: parent.width
+            height: zonesLabel.implicitHeight
+
+            Text {
+              id: zonesLabel
+              anchors.left: parent.left
+              text: "ZONES"
+              color: root.fgFaint
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.letterSpacing: 0.9
+            }
+
+            Text {
+              id: searchHint
+              anchors.right: parent.right
+              // baseline, not verticalCenter: the two labels differ in
+              // letterSpacing and would otherwise sit a fraction of a pixel
+              // apart on a line the eye reads as one.
+              anchors.baseline: zonesLabel.baseline
+              text: "/  search"
+              color: root.fgFaint
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            // Clicking the hint does what it advertises. It is a hint first --
+            // the keyboard is the real path -- but a label naming a key the
+            // user cannot click is a smaller affordance than one they can.
+            MouseArea {
+              anchors.fill: searchHint
+              anchors.margins: -Style.space(5)
+              onClicked: browsePane.focusSearch("")
+            }
           }
 
           Repeater {

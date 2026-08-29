@@ -264,10 +264,23 @@ function position(zone, recvMs, nowMs) {
 // Built, never typed. A literal astral character does not survive every editing
 // path, and the failure mode is an invisible widget with nothing logged. The
 // tests assert the CODEPOINT, because a shape check passes on a typo too.
+// GLYPH_PLAYING/GLYPH_PAUSED are POPUP-ONLY now: they label the popup's play
+// button, which is an ACTION (paused shows play). The bar no longer uses
+// either -- it shows GLYPH_VINYL in every healthy state instead. That split is
+// the point: the same two glyphs previously meant a STATUS in the bar and an
+// ACTION in the popup, so "paused" and "press to play" rendered identically a
+// hundred pixels apart.
 var GLYPH_PLAYING = String.fromCodePoint(0xf040a)   // nf-md-play
 var GLYPH_PAUSED  = String.fromCodePoint(0xf03e4)   // nf-md-pause
-var GLYPH_IDLE    = String.fromCodePoint(0xf0387)   // nf-md-music
 var GLYPH_FAULT   = String.fromCodePoint(0xf0026)   // nf-md-alert
+
+// The bar's product icon: this is tonearm, not a transport mime. Checked
+// against the deployed font rather than assumed -- `fc-list :charset=efbd`
+// resolves it to the SAME family (BitstromWera Nerd Font) that already serves
+// the glyphs rendering in the bar today, so if the old icon drew, this one
+// draws. Verify that way, not by eye: a missing PUA codepoint is an invisible
+// widget with nothing logged.
+var GLYPH_VINYL = String.fromCodePoint(0xefbd)      // nf-fa-record_vinyl
 
 // Popup transport/volume glyphs. Same rule as the four above: built, never
 // typed, and read out of the Nerd Font's own cmap rather than guessed --
@@ -318,7 +331,7 @@ function barState(state, recvMs, nowMs) {
   }
 
   var zone = state.zone
-  if (!zone) return { severity: "ok", glyph: GLYPH_IDLE, showArt: false, playing: false }
+  if (!zone) return { severity: "ok", glyph: GLYPH_VINYL, showArt: false, playing: false }
 
   var np = nowPlayingOf(state)
   var showArt = !!(np && np.image_key)
@@ -329,11 +342,12 @@ function barState(state, recvMs, nowMs) {
   // full brightness or tick the seek clock; it renders as idle below, same
   // as any other non-playing state that isn't "paused".
   var playing = zone.state === "playing"
-  var glyph = GLYPH_IDLE
-  if (playing) glyph = GLYPH_PLAYING
-  else if (zone.state === "paused") glyph = GLYPH_PAUSED
 
-  return { severity: "ok", glyph: glyph, showArt: showArt, playing: playing }
+  // One icon for all three healthy states. `playing` is the only channel that
+  // carries transport state to the bar, and Panel.qml renders it as
+  // brightness; branching the glyph here as well would put the same fact in
+  // two places, only one of them tested.
+  return { severity: "ok", glyph: GLYPH_VINYL, showArt: showArt, playing: playing }
 }
 
 function tooltipText(state) {
@@ -479,7 +493,7 @@ if (typeof module !== "undefined") {
     position: position,
     GLYPH_PLAYING: GLYPH_PLAYING,
     GLYPH_PAUSED: GLYPH_PAUSED,
-    GLYPH_IDLE: GLYPH_IDLE,
+    GLYPH_VINYL: GLYPH_VINYL,
     GLYPH_FAULT: GLYPH_FAULT,
     GLYPH_PREV: GLYPH_PREV,
     GLYPH_NEXT: GLYPH_NEXT,

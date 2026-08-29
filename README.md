@@ -52,10 +52,10 @@ followed Roon zone.
 ## Library search
 
 The popup can search your whole Roon library — not just the current zone or
-the album that's playing. **This section is the only place you'll learn that:**
-the search field is hidden until you use it, on purpose, so the popup keeps
-its normal size when you're just glancing at what's playing. Nothing on
-screen advertises it.
+the album that's playing. The search field stays hidden until you use it, on
+purpose, so the popup keeps its normal size when you're just glancing at what's
+playing; the `/  search` hint on the `ZONES` line is what tells you it's
+there, and clicking it opens the field.
 
 To search, open the popup and press `/` — or just start typing; most
 printable keys open the field and start your query with that character.
@@ -67,8 +67,7 @@ The exceptions are `h`, `j`, `k`, `l`, `x`, `X` and Space: the Omarchy
 shell's own panel key handler claims those before any widget sees them
 (`h`/`j`/`k`/`l` are vim-style movement, and `j`/`k` also double as Down/Up
 here; `x` is delete; Space activates). They cannot start a search — press `/`
-first and type them into the field. `q` starts a search when no row is
-selected and queues the selected row when one is.
+first and type them into the field.
 
 | Key | Behavior |
 |---|---|
@@ -78,12 +77,16 @@ selected and queues the selected row when one is.
 | `↑` / `↓` | Move the selection |
 | `Enter` (on a result) | Play if the row is playable, otherwise descend into it (e.g. `Albums` → its list of albums) |
 | `→` | Descend into the selected row |
-| `q` | Queue the selected row without closing the popup (with no row selected, starts a search instead) |
 | `←` | Back one level |
 | `Esc` | Back one level; closes the popup at the top level |
 
-Playing a row closes the popup; queuing leaves it open so you can keep
-adding.
+Playing a row closes the popup.
+
+**Play Now is the only action.** There's no Queue button and no queue key,
+because the popup has no way to show you a queue — so queuing would be a
+control whose effect you could never see. The daemon still supports it if you
+want it from a script: `tonearmctl browse play <n> queue <level_id>` (the
+`level_id` comes back with every browse reply).
 
 ## Settings
 
