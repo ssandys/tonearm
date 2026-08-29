@@ -127,6 +127,15 @@ Panel {
     onTriggered: now = Date.now()
   }
 
+  // Spec 5.1: `reset` is "used when the popup closes, so a stale cursor is
+  // never carried into the next session". Nothing was wired to the closing
+  // edge, so the daemon session kept its path forever after the first search
+  // -- which kept BrowsePane.hasContent true, which put the separator and the
+  // whole pane into every subsequent popup open and silently undid R13/R14's
+  // idle height. `opened` is Ui/Panel.qml's own readonly property; this is
+  // the closing edge it exists for.
+  onOpenedChanged: if (!root.opened) browsePane.resetPane()
+
   // BarIconButton, not a hand-rolled Item + MouseArea: it paints the glyph
   // through OpticalGlyph, which centers on the painted ink rather than the
   // monospace advance cell, and every icon-only bar widget in this shell
@@ -216,13 +225,27 @@ Panel {
       // stray Esc must not discard a whole navigation.
       onCloseRequested: { if (!browsePane.handleBack()) root.close() }
 
+      // Order matters. `/` is unambiguous and goes first. `q` is BOTH the
+      // queue shortcut and the first letter of Queen, so it is resolved by
+      // context: with a row selected it queues, with nothing selected it
+      // starts a search. Taking "q" unconditionally (as this did) meant no
+      // Queen and no Queens of the Stone Age from an idle popup.
+      //
+      // h j k l x X and Space never arrive here at all -- PanelKeyCatcher
+      // consumes them for move/delete/activate before onTextKey is emitted --
+      // so they cannot be recovered from this file. README and spec 7.2 say
+      // so rather than promising "any letter".
       onTextKey: function (text) {
-        if (text === "q") { browsePane.handleQueue(); return }
-        if (text === "/") { browsePane.focusSearch(); return }
-        // Any other printable key starts a search with that character, so
-        // typing goes straight into the field without a preparatory keystroke.
+        if (text === "/") { browsePane.focusSearch(""); return }
+        if (text === "q" && browsePane.hasSelection) {
+          browsePane.handleQueue()
+          return
+        }
+        // Any other printable key starts a search SEEDED with that character,
+        // so typing goes straight into the field without a preparatory
+        // keystroke and without losing the first letter.
         if (text && text.length === 1 && text >= " ") {
-          browsePane.focusSearch()
+          browsePane.focusSearch(text)
         }
       }
 
@@ -582,6 +605,10 @@ Panel {
           service: service
           state: root.st
           fontFamily: root.fontFamily
+          // Where the search field returns active focus. Without it the
+          // TextField keeps focus after a search and every navigation key is
+          // eaten by the text input instead of reaching the catcher.
+          keyTarget: keyCatcher
           onPlayStarted: root.close()
           onCloseRequested: root.close()
         }

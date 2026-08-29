@@ -436,6 +436,29 @@ class RoonSession:
             self._api = None
 
     # -- browse -----------------------------------------------------------
+    def selected_zone_id(self):
+        """The followed/pinned zone's id, or None. Read fresh on every call.
+
+        This is the SAME arbitration `_command_locked` uses to route
+        playpause/seek/volume, deliberately: a browse action must play into
+        the zone the bar is showing and the transport controls already drive,
+        never into a second, separately-chosen one. The widget does not get a
+        say -- spec 3 keeps the pinned zone the single target, and the popup
+        already has a zone switcher for changing it.
+
+        Passed to BrowseSession as a callable rather than a value so a repin
+        between two browses is picked up (see BrowseSession.__init__). It is
+        therefore called several times per browse op; that is a dict
+        comprehension over a handful of zones next to a network round-trip.
+
+        Takes no lock. `_zones()` is exactly what `snapshot()` already calls
+        off the publish path with no lock, and taking `self._lock` here would
+        put a browse round-trip's worth of Roon latency behind the same lock
+        every transport command uses (spec 7.5).
+        """
+        _, selected = self._zones()
+        return selected["id"] if selected else None
+
     def browse_session(self, key: str):
         """One BrowseSession per multi_session_key, created on first use.
 
@@ -446,7 +469,8 @@ class RoonSession:
         with self._browse_lock:
             existing = self._browse_sessions.get(key)
             if existing is None:
-                existing = browse.BrowseSession(self._api, key)
+                existing = browse.BrowseSession(
+                    self._api, key, self.selected_zone_id)
                 self._browse_sessions[key] = existing
             return existing
 

@@ -84,6 +84,44 @@ class TestBrowseVerb(unittest.TestCase):
         self.assertEqual(reply["error"], "stale")
         self.assertEqual(reply["message"], "out of date")
 
+    def test_a_stale_reply_carries_the_current_level_on_the_wire(self):
+        # spec 5.1.1/5.2 both promise it, and BrowsePane._apply is written
+        # expecting it. It was never sent: the error reply was built from
+        # token and message alone, so a widget holding a level_id the daemon
+        # had moved past got `{"ok":false,"error":"stale",...}` with no rows
+        # and no level_id -- and since a stale reply also clears errorText,
+        # the pane sat showing rows it could never act on with nothing on
+        # screen indicating a problem. Values chosen so a default could not
+        # produce them.
+        s = StubSession(error=browse.BrowseError(
+            "stale", "out of date",
+            {"ok": True, "level_id": 12, "path": ["Search", "Albums"],
+             "count": 21, "offset": 0,
+             "rows": [{"title": "Dead Man's Party", "subtitle": "Oingo Boingo",
+                       "image_key": "48f5", "can_descend": True,
+                       "can_play": True}]}))
+        reply = roundtrip(s, {"cmd": "browse", "op": "enter", "index": 0,
+                              "level_id": 3})
+        # The merge must not turn an error reply into a success one: the
+        # level payload carries its own ok: True.
+        self.assertFalse(reply["ok"])
+        self.assertEqual(reply["error"], "stale")
+        self.assertEqual(reply["message"], "out of date")
+        self.assertEqual(reply["level_id"], 12)
+        self.assertEqual(reply["path"], ["Search", "Albums"])
+        self.assertEqual(reply["count"], 21)
+        self.assertEqual([r["title"] for r in reply["rows"]],
+                         ["Dead Man's Party"])
+
+    def test_an_error_with_no_level_payload_is_unchanged(self):
+        # Only `stale` and `roon_error` carry one; bad_index and friends must
+        # not grow phantom rows/level_id keys the widget would then apply.
+        s = StubSession(error=browse.BrowseError("bad_index", "no such row"))
+        reply = roundtrip(s, {"cmd": "browse", "op": "enter", "index": 99})
+        self.assertFalse(reply["ok"])
+        self.assertNotIn("rows", reply)
+        self.assertNotIn("level_id", reply)
+
     def test_an_unexpected_exception_becomes_roon_error_not_a_hang(self):
         s = StubSession(error=RuntimeError("boom"))
         reply = roundtrip(s, {"cmd": "browse", "op": "back"})

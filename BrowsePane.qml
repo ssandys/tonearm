@@ -23,6 +23,19 @@ Item {
   property int artPx: Style.space(30)
   property string fontFamily: ""
 
+  // Where active focus goes when the search field gives it up: Panel.qml
+  // passes its PanelKeyCatcher. Without this, focus is a one-way trip.
+  // focusSearch() grabs it into the TextField and nothing ever handed it
+  // back, so after submitting a search the pane's whole key map was dead:
+  // Ui/TextField.qml inherits QQC2 TextField, i.e. it IS the QQuickTextInput
+  // and it ACCEPTS the keys it understands. Enter re-ran the same search via
+  // onAccepted, "q" typed a q, and Left/Right moved the text caret instead of
+  // navigating. Clearing `editing` alone (which is all this used to do) only
+  // unblocks the catcher -- it does not give the catcher back the focus it
+  // needs to see a key at all. Task 11's nesting fix made IGNORED keys
+  // propagate; it does nothing for keys the field accepts.
+  property Item keyTarget: null
+
   // Browse state. `levelId` is the generation counter from spec 5.1.1 -- it
   // MUST accompany every index-addressed op, or a session reset between
   // render and keypress plays the wrong album silently.
@@ -36,6 +49,14 @@ Item {
 
   readonly property int rowCount: rows.length
   readonly property bool hasResults: rows.length > 0
+
+  // "q" is ambiguous: it is both the queue shortcut and the first letter of
+  // Queen. PanelKeyCatcher already eats h/j/k/l/x/X/Space before onTextKey
+  // ever fires, so those letters cannot start a search at all; "q" is one of
+  // the few tonearm itself was throwing away, and it did so unconditionally.
+  // With a row selected it queues; with nothing selected there is nothing to
+  // queue, so it starts a search instead.
+  readonly property bool hasSelection: !root.editing && root.cursor >= 0
 
   // Single source of truth for "does this pane have anything to show right
   // now" -- bound by both this Item's own `visible` below and Panel.qml's
@@ -78,9 +99,56 @@ Item {
   // field.forceActiveFocus() in the same synchronous tick that flips `root`
   // from invisible to visible would race the layout pass that actually maps
   // the field, so the grab must run after that pass completes instead.
-  function focusSearch() {
+  //
+  // `seed` is the character that triggered this, and seeding it is what makes
+  // README's "any letter opens the field and starts your query with it" true.
+  // It was not: PanelKeyCatcher's onTextKey branch never sets
+  // event.accepted, so the triggering key propagates onward -- to a field
+  // that is not focused yet (the grab is deferred, above) and therefore never
+  // receives it. Press `o`, type `ingo boingo`, and the field held
+  // `ingo boingo`. Setting the text here rather than trying to replay the key
+  // also keeps the deferred grab intact.
+  //
+  // Assigning only for a non-empty seed is deliberate: `/` passes "" and must
+  // leave an in-progress query alone rather than wiping it.
+  function focusSearch(seed) {
     root.editing = true
+    if (seed && seed.length > 0) {
+      field.text = seed
+      field.cursorPosition = field.text.length
+    }
     Qt.callLater(function () { field.forceActiveFocus() })
+  }
+
+  // The symmetric counterpart to focusSearch(). Must be called EVERYWHERE
+  // `editing` is cleared -- clearing the flag without moving focus leaves the
+  // TextField holding it and swallowing the keys the pane needs.
+  function releaseSearch() {
+    root.editing = false
+    if (root.keyTarget) root.keyTarget.forceActiveFocus()
+  }
+
+  // Called when the popup closes (Panel.qml's onOpenedChanged). Spec 5.1:
+  // `reset` exists "so a stale cursor is never carried into the next
+  // session". Nothing called it except handleBack() at path.length === 1, so
+  // after any search `path.length > 0` stayed true for the daemon's whole
+  // lifetime -- `hasContent` with it, which silently undid R13/R14: the idle
+  // popup kept its original height only until the user's first search. It
+  // also left the previous session's rows and cursor on screen next time.
+  //
+  // releaseSearch() rather than a bare `editing = false`, to keep that
+  // invariant in exactly one place; its forceActiveFocus() is a no-op on a
+  // panel that is already closing (an invisible item cannot take focus) and
+  // the KeyboardPanel re-focuses its focusTarget on the next open anyway.
+  //
+  // The reset goes through _send, so `busy` gates it like every other op --
+  // rows and path therefore clear when the daemon's reply lands, not
+  // optimistically here (see handleBack for why optimistic clearing loses to
+  // a reply still in flight).
+  function resetPane() {
+    field.text = ""
+    root.releaseSearch()
+    _send(["reset"])
   }
 
   function _apply(reply) {
@@ -117,19 +185,28 @@ Item {
 
   // `after` runs once the reply has been applied, so a caller can react to
   // what the daemon actually did rather than to what it hoped would happen.
+  //
+  // Returns whether the request was actually SENT. handleBack() needs that:
+  // returning true when `busy` had suppressed the send told Panel.qml the key
+  // was consumed, so Esc was swallowed and the popup could not be closed from
+  // the keyboard while a browse was in flight.
   function _send(args, after) {
-    if (!root.service || root.busy) return
+    if (!root.service || root.busy) return false
     root.busy = true
     root.service.browse(args, function (reply) {
       root._apply(reply)
       if (after) after(reply)
     })
+    return true
   }
 
   function search(term) {
     if (!term || term.length === 0) return
     root.cursor = -1
-    root.editing = false
+    // releaseSearch, not `editing = false`: the results are about to be
+    // keyboard-navigable and the catcher cannot see a key it does not have
+    // focus for.
+    root.releaseSearch()
     _send(["search", term])
   }
 
@@ -178,8 +255,8 @@ Item {
   // Returns true when it consumed the key. Panel.qml uses that to decide
   // whether Esc should close the popup instead (spec 7.2).
   function handleBack() {
-    if (root.editing) { root.editing = false; return true }
-    if (root.path.length > 1) { _send(["back"]); return true }
+    if (root.editing) { root.releaseSearch(); return true }
+    if (root.path.length > 1) return _send(["back"])
     // At the top level, `reset` is the same op class as every other browse
     // call: gated by `busy`, and cleared only once the daemon's reply says
     // so, via _apply -- not optimistically here. An earlier draft cleared
@@ -187,7 +264,12 @@ Item {
     // bypassing `busy`. Fast key-repeat during an in-flight activate/enter
     // then let that op's reply land afterward and silently overwrite the
     // reset (_apply has no idea a reset happened underneath it).
-    if (root.path.length === 1) { _send(["reset"]); return true }
+    //
+    // Both branches now report whether the send actually happened rather than
+    // an unconditional true: `busy` suppressing it means the key did nothing,
+    // and claiming otherwise left Esc with no effect at all instead of
+    // falling through to closing the popup.
+    if (root.path.length === 1) return _send(["reset"])
     return false
   }
 
@@ -205,7 +287,9 @@ Item {
       onAccepted: root.search(text)
       // Esc leaves the field without closing the popup; Panel.qml's key
       // catcher is blocked while this has focus, so it never sees this key.
-      Keys.onEscapePressed: root.editing = false
+      // releaseSearch, not `editing = false`: unblocking the catcher is
+      // useless while this field still holds active focus.
+      Keys.onEscapePressed: root.releaseSearch()
       onActiveFocusChanged: if (activeFocus) root.editing = true
     }
 

@@ -116,12 +116,29 @@ MAX_ACTION_DEPTH = 4
 
 
 class BrowseError(Exception):
-    """Carries a stable machine token from spec 5.2."""
+    """Carries a stable machine token from spec 5.2.
 
-    def __init__(self, token: str, message: str) -> None:
+    `level` is the optional level payload spec 5.1.1/5.2 promise alongside a
+    `stale` reply ("including the current level so the widget can re-render").
+    Without it the pane is left showing rows it can never act on: a `stale`
+    reply deliberately clears errorText, so a widget holding a level_id the
+    daemon has moved past -- the exact state a daemon restart leaves behind,
+    spec 7.4's "Daemon restarts" row -- gets an empty error, no rows, and
+    every subsequent keystroke returns `stale` forever with nothing on screen
+    saying why. `roon_error` carries it too, for the same reason: the session
+    has just reset to root underneath the widget (spec 7.4) and the pane must
+    be told, or it keeps rendering the level that no longer exists.
+
+    It is a plain `current()` dict (never None-by-default surprise): callers
+    that have nothing useful to say simply leave it None, and server.py
+    merges it into the error reply only when it is present.
+    """
+
+    def __init__(self, token: str, message: str, level: dict | None = None) -> None:
         super().__init__(message)
         self.token = token
         self.message = message
+        self.level = level
 
 
 class BrowseSession:
@@ -137,9 +154,15 @@ class BrowseSession:
     subscriber (spec 7.5, and docs/FOLLOWUPS.md item 3).
     """
 
-    def __init__(self, api, key: str) -> None:
+    def __init__(self, api, key: str, zone_id_provider=None) -> None:
         self._api = api
         self._key = key
+        # A CALLABLE, not a zone id, and deliberately so. The user can repin
+        # between two browses (the popup has a zone switcher), and a value
+        # captured at construction would send the next play to the room they
+        # just left -- silently, since Roon reports success either way (see
+        # _opts). A callable is also what makes this testable without a Core.
+        self._zone_id_provider = zone_id_provider
         self._lock = threading.RLock()
         self.level_id = 0
         self._path: list[str] = []
@@ -147,11 +170,49 @@ class BrowseSession:
         self._keys: list[str] = []
         self._count = 0
         self._offset = 0
+        # Roon's OWN level number for the level currently adopted, straight
+        # off loaded["list"]["level"]. Only ever compared RELATIVELY (see
+        # _expect), never against an absolute depth this code computes: the
+        # absolute number Roon assigns to a search-results level is not
+        # something this codebase has measured, but "one descent goes down
+        # exactly one level" is -- it is the same fact back() already depends
+        # on when it pops exactly one.
+        self._level: int | None = None
 
     # -- Roon plumbing -------------------------------------------------
 
+    def _zone_id(self):
+        """The zone every browse call must target, read at CALL time."""
+        if self._zone_id_provider is None:
+            return None
+        return self._zone_id_provider()
+
     def _opts(self, **extra) -> dict:
+        """Common browse opts. `zone_or_output_id` is not optional.
+
+        MEASURED live against the Core, same album, same code path, with only
+        this field differing:
+
+            [nozone]   invoking Play Now -> zone state: paused  | Insanity
+            [withzone] invoking Play Now -> zone state: playing | Speak to Me
+
+        A browse action with no `zone_or_output_id` succeeds at the protocol
+        level and plays into nothing -- so `play`/`activate` reported
+        `played: true` while the zone never changed. That is the worst shape
+        of failure available here: the widget closes the popup, reports
+        success, and no music starts. The vendored library does the same thing
+        for the same reason (roonapi.py:590-595 puts it in play_media's browse
+        opts, and in its load opts too).
+
+        Omitted entirely rather than sent as null when no zone is selected:
+        navigation must still work with no zone, and sending an explicit null
+        for a field Roon expects to be an id is a different request than not
+        sending the field. `play` refuses outright instead -- see play().
+        """
         opts = {"hierarchy": "browse", "multi_session_key": self._key}
+        zone_id = self._zone_id()
+        if zone_id:
+            opts["zone_or_output_id"] = zone_id
         opts.update(extra)
         return opts
 
@@ -168,10 +229,85 @@ class BrowseSession:
             raise BrowseError("roon_error", "Roon returned no response")
         return result
 
-    def _adopt(self, loaded, offset: int) -> dict:
-        """Record a freshly loaded level as the current one, and bump the id."""
+    def _expect(self, delta: int):
+        """The Roon `level` a descent/ascent of `delta` should land on.
+
+        None until the first adopt has recorded a baseline (search establishes
+        it), and None is "no expectation" -- the absolute level Roon assigns
+        to a search-results level is not measured here, only the relative
+        step, so the baseline is taken from Roon itself rather than computed.
+        """
+        return None if self._level is None else self._level + delta
+
+    @staticmethod
+    def _level_of(lst: dict):
+        """Roon's own level number for a loaded list, or None if it did not say.
+
+        The ONE place a missing or unparseable `level` is tolerated, so that
+        tolerance is a single decision rather than the same guard repeated at
+        every reader. A Core that does not report it must stay browsable: with
+        None here, `_expect` yields None and `_verify_position` has no opinion,
+        which is exactly the pre-existing behaviour.
+        """
+        try:
+            return int(lst["level"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _verify_position(self, lst: dict, expected_level) -> None:
+        """Catch Roon silently resetting to the browse ROOT (spec 2.5, 7.4).
+
+        A stale item_key returns the hierarchy root WITH NO ERROR. Nothing
+        used to notice: `_adopt` read only `count` from `loaded["list"]`, so
+        the root's rows were adopted as if they were the requested level's,
+        with `ok: true` and a bumped level_id. Reproduced with one injected
+        load failure and a replayed keystroke:
+
+            enter #2 ok. path = ['Search','Albums','Albums']
+                        rows = ['Library']
+                        level_id = 2   real position = root
+
+        That is the "half-broken cursor" spec 7.4 forbids, reached without a
+        single error. `loaded["list"]["level"]` is Roon's own answer to "where
+        am I", and level 0 is the root.
+
+        Only a drop to level 0 RESETS, deliberately. That is the one failure
+        mode measured on a real Core, and a level of 0 where a descent was
+        expected cannot be anything else. Any other mismatch is logged and
+        tolerated: the relative arithmetic here has never been checked against
+        a Core for hierarchies this code does not walk, and a false positive
+        would turn working navigation into a hard error -- strictly worse than
+        the warning it would replace. Missing or unparseable `level` is
+        likewise tolerated -- see `_level_of`, the one place that decides it.
+        """
+        if expected_level is None:
+            return
+        level = self._level_of(lst)
+        if level is None or level == expected_level:
+            return
+        if level == 0:
+            self._reset_locked()
+            raise BrowseError(
+                "roon_error",
+                "Roon returned to the browse root; the view has been reset",
+                self.current())
+        LOG.warning("Roon reported level %d where %d was expected",
+                    level, expected_level)
+
+    def _adopt(self, loaded, offset: int, path: list, expected_level=None) -> dict:
+        """Record a freshly loaded level as the current one, and bump the id.
+
+        `path` is the caller's PROPOSED breadcrumb, adopted here rather than
+        assigned by the caller beforehand. enter() used to extend self._path
+        before this ran; a _load() that then failed (roonapi gives up after
+        ~2.5s) left _path describing the child while _rows/_keys/level_id
+        still described the parent, and Roon genuinely in the child -- a
+        divergence no error reported and the level_id check could not catch,
+        because level_id had not moved either.
+        """
         items = loaded.get("items") or []
         lst = loaded.get("list") or {}
+        self._verify_position(lst, expected_level)
         self._rows = normalize_rows(items)
         # Parallel to _rows and dropped from every reply. The widget addresses
         # rows by index; this is where the real keys stay.
@@ -181,6 +317,8 @@ class BrowseSession:
         ]
         self._count = 0 if not self._rows else int(lst.get("count") or 0)
         self._offset = offset
+        self._path = list(path)
+        self._level = self._level_of(lst)
         self.level_id += 1
         return self.current()
 
@@ -215,8 +353,10 @@ class BrowseSession:
             if search_key is None:
                 raise BrowseError("roon_error", "no searchable item in Library")
             self._browse(item_key=search_key, input=term)
-            self._path = ["Search"]
-            return self._adopt(self._load(), 0)
+            # No expected level: search walks to wherever Roon puts results
+            # and that absolute number is the BASELINE every later relative
+            # check is measured from, not something to check itself.
+            return self._adopt(self._load(), 0, ["Search"])
 
     @staticmethod
     def _pick(loaded, predicate):
@@ -246,8 +386,13 @@ class BrowseSession:
         except (TypeError, ValueError):
             matches = False
         if not matches:
+            # The current level rides along (spec 5.1.1: "including the
+            # current level so the widget can re-render"). current() is a
+            # plain read of already-adopted state and takes no lock of its
+            # own; _check only ever runs under self._lock already.
             raise BrowseError(
-                "stale", "the view is out of date; it has been refreshed")
+                "stale", "the view is out of date; it has been refreshed",
+                self.current())
         if not isinstance(index, int) or index < 0 or index >= len(self._keys):
             raise BrowseError("bad_index", "no such row")
         key = self._keys[index]
@@ -260,8 +405,11 @@ class BrowseSession:
             key = self._check(index, level_id)
             title = self._rows[index]["title"]
             self._browse(item_key=key)
-            self._path = self._path + [title]
-            return self._adopt(self._load(), 0)
+            # The new breadcrumb is a LOCAL until _adopt commits it. See
+            # _adopt's docstring: assigning it here left the session
+            # describing a level it had failed to load.
+            return self._adopt(self._load(), 0, self._path + [title],
+                               self._expect(1))
 
     def back(self) -> dict:
         """One level up, via pop_levels -- never a re-walk (spec 2.5)."""
@@ -269,22 +417,28 @@ class BrowseSession:
             if len(self._path) <= 1:
                 return self.current()
             self._browse(pop_levels=1)
-            self._path = self._path[:-1]
-            return self._adopt(self._load(), 0)
+            return self._adopt(self._load(), 0, self._path[:-1],
+                               self._expect(-1))
 
     def page(self, offset: int) -> dict:
         with self._lock:
-            return self._adopt(self._load(int(offset)), int(offset))
+            return self._adopt(self._load(int(offset)), int(offset),
+                               self._path, self._expect(0))
 
     def reset(self) -> dict:
         with self._lock:
-            self._path = []
-            self._rows = []
-            self._keys = []
-            self._count = 0
-            self._offset = 0
-            self.level_id += 1
-            return self.current()
+            return self._reset_locked()
+
+    def _reset_locked(self) -> dict:
+        """Back to an empty session. Caller must hold self._lock."""
+        self._path = []
+        self._rows = []
+        self._keys = []
+        self._count = 0
+        self._offset = 0
+        self._level = None
+        self.level_id += 1
+        return self.current()
 
     def play(self, index: int, action: str, level_id=None) -> dict:
         """Resolve the row's action list, invoke `action`, return to the level.
@@ -298,6 +452,17 @@ class BrowseSession:
             raise BrowseError("bad_index", "unknown action %r" % (action,))
         with self._lock:
             key = self._check(index, level_id)
+            # After the stale check, which is the fail-safe one and must keep
+            # coming first, but before any Roon call. Without a zone, invoking
+            # an action succeeds and plays into nothing (see _opts), so this
+            # has to fail LOUDLY -- reporting `played: true` for silence is
+            # exactly the lie this whole finding is about. Navigation
+            # (search/enter/back/page) deliberately does not check: browsing
+            # with no zone selected is perfectly meaningful.
+            if not self._zone_id():
+                raise BrowseError(
+                    "no_zone",
+                    "no Roon zone is selected to play into")
             # Bound BEFORE the try: if the first _browse raises, the finally
             # clause and the check below both still need these names.
             depth = 0
@@ -346,6 +511,11 @@ class BrowseSession:
             try:
                 return self.play(index, "play_now", level_id)
             except BrowseError as exc:
+                # ONLY no_action falls back to a descend. `no_zone` in
+                # particular must propagate: descending into an album because
+                # there is nowhere to play it would look like the widget did
+                # something reasonable, and the user would never learn why no
+                # music started. Enter with no zone says so instead.
                 if exc.token != "no_action":
                     raise
                 reply = self.enter(index, level_id)
