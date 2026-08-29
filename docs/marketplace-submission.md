@@ -1,8 +1,14 @@
 # Marketplace submission draft
 
-For `HANCORE-linux/omarchy-plugin-marketplace`, issue template **"Submit a
-plugin"** (`.github/ISSUE_TEMPLATE/submit-plugin.yml`). Fields below map 1:1
-to that form. Not yet filed.
+For `HANCORE-linux/omarchy-plugin-marketplace`. Fields below map 1:1 to the
+**"Submit a plugin"** issue form (`.github/ISSUE_TEMPLATE/submit-plugin.yml`)
+and to the CLI path documented in the marketplace's own `SUBMISSION.md`, which
+is the authority for exact values. Not yet filed.
+
+The marketplace's `SUBMISSION.md` carries an "Instructions for AI agents"
+section requiring that the completed title and body be shown to the owner, and
+that the issue be created only after the owner explicitly approves. That is
+why this document exists rather than a filed issue.
 
 Target commit: set to `git rev-parse master` at filing time.
 
@@ -18,9 +24,12 @@ https://github.com/ssandys/tonearm
 
 ## Tags
 
-`Bar`, `Media`, `Quickshell`
+`bar`, `media`, `quickshell`
 
-Exactly three — the form rejects more.
+Exactly three — more are rejected. **Lowercase**: the web dropdown displays
+them title-cased, but `SUBMISSION.md`'s CLI path lists the allowed values as
+lowercase kebab (`bar`, `media`, `quickshell`, `power-management`). Category is
+the opposite — case-sensitive and title-cased (`Widgets`).
 
 ## Suggest a missing tag
 
