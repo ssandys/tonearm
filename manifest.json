@@ -2,15 +2,19 @@
   "schemaVersion": 1,
   "id": "ssandys.tonearm",
   "name": "Tonearm",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "author": "Sean Sandys",
   "license": "MIT",
-  "description": "Roon now-playing and transport in the bar: album art, play/pause, seek, volume, and zone switching. Summon with: omarchy-shell shell toggle ssandys.tonearm",
-  "kinds": ["bar-widget"],
-  "entryPoints": { "barWidget": "Panel.qml" },
+  "description": "Roon now-playing, transport, library search and zone transfer in the bar. Needs a one-time setup step that installs tonearmd, a Python systemd user service which talks to your Roon Core and starts at login. Summon with: omarchy-shell shell toggle ssandys.tonearm",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
   "barWidget": {
     "displayName": "Tonearm",
-    "description": "Roon now-playing, transport, and zone switching",
+    "description": "Roon now-playing, transport, library search, zone switching and transfer",
     "category": "Audio",
     "allowMultiple": false,
     "defaultSection": "right",
@@ -20,9 +24,27 @@
       "showVolume": true
     },
     "schema": [
-      { "key": "accentFromArt", "type": "boolean", "label": "Tint the seek bar with the album's color", "defaultValue": true },
-      { "key": "artSizePx", "type": "integer", "label": "Album art size in the popup (pixels)", "min": 96, "max": 256, "step": 8, "defaultValue": 118 },
-      { "key": "showVolume", "type": "boolean", "label": "Show the volume slider", "defaultValue": true }
+      {
+        "key": "accentFromArt",
+        "type": "boolean",
+        "label": "Tint the seek bar with the album's color",
+        "defaultValue": true
+      },
+      {
+        "key": "artSizePx",
+        "type": "integer",
+        "label": "Album art size in the popup (pixels)",
+        "min": 96,
+        "max": 256,
+        "step": 8,
+        "defaultValue": 118
+      },
+      {
+        "key": "showVolume",
+        "type": "boolean",
+        "label": "Show the volume slider",
+        "defaultValue": true
+      }
     ]
   }
 }

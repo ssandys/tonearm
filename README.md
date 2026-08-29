@@ -73,6 +73,36 @@ wrong — the daemon isn't running, the extension isn't enabled yet, the Core is
 unreachable — the header says so in place of the Core's name, so you never
 have to guess why nothing is playing.
 
+## What it does on your network
+
+Worth knowing before you install something that runs unsandboxed in your shell.
+
+**Finding your Core, once.** Roon Cores announce themselves over SOOD, but the
+standard multicast query draws no reply on many networks (an access point
+filtering multicast is enough). So on **first run only**, if no Core is already
+configured, tonearm scans your local subnet: it opens a TCP connection to one
+port — 9330, Roon's HTTP/MOO port — on each address in the `/24`, and sends a
+SOOD query to whatever answers.
+
+Constraints on that scan:
+
+- **First run only.** The Core's address is written to
+  `~/.config/tonearm/config.json` and reused from then on. Delete that file and
+  it scans again; otherwise it never repeats.
+- **Private address space only.** Each interface's own IPv4 address is checked
+  with `ipaddress.is_private` before its `/24` is scanned, so a machine with a
+  public address on an interface does not get its neighbours probed.
+- **The subnet comes from the interfaces themselves** (`SIOCGIFADDR`), not from
+  a routing lookup — on a host running a VPN, the usual "UDP-connect to a
+  scratch address" trick returns the tunnel's address and would point the scan
+  at an unrelated subnet.
+
+**After that**, the only traffic is to your Core: a WebSocket to port 9330 for
+the Roon MOO protocol, and HTTP GETs to the same host for album art.
+
+**Nothing leaves your network.** There is no telemetry, no analytics, and no
+outbound connection to anything but your Roon Core.
+
 ## Zones
 
 The `ZONES` list at the bottom of the popup does two different things, and
