@@ -1,0 +1,52 @@
+name: test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # The two the daemon actually imports. `simplejson` is deliberately not
+      # here: roonapi imports it inside a try/except and falls back to stdlib
+      # json, and the suite passes without it locally.
+      - name: Install runtime dependencies
+        run: python -m pip install --upgrade pip websocket-client dbus-next
+
+      # bin/test prefers /usr/bin/python, which on a runner is not the one
+      # setup-python just installed the packages into.
+      - name: Run the suite
+        run: PYTHON=$(which python) ./bin/test
+
+      # The same gate `omarchy plugin add` applies before installing, reduced
+      # to the parts that need no Omarchy on the box: valid JSON, schemaVersion
+      # exactly 1, required fields, an entry point that exists, and no symlinks
+      # anywhere (they could point a copied plugin at arbitrary files once it
+      # lands in the trusted plugins directory).
+      - name: Validate the plugin manifest
+        run: |
+          jq -e . manifest.json > /dev/null
+          jq -e '.schemaVersion == 1' manifest.json > /dev/null
+          for field in id name version kinds entryPoints; do
+            jq -e --arg f "$field" 'has($f)' manifest.json > /dev/null \
+              || { echo "manifest missing required field '$field'" >&2; exit 1; }
+          done
+          jq -e '.id | test("^[A-Za-z0-9][A-Za-z0-9._-]*$") and (contains("..") | not)' \
+            manifest.json > /dev/null
+          ep=$(jq -r '.entryPoints.barWidget' manifest.json)
+          test -f "$ep" || { echo "entry point not found: $ep" >&2; exit 1; }
+          link=$(find . -name .git -prune -o -type l -print -quit)
+          test -z "$link" || { echo "symlink in plugin folder: $link" >&2; exit 1; }
+          echo "manifest ok"

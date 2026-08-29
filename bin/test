@@ -38,11 +38,21 @@ else
 fi
 
 echo "== python =="
+# Prefer the SYSTEM python. The active python3 here is usually mise-managed and
+# does not carry websocket-client or dbus-next, so `roonapi` and `mpris` fail to
+# import under it and a third of the suite errors out for a reason that has
+# nothing to do with the code. $PYTHON overrides, and python3 is the fallback
+# for a machine (or a CI runner) with no /usr/bin/python at all.
+if [ -z "${PYTHON:-}" ]; then
+  if [ -x /usr/bin/python ]; then PYTHON=/usr/bin/python; else PYTHON=python3; fi
+fi
+echo "  using $PYTHON ($("$PYTHON" --version 2>&1))"
+
 # Discovery is explicit: `python -m unittest` with no args only finds tests
 # under the CWD matching test*.py, and scripts/ is not a package root.
 python_rc=0
 if [ -d tests/python ]; then
-  /usr/bin/python -m unittest discover -s tests/python -t . -v || python_rc=$?
+  "$PYTHON" -m unittest discover -s tests/python -t . -v || python_rc=$?
   # 5 means "no tests collected" (Python 3.12+), which is valid only before the
   # first suite lands. Any other non-zero is a real failure.
   if [ "$python_rc" -eq 5 ]; then
