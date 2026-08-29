@@ -100,8 +100,11 @@ push.
 - [x] I have documented the plugin license and any external dependencies. —
       `LICENSE` carries a Dependencies section covering the vendored
       Apache-2.0 `roonapi` and the two runtime packages.
-- [ ] I confirm that I own or have permission to submit this plugin and its
-      preview assets. — **see "Open before filing" below.**
+- [x] I confirm that I own or have permission to submit this plugin and its
+      preview assets. — `preview.png` is a screenshot of the running widget on
+      the author's own machine; the album art in frame is blurred past
+      recognition. Track and album titles remain, which are factual metadata
+      rather than a reproduction of artwork.
 - [x] The plugin does not overwrite user configuration without explicit
       consent. — the only file written outside tonearm's own directories is
       `~/.config/systemd/user/tonearmd.service`, created by a setup script the
@@ -120,17 +123,29 @@ For the GitHub repo's description field, which the marketplace links to:
 
 ## Open before filing
 
-1. **`preview.png` shows third-party album artwork.** It is a screenshot of the
-   running widget, so the cover art of a commercial release is in the frame.
-   Checklist item 3 asks about preview assets specifically. Options: leave it
-   (a screenshot of a music player showing a sleeve is ordinary practice),
-   recapture against a release whose art is self-owned or public domain, or
-   capture the "Nothing playing" state, which shows the layout but no art and
-   makes a weaker listing image.
-
-2. **Set the repository description** to the text above. It is currently empty.
+1. **Set the repository description** to the text above. It is currently empty.
 
 ## Closed while drafting
+
+- **`preview.png` contained third-party album artwork.** The art region is now
+  blurred past recognition, which clears checklist item 3 while keeping
+  everything the image exists to show: the layout, the metadata, the transport,
+  the search hint, the transfer icons — and the seek fill, which takes its
+  colour from that art, so the blurred colours still explain where the gold
+  came from. Reproducible:
+
+  ```
+  magick preview.png -crop 236x236+32+104 +repage \
+      -virtual-pixel edge -blur 0x18 art.png
+  magick -size 236x236 xc:black -fill white \
+      -draw "roundrectangle 0,0 235,235 12,12" mask.png
+  magick preview.png art.png mask.png -geometry +32+104 -composite preview.png
+  ```
+
+  Blurring the region in isolation with `-virtual-pixel edge` rather than in
+  place matters: an in-place blur pulls panel background into the box and
+  softens its edge. The mask restores the widget's own corner radius
+  (`Style.space(6)`), so the preview still shows what the widget renders.
 
 - **`setup.sh` copied onto a predictable path unguarded.** `cp` follows a
   symlink at its destination, so a link planted at
