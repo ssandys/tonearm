@@ -49,6 +49,11 @@ configuration required.
 Once paired, the bar widget starts showing whatever is playing on your
 followed Roon zone.
 
+The popup's header names the Roon Core you're attached to. If something is
+wrong — the daemon isn't running, the extension isn't enabled yet, the Core is
+unreachable — the header says so in place of the Core's name, so you never
+have to guess why nothing is playing.
+
 ## Library search
 
 The popup can search your whole Roon library — not just the current zone or

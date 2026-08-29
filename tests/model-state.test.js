@@ -209,3 +209,44 @@ test("COLOR_ERROR and COLOR_WARN are hex strings normalizeHex accepts", () => {
   assert.strictEqual(M.normalizeHex(M.COLOR_ERROR), M.COLOR_ERROR.toLowerCase())
   assert.strictEqual(M.normalizeHex(M.COLOR_WARN), M.COLOR_WARN.toLowerCase())
 })
+
+test("headerStatus names the Core when healthy", () => {
+  assert.strictEqual(M.headerStatus(PLAYING), "yavin")
+  assert.strictEqual(M.headerStatus({ status: "ok", core: CORE, zone: null }), "yavin")
+})
+
+test("headerStatus falls back to a name when the Core has none", () => {
+  // `core` is null for the whole window between daemon start and the first
+  // successful connect, and the header must not render an empty right half.
+  assert.strictEqual(M.headerStatus({ status: "ok", core: null, zone: null }), "Roon")
+})
+
+test("headerStatus reports each fault in the popup's own words", () => {
+  // The popup has never said WHY nothing is playing -- the reason lived only
+  // in the bar's glyph colour and its tooltip, neither of which is visible
+  // while the popup is open and covering the bar.
+  assert.strictEqual(M.headerStatus(null), "tonearmd not running")
+  assert.strictEqual(M.headerStatus({ status: "unpaired", zone: null }),
+    "Enable tonearm in Roon → Settings → Extensions")
+  assert.strictEqual(M.headerStatus({ status: "unreachable", core: CORE, zone: null }),
+    "Roon Core unreachable")
+  assert.strictEqual(M.headerStatus({ status: "connecting", core: CORE, zone: null }),
+    "Connecting to yavin…")
+})
+
+test("headerStatus and tooltipText agree on every unhealthy state", () => {
+  // They share one fault function, so a reworded error can never reach the
+  // tooltip and the header separately. They diverge only when healthy: the
+  // tooltip names the track, the header names the Core.
+  const faults = [
+    null,
+    { status: "unpaired", zone: null },
+    { status: "unreachable", core: CORE, zone: null },
+    { status: "connecting", core: CORE, zone: null },
+    { status: "constructor", core: CORE, zone: null },
+  ]
+  for (const st of faults) {
+    assert.strictEqual(M.headerStatus(st), M.tooltipText(st), JSON.stringify(st))
+  }
+  assert.notStrictEqual(M.headerStatus(PLAYING), M.tooltipText(PLAYING))
+})

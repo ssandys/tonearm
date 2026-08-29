@@ -272,6 +272,79 @@ Panel {
         // grouping this gap was over-doing.
         spacing: Style.space(10)
 
+        // -- header --------------------------------------------------------
+        // Named because the widget's identity should not depend on
+        // recognising an icon in a row of eighteen. The shell's own
+        // convention is a header that DOES something rather than a bare title
+        // -- the audio panel pairs "Audio" with a power switch -- so the
+        // right half carries state the popup could not previously show at
+        // all.
+        //
+        // Healthy, that is the Core's name: which Core you are attached to
+        // appears nowhere else in this popup. Unhealthy, it is the fault in
+        // words, and this is the part that earns the height. Until now the
+        // popup could not say WHY nothing was playing: the reason lived only
+        // in the bar glyph's colour and its tooltip, and an open popup covers
+        // the bar it would have to point at. `Model.headerStatus` is the same
+        // function the tooltip uses for every unhealthy state, so the two can
+        // never drift into different wordings for one fault.
+        Item {
+          width: parent.width
+          height: headerName.implicitHeight
+
+          Row {
+            id: headerLeft
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(7)
+
+            Text {
+              // The same product icon the bar shows, so the popup and its
+              // button read as one thing.
+              text: Model.GLYPH_VINYL
+              color: root.fgMid
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              anchors.verticalCenter: parent.verticalCenter
+            }
+            Text {
+              id: headerName
+              text: "Tonearm"
+              color: root.fgMid
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.weight: Font.DemiBold
+              font.letterSpacing: 0.6
+            }
+          }
+
+          Text {
+            // Anchored to BOTH edges rather than just the right one: elide
+            // needs a bounded width, and "Enable tonearm in Roon -> Settings
+            // -> Extensions" is far wider than the gap beside the name. Right
+            // alignment then keeps it hugging the right edge whenever it is
+            // short enough to fit, which is the healthy case.
+            anchors.left: headerLeft.right
+            anchors.leftMargin: Style.space(10)
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            horizontalAlignment: Text.AlignRight
+            text: Model.headerStatus(root.st)
+            // The same three-way severity split the bar button uses, so a
+            // fault reads as a fault in both places at once.
+            color: {
+              if (root.display.severity === "error") return Model.COLOR_ERROR
+              if (root.display.severity === "warn") return Model.COLOR_WARN
+              return root.fgFaint
+            }
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+          }
+        }
+
+        PanelSeparator { foreground: Color.foreground }
+
         Row {
           spacing: Style.space(14)
           width: parent.width

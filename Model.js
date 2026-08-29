@@ -350,28 +350,52 @@ function barState(state, recvMs, nowMs) {
   return { severity: "ok", glyph: GLYPH_VINYL, showArt: showArt, playing: playing }
 }
 
-function tooltipText(state) {
+// The Core's own name, with a fallback. `core` is null for the whole window
+// between daemon start and the first successful connect, and both callers
+// below have to render something there rather than an empty string.
+function coreNameOf(state) {
+  return (state && state.core && state.core.name) ? state.core.name : "Roon"
+}
+
+// The single place an unhealthy state is put into words. Returns "" when
+// nothing is wrong, so callers can branch on it. Both the bar tooltip and the
+// popup header read this, which is what stops the same fault from acquiring
+// two different wordings in two places.
+function faultText(state) {
   if (!state) return "tonearmd not running"
-  var severity = severityFor(state.status)
   if (state.status === "unpaired") {
-    return "Enable tonearm in Roon → Settings → Extensions"
+    return "Enable tonearm in Roon \u2192 Settings \u2192 Extensions"
   }
   if (state.status === "connecting") {
     // The daemon's normal startup state, reaching for the Core, which may not
     // even be resolved yet -- this is not a failure and must not read as one.
-    var connectingName = (state.core && state.core.name) ? state.core.name : "Roon"
-    return "Connecting to " + connectingName + "…"
+    return "Connecting to " + coreNameOf(state) + "\u2026"
   }
-  if (severity !== "ok") return "Roon Core unreachable"
+  if (severityFor(state.status) !== "ok") return "Roon Core unreachable"
+  return ""
+}
 
-  var coreName = (state.core && state.core.name) ? state.core.name : "Roon"
-  if (!state.zone) return "Nothing playing · " + coreName
+// The popup header's right-hand label. Healthy, it names the Core you are
+// attached to, which nothing else in the popup shows. Unhealthy, it is the
+// fault -- because until the header existed the popup could not say WHY
+// nothing was playing. That reason lived only in the bar glyph's colour and
+// its tooltip, and an open popup covers the bar.
+function headerStatus(state) {
+  return faultText(state) || coreNameOf(state)
+}
+
+function tooltipText(state) {
+  var fault = faultText(state)
+  if (fault) return fault
+
+  var coreName = coreNameOf(state)
+  if (!state.zone) return "Nothing playing \u00b7 " + coreName
 
   var np = nowPlayingOf(state)
-  if (!np) return "Nothing playing · " + coreName
+  if (!np) return "Nothing playing \u00b7 " + coreName
   var head = (np.title || "Unknown title")
-  if (np.artist) head = head + " — " + np.artist
-  return head + " · " + (state.zone.name || coreName)
+  if (np.artist) head = head + " \u2014 " + np.artist
+  return head + " \u00b7 " + (state.zone.name || coreName)
 }
 
 function zoneList(state) {
@@ -503,6 +527,7 @@ if (typeof module !== "undefined") {
     COLOR_WARN: COLOR_WARN,
     barState: barState,
     tooltipText: tooltipText,
+    headerStatus: headerStatus,
     zoneList: zoneList,
     isZonePinned: isZonePinned,
     volumeFraction: volumeFraction,
