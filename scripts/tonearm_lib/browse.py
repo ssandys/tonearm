@@ -295,17 +295,27 @@ class BrowseSession:
             # clause and the check below both still need these names.
             depth = 0
             descents = []
+            found = False
             try:
                 self._browse(item_key=key)
                 depth = 1
-                descents = self._descend_to_action(title)
+                found = self._descend_to_action(title, descents)
+                # `descents` is appended to on EVERY exit path of
+                # _descend_to_action -- success, dead end, or depth
+                # exhausted -- so depth is accurate even when found is
+                # False. Computing it from a value that could go missing
+                # on failure (a returned list discarded by an early
+                # `return []`) was the exact bug this depends on not
+                # reintroducing: it silently undercounted, and _unwind
+                # then popped too few levels, stranding the user partway
+                # down a branch they never asked to enter.
                 depth += len(descents)
             finally:
                 # Unwind to exactly where the user was, whatever happened.
                 # Leaving them inside an action list -- or worse, at the root
                 # after a silent stale-key reset -- would be a visible bug.
                 self._unwind(depth)
-            if not descents:
+            if not found:
                 raise BrowseError(
                     "no_action", "nothing here can be played")
             reply = self.current()
@@ -335,17 +345,25 @@ class BrowseSession:
                 reply["played"] = False
                 return reply
 
-    def _descend_to_action(self, title: str) -> list:
+    def _descend_to_action(self, title: str, descents: list) -> bool:
         """Walk down looking for an action of exactly `title`.
 
-        Returns the list of descents performed, so the caller can pop exactly
-        that many. Returning a count rather than a bool is what makes the
-        unwind exact: comparing list titles to decide when to stop would break
-        on any hierarchy where a child level shares its parent's title, and
-        Roon does exactly that -- an album's detail level is titled after the
-        album (measured, spec 2.4).
+        Appends every real descent to the CALLER-OWNED `descents` list as it
+        happens -- on the success path, the dead-end path, and the
+        depth-exhausted path alike -- and returns only whether the action was
+        found. An out-param instead of a return value is what makes the
+        unwind exact on every exit: a return value can be, and WAS, discarded
+        by an early `return []` on a failure path, silently losing track of
+        real _browse() calls already made and leaving the caller to pop too
+        few levels. Mutating a list the caller already holds cannot be
+        "forgotten" by a return statement.
+
+        A count rather than a bool is also what makes the unwind exact in
+        the first place: comparing list titles to decide when to stop would
+        break on any hierarchy where a child level shares its parent's
+        title, and Roon does exactly that -- an album's detail level is
+        titled after the album (measured, spec 2.4).
         """
-        descents = []
         for _ in range(MAX_ACTION_DEPTH):
             loaded = self._load()
             items = loaded.get("items") or []
@@ -353,7 +371,7 @@ class BrowseSession:
                 if item.get("title") == title and item.get("hint") == "action":
                     self._browse(item_key=item["item_key"])
                     descents.append(item["item_key"])
-                    return descents
+                    return True
             nxt = None
             for item in items:
                 # hint "action_list" only, never "list": "list" is a row of
@@ -370,10 +388,10 @@ class BrowseSession:
                     nxt = item["item_key"]
                     break
             if nxt is None:
-                return []
+                return False
             self._browse(item_key=nxt)
             descents.append(nxt)
-        return []
+        return False
 
     def _unwind(self, depth: int) -> None:
         """Pop exactly `depth` levels, back to where the user was.

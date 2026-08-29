@@ -139,5 +139,96 @@ class TestActivate(unittest.TestCase):
         self.assertIs(s.activate(1, reply["level_id"])["played"], False)
 
 
+def deep_dead_end_levels():
+    """A local fixture, NOT fakes.py (other tasks depend on that one
+    unmodified). Structurally like yavin_levels() -- root -> library ->
+    results -- but the one result row leads two real hops down
+    ("hop1" -> "hop2") before dead-ending with no reachable action. Every
+    branch in yavin_levels() itself dead-ends on the FIRST hop or finds an
+    action within two, so it can never exercise a multi-hop dead end; this
+    fixture exists solely to reach that path.
+    """
+    return {
+        "root": {
+            "list": {"title": "Explore", "count": 1, "level": 0},
+            "items": [
+                {"title": "Library", "item_key": "1:0", "hint": "list",
+                 "image_key": None, "_goes_to": "library"},
+            ],
+        },
+        "library": {
+            "list": {"title": "Library", "count": 1, "level": 1},
+            "items": [
+                {"title": "Search", "item_key": "2:0", "hint": "list",
+                 "image_key": None,
+                 "input_prompt": {"prompt": "Search", "action": "Go"},
+                 "_goes_to": lambda text: "results"},
+            ],
+        },
+        "results": {
+            "list": {"title": "Search", "count": 1, "level": 2},
+            "items": [
+                {"title": "Deep Dead End", "item_key": "9:0",
+                 "image_key": None, "hint": "list", "_goes_to": "hop1"},
+            ],
+        },
+        "hop1": {
+            "list": {"title": "Deep Dead End", "count": 1, "level": 3},
+            "items": [
+                {"title": "Keep Going", "item_key": "9:1",
+                 "hint": "action_list", "_goes_to": "hop2"},
+            ],
+        },
+        "hop2": {
+            "list": {"title": "Keep Going", "count": 1, "level": 4},
+            "items": [
+                {"title": "Still Nothing", "item_key": "9:2",
+                 "hint": "action_list", "_goes_to": "dead_end"},
+            ],
+        },
+        "dead_end": {
+            "list": {"title": "Still Nothing", "count": 1, "level": 5},
+            "items": [
+                # hint "list", not "action_list" or "action": nothing here
+                # continues the hunt and nothing here is itself playable.
+                {"title": "Not An Action", "item_key": "9:3",
+                 "hint": "list", "_goes_to": None},
+            ],
+        },
+    }
+
+
+class TestUnwindOnDeepDeadEnd(unittest.TestCase):
+    def test_a_multi_hop_dead_end_unwinds_to_exactly_where_it_started(self):
+        # The walk goes results -> hop1 -> hop2 -> dead_end (3 real descents:
+        # the initial browse into "hop1", plus 2 more inside
+        # _descend_to_action) before giving up. If _descend_to_action loses
+        # track of descents already performed on its failure path, `play`
+        # under-computes the unwind depth and `_unwind` pops too few levels,
+        # leaving the fake (and, for real, Roon) two levels deeper than the
+        # session believes -- silently, since the session's own path/rows
+        # cache is never touched by play() and would not show it.
+        api = FakeRoon(deep_dead_end_levels())
+        s = browse.BrowseSession(api, "widget")
+        reply = s.search("oingo boingo")
+
+        with self.assertRaises(browse.BrowseError) as caught:
+            s.play(0, "play_now", reply["level_id"])
+        self.assertEqual(caught.exception.token, "no_action")
+
+        # The session's own cache was never touched -- true regardless of
+        # whether the unwind was correct, since play() only mutates it on
+        # success. Kept as a basic regression guard.
+        self.assertEqual(s.current()["path"], ["Search"])
+
+        # The real, load-bearing assertions: the fake's ACTUAL position, and
+        # the pop_levels value play() actually issued, both have to reflect
+        # the true depth reached (3), not merely len() of a value that a
+        # failure path could discard.
+        self.assertEqual(api.current, "results")
+        pop_calls = [c["pop_levels"] for c in api.calls if "pop_levels" in c]
+        self.assertEqual(pop_calls, [3])
+
+
 if __name__ == "__main__":
     unittest.main()
