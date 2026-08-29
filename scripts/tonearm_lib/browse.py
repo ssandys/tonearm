@@ -93,6 +93,20 @@ def normalize_rows(items) -> list:
 
 PAGE = 100
 
+# Roon's action titles, measured on yavin (spec 2.4). Identical for albums
+# and tracks.
+ACTIONS = {
+    "play_now": "Play Now",
+    "add_next": "Add Next",
+    "queue": "Queue",
+    "start_radio": "Start Radio",
+}
+
+# How deep to hunt for an action list before giving up. Measured: a track is
+# 1 descent from its row, an album is 2 (album -> "Play Album" -> actions).
+# 3 leaves headroom without letting a pathological hierarchy walk forever.
+MAX_ACTION_DEPTH = 3
+
 
 class BrowseError(Exception):
     """Carries a stable machine token from spec 5.2."""
@@ -264,3 +278,131 @@ class BrowseSession:
             self._offset = 0
             self.level_id += 1
             return self.current()
+
+    def play(self, index: int, action: str, level_id=None) -> dict:
+        """Resolve the row's action list, invoke `action`, return to the level.
+
+        Resolution is LAZY (spec 4.3): precomputing which rows are playable
+        would cost a descent per row per page. The cost is 2-3 extra
+        round-trips before audio starts, ~100-300ms.
+        """
+        title = ACTIONS.get(action)
+        if title is None:
+            raise BrowseError("bad_index", "unknown action %r" % (action,))
+        with self._lock:
+            key = self._check(index, level_id)
+            # Bound BEFORE the try: if the first _browse raises, the finally
+            # clause and the check below both still need these names.
+            depth = 0
+            descents = []
+            found = False
+            try:
+                self._browse(item_key=key)
+                depth = 1
+                found = self._descend_to_action(title, descents)
+                # `descents` is appended to on EVERY exit path of
+                # _descend_to_action -- success, dead end, or depth
+                # exhausted -- so depth is accurate even when found is
+                # False. Computing it from a value that could go missing
+                # on failure (a returned list discarded by an early
+                # `return []`) was the exact bug this depends on not
+                # reintroducing: it silently undercounted, and _unwind
+                # then popped too few levels, stranding the user partway
+                # down a branch they never asked to enter.
+                depth += len(descents)
+            finally:
+                # Unwind to exactly where the user was, whatever happened.
+                # Leaving them inside an action list -- or worse, at the root
+                # after a silent stale-key reset -- would be a visible bug.
+                self._unwind(depth)
+            if not found:
+                raise BrowseError(
+                    "no_action", "nothing here can be played")
+            reply = self.current()
+            # The widget closes the popup on a play but NOT on a descend
+            # (spec 7.3). `activate` can do either, and the reply is a level
+            # in both cases, so it must say which happened -- otherwise Enter
+            # on a category descends and instantly closes the popup.
+            reply["played"] = True
+            return reply
+
+    def activate(self, index: int, level_id=None) -> dict:
+        """Play if possible, descend if not -- one round-trip for the widget.
+
+        spec 2.4 measured that a category row and an album row are both
+        hint "list" and cannot be told apart without descending. Rather than
+        make the widget guess from image_key (which misclassifies art-less
+        albums), the ambiguity is resolved here.
+        """
+        with self._lock:
+            self._check(index, level_id)
+            try:
+                return self.play(index, "play_now", level_id)
+            except BrowseError as exc:
+                if exc.token != "no_action":
+                    raise
+                reply = self.enter(index, level_id)
+                reply["played"] = False
+                return reply
+
+    def _descend_to_action(self, title: str, descents: list) -> bool:
+        """Walk down looking for an action of exactly `title`.
+
+        Appends every real descent to the CALLER-OWNED `descents` list as it
+        happens -- on the success path, the dead-end path, and the
+        depth-exhausted path alike -- and returns only whether the action was
+        found. An out-param instead of a return value is what makes the
+        unwind exact on every exit: a return value can be, and WAS, discarded
+        by an early `return []` on a failure path, silently losing track of
+        real _browse() calls already made and leaving the caller to pop too
+        few levels. Mutating a list the caller already holds cannot be
+        "forgotten" by a return statement.
+
+        A count rather than a bool is also what makes the unwind exact in
+        the first place: comparing list titles to decide when to stop would
+        break on any hierarchy where a child level shares its parent's
+        title, and Roon does exactly that -- an album's detail level is
+        titled after the album (measured, spec 2.4).
+        """
+        for _ in range(MAX_ACTION_DEPTH):
+            loaded = self._load()
+            items = loaded.get("items") or []
+            for item in items:
+                if item.get("title") == title and item.get("hint") == "action":
+                    self._browse(item_key=item["item_key"])
+                    descents.append(item["item_key"])
+                    return True
+            nxt = None
+            for item in items:
+                # hint "action_list" only, never "list": "list" is a row of
+                # DIFFERENT sibling items (spec 2.4's can_descend=True taxonomy
+                # in capabilities_from_hint above) -- wandering into one would
+                # silently walk from a category into its first child's own
+                # action list and invoke THAT item's action instead of
+                # reporting no_action, which is exactly the ambiguity
+                # activate() exists to resolve deliberately, not by accident.
+                # "action_list" instead means "leads onward to actions for
+                # THIS SAME item" (can_descend=False) -- the one continuation
+                # that is safe to follow automatically.
+                if item.get("hint") == "action_list" and item.get("item_key"):
+                    nxt = item["item_key"]
+                    break
+            if nxt is None:
+                return False
+            self._browse(item_key=nxt)
+            descents.append(nxt)
+        return False
+
+    def _unwind(self, depth: int) -> None:
+        """Pop exactly `depth` levels, back to where the user was.
+
+        pop_levels, never a re-walk (spec 2.5). Guarded so a failure here
+        cannot mask the BrowseError the caller is already raising.
+        """
+        if depth <= 0:
+            return
+        try:
+            self._browse(pop_levels=depth)
+            self._load()
+        except BrowseError:
+            LOG.warning("could not unwind %d level(s) after a play", depth)
