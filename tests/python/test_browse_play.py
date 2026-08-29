@@ -8,10 +8,31 @@ sys.path.insert(0, os.path.abspath(
 from tonearm_lib import browse
 from fakes import FakeRoon, yavin_levels
 
+# A value the implementation could not produce by accident (AGENTS.md's
+# "a fixture whose value coincides with a default proves nothing"): it is
+# neither a Roon item_key shape nor anything else this module constructs.
+ZONE = "zone-kitchen-7f3a"
 
-def at_albums():
+
+class ZoneHolder:
+    """A mutable stand-in for the daemon's followed-zone lookup.
+
+    Every play/activate path requires one: without a zone_or_output_id in the
+    browse opts, Roon accepts the action and plays into nothing (measured), so
+    play() now refuses rather than reporting success. A holder rather than a
+    lambda so a test can repin between two calls and see the change followed.
+    """
+
+    def __init__(self, zone_id=ZONE):
+        self.zone_id = zone_id
+
+    def __call__(self):
+        return self.zone_id
+
+
+def at_albums(zone=None):
     api = FakeRoon(yavin_levels())
-    s = browse.BrowseSession(api, "widget")
+    s = browse.BrowseSession(api, "widget", zone or ZoneHolder())
     reply = s.search("oingo boingo")
     reply = s.enter(1, reply["level_id"])      # Albums
     return api, s, reply
@@ -19,7 +40,7 @@ def at_albums():
 
 def at_tracks():
     api = FakeRoon(yavin_levels())
-    s = browse.BrowseSession(api, "widget")
+    s = browse.BrowseSession(api, "widget", ZoneHolder())
     reply = s.search("oingo boingo")
     reply = s.enter(2, reply["level_id"])      # Tracks
     return api, s, reply
@@ -149,7 +170,7 @@ class TestActivate(unittest.TestCase):
         # spec 2.4: "Albums" and an album row are indistinguishable by hint,
         # so activate resolves it by trying, not by guessing.
         api = FakeRoon(yavin_levels())
-        s = browse.BrowseSession(api, "widget")
+        s = browse.BrowseSession(api, "widget", ZoneHolder())
         reply = s.search("oingo boingo")
         out = s.activate(1, reply["level_id"])       # "Albums" category
         self.assertEqual(out["path"], ["Search", "Albums"])
@@ -158,9 +179,91 @@ class TestActivate(unittest.TestCase):
 
     def test_reports_played_false_when_it_descended(self):
         api = FakeRoon(yavin_levels())
-        s = browse.BrowseSession(api, "widget")
+        s = browse.BrowseSession(api, "widget", ZoneHolder())
         reply = s.search("oingo boingo")
         self.assertIs(s.activate(1, reply["level_id"])["played"], False)
+
+
+class TestZoneTargeting(unittest.TestCase):
+    """A browse action with no `zone_or_output_id` plays into nothing.
+
+    Measured live against the Core, same album, same code path, only this
+    field differing:
+
+        [nozone]   invoking Play Now -> zone state: paused  | Insanity
+        [withzone] invoking Play Now -> zone state: playing | Speak to Me
+
+    Roon reports success either way, so nothing above this layer can notice.
+    """
+
+    def test_every_browse_and_load_call_of_a_play_carries_the_zone(self):
+        api, s, reply = at_albums()
+        api.calls.clear()
+        api.load_calls.clear()
+        s.play(0, "play_now", reply["level_id"])
+        self.assertTrue(api.calls, "the play made no browse calls at all")
+        self.assertTrue(api.load_calls, "the play made no load calls at all")
+        for call in api.calls + api.load_calls:
+            self.assertEqual(call.get("zone_or_output_id"), ZONE)
+
+    def test_search_and_enter_carry_the_zone_too(self):
+        # The vendored library puts it in play_media's browse AND load opts
+        # (roonapi.py:590-595). It rides on _opts(), so every call gets it,
+        # not just the one that invokes an action.
+        api = FakeRoon(yavin_levels())
+        s = browse.BrowseSession(api, "widget", ZoneHolder())
+        reply = s.search("oingo boingo")
+        s.enter(1, reply["level_id"])
+        self.assertTrue(api.calls)
+        for call in api.calls + api.load_calls:
+            self.assertEqual(call.get("zone_or_output_id"), ZONE)
+
+    def test_play_with_no_zone_raises_rather_than_reporting_success(self):
+        # The whole point: `played: true` for silence is the failure this
+        # guard exists to prevent. It must also cost no Roon round-trip.
+        api, s, reply = at_albums(zone=ZoneHolder(None))
+        api.calls.clear()
+        with self.assertRaises(browse.BrowseError) as caught:
+            s.play(0, "play_now", reply["level_id"])
+        self.assertEqual(caught.exception.token, "no_zone")
+        self.assertEqual(api.calls, [])
+
+    def test_activate_with_no_zone_raises_rather_than_descending(self):
+        # activate falls back to a descend ONLY on no_action. Descending into
+        # the album instead would look like the widget did something sensible
+        # while no music started and nothing said why.
+        api, s, reply = at_albums(zone=ZoneHolder(None))
+        with self.assertRaises(browse.BrowseError) as caught:
+            s.activate(0, reply["level_id"])
+        self.assertEqual(caught.exception.token, "no_zone")
+
+    def test_navigation_still_works_with_no_zone_and_omits_the_field(self):
+        # Browsing with no zone selected is meaningful; only playing is not.
+        # Omitted, never sent as null: an explicit null for a field Roon
+        # expects to hold an id is a different request from not sending it.
+        api = FakeRoon(yavin_levels())
+        s = browse.BrowseSession(api, "widget", ZoneHolder(None))
+        reply = s.search("oingo boingo")
+        reply = s.enter(1, reply["level_id"])
+        self.assertEqual([r["title"] for r in reply["rows"]],
+                         ["Dead Man's Party", "Nothing To Fear"])
+        self.assertEqual(s.back()["path"], ["Search"])
+        self.assertEqual(s.page(0)["offset"], 0)
+        for call in api.calls + api.load_calls:
+            self.assertNotIn("zone_or_output_id", call)
+
+    def test_the_zone_is_read_at_call_time_so_a_repin_is_followed(self):
+        # The user can repin between two browses. A zone captured once at
+        # construction would send this play to the room they just left.
+        holder = ZoneHolder()
+        api, s, reply = at_albums(zone=holder)
+        holder.zone_id = "zone-study-04d1"
+        api.calls.clear()
+        api.load_calls.clear()
+        s.play(0, "play_now", reply["level_id"])
+        self.assertTrue(api.calls)
+        for call in api.calls + api.load_calls:
+            self.assertEqual(call.get("zone_or_output_id"), "zone-study-04d1")
 
 
 def deep_dead_end_levels():
@@ -241,7 +344,7 @@ class TestUnwindOnDeepDeadEnd(unittest.TestCase):
         # session believes -- silently, since the session's own path/rows
         # cache is never touched by play() and would not show it.
         api = FakeRoon(deep_dead_end_levels())
-        s = browse.BrowseSession(api, "widget")
+        s = browse.BrowseSession(api, "widget", ZoneHolder())
         reply = s.search("oingo boingo")
 
         with self.assertRaises(browse.BrowseError) as caught:
@@ -356,7 +459,7 @@ def deep_wrapper_levels():
 class TestWrapperLevel(unittest.TestCase):
     def test_play_reaches_play_now_through_the_single_item_wrapper(self):
         api = FakeRoon(deep_wrapper_levels())
-        s = browse.BrowseSession(api, "widget")
+        s = browse.BrowseSession(api, "widget", ZoneHolder())
         reply = s.search("oingo boingo")
         api.calls.clear()
         out = s.play(0, "play_now", reply["level_id"])  # "Wrapped Album"
@@ -372,7 +475,7 @@ class TestWrapperLevel(unittest.TestCase):
 
     def test_activate_plays_the_album_rather_than_descending(self):
         api = FakeRoon(deep_wrapper_levels())
-        s = browse.BrowseSession(api, "widget")
+        s = browse.BrowseSession(api, "widget", ZoneHolder())
         reply = s.search("oingo boingo")
         out = s.activate(0, reply["level_id"])  # "Wrapped Album"
         self.assertIs(out["played"], True)
@@ -383,7 +486,7 @@ class TestWrapperLevel(unittest.TestCase):
         # no single keyed item for the new fallback rule to catch, so it
         # must still dead-end and activate must still fall back to enter().
         api = FakeRoon(deep_wrapper_levels())
-        s = browse.BrowseSession(api, "widget")
+        s = browse.BrowseSession(api, "widget", ZoneHolder())
         reply = s.search("oingo boingo")
         out = s.activate(1, reply["level_id"])  # "Albums" category
         self.assertIs(out["played"], False)
@@ -468,7 +571,7 @@ class TestActionDepthMargin(unittest.TestCase):
         # fixture alone cannot tell MAX_ACTION_DEPTH=3 apart from 4. This
         # one needs 4 passes, genuinely exercising the raised limit.
         api = FakeRoon(double_wrapper_levels())
-        s = browse.BrowseSession(api, "widget")
+        s = browse.BrowseSession(api, "widget", ZoneHolder())
         reply = s.search("oingo boingo")
         api.calls.clear()
         out = s.play(0, "play_now", reply["level_id"])
