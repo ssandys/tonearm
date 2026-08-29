@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vendor"))
 
 from roonapi import RoonApi              # noqa: E402  (vendored, path-inserted)
 
-from . import config, sood, state, zones  # noqa: E402
+from . import browse, config, sood, state, zones  # noqa: E402
 
 LOG = logging.getLogger("tonearmd.core")
 
@@ -172,6 +172,11 @@ class RoonSession:
         self._arbiter = zones.Arbiter(self._cfg.get("pinned_zone_id"))
         self._status = "connecting"
         self._lock = threading.Lock()
+        # Separate from every other lock in this class. A browse round-trip is
+        # far slower than a snapshot; sharing a lock with the publish path
+        # would stall subscribers (spec 7.5).
+        self._browse_lock = threading.Lock()
+        self._browse_sessions: dict = {}
 
     @property
     def status(self) -> str:
@@ -429,6 +434,44 @@ class RoonSession:
         if self._api:
             self._api.stop()
             self._api = None
+
+    # -- browse -----------------------------------------------------------
+    def browse_session(self, key: str):
+        """One BrowseSession per multi_session_key, created on first use.
+
+        Sessions are in-memory and lost on restart (spec 7.4); the widget's
+        next request rebuilds from root. Not bounded today because only the
+        widget uses one -- add an LRU cap if consumers multiply (spec 11).
+        """
+        with self._browse_lock:
+            existing = self._browse_sessions.get(key)
+            if existing is None:
+                existing = browse.BrowseSession(self._api, key)
+                self._browse_sessions[key] = existing
+            return existing
+
+    def browse(self, key: str, op: str, **kwargs) -> dict:
+        """Dispatch one browse op. Never takes Server._lock (spec 7.5)."""
+        if self._status != "ok":
+            raise browse.BrowseError("unreachable", "Roon Core unreachable")
+        session = self.browse_session(key)
+        if op == "search":
+            return session.search(kwargs.get("term") or "")
+        if op == "enter":
+            return session.enter(kwargs.get("index"), kwargs.get("level_id"))
+        if op == "activate":
+            return session.activate(kwargs.get("index"), kwargs.get("level_id"))
+        if op == "play":
+            return session.play(kwargs.get("index"),
+                                kwargs.get("action") or "play_now",
+                                kwargs.get("level_id"))
+        if op == "back":
+            return session.back()
+        if op == "page":
+            return session.page(kwargs.get("offset") or 0)
+        if op == "reset":
+            return session.reset()
+        raise browse.BrowseError("bad_index", "unknown browse op %r" % (op,))
 
     # -- commands -------------------------------------------------------
     def command(self, verb: str, arg=None) -> None:
