@@ -37,14 +37,38 @@ Item {
   readonly property int rowCount: rows.length
   readonly property bool hasResults: rows.length > 0
 
+  // Single source of truth for "does this pane have anything to show right
+  // now" -- bound by both this Item's own `visible` below and Panel.qml's
+  // PanelSeparator, so the two can never disagree about whether the popup
+  // should be showing the separator/pane pair (spec 7.1). A Column skips an
+  // invisible child entirely, including the spacing that would otherwise be
+  // reserved before it; a visible-but-zero-height pane would still cost that
+  // spacing, which is the defect this property closes.
+  readonly property bool hasContent: root.editing || root.hasResults || root.errorText.length > 0
+
   signal playStarted()
   signal closeRequested()
 
   implicitHeight: column.implicitHeight
+  // Idle (no rows, no error, not editing) must contribute NOTHING to the
+  // popup -- not just zero height. Panel.qml:201 binds contentHeight back to
+  // contentColumn.implicitHeight, so a visible-but-empty pane would still
+  // reserve contentColumn's inter-item spacing before it, growing the popup
+  // permanently for every user even if they never search.
+  visible: root.hasContent
 
+  // Sets `editing` synchronously so `hasContent`/`visible` above flip true in
+  // this same pass, then defers the actual focus grab. This mirrors
+  // Panel.qml's own KeyboardPanel, which schedules its focusTarget's
+  // forceActiveFocus() through Qt.callLater for the identical reason: an
+  // item cannot take active focus while it (or an ancestor) is still
+  // invisible, and Qt raises no warning when that silently fails. Calling
+  // field.forceActiveFocus() in the same synchronous tick that flips `root`
+  // from invisible to visible would race the layout pass that actually maps
+  // the field, so the grab must run after that pass completes instead.
   function focusSearch() {
     root.editing = true
-    field.forceActiveFocus()
+    Qt.callLater(function () { field.forceActiveFocus() })
   }
 
   function _apply(reply) {

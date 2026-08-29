@@ -571,7 +571,10 @@ Panel {
 
       PanelSeparator {
         width: parent.width
-        visible: browsePane.rowCount > 0 || browsePane.editing
+        // Bound to the same property BrowsePane uses for its own `visible`
+        // (BrowsePane.qml's `hasContent`), so the separator and the pane
+        // can never disagree about whether there is anything to show.
+        visible: browsePane.hasContent
       }
 
       BrowsePane {
