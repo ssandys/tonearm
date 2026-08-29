@@ -60,10 +60,27 @@ class TestPlayAlbum(unittest.TestCase):
     def test_returns_to_the_level_the_user_was_on(self):
         # The user must not be teleported into the action list.
         api, s, reply = at_albums()
+        api.calls.clear()
         out = s.play(0, "play_now", reply["level_id"])
         self.assertEqual(out["path"], ["Search", "Albums"])
         self.assertEqual([r["title"] for r in out["rows"]],
                          ["Dead Man's Party", "Nothing To Fear"])
+        # The two asserts above read s._path/s._rows, which play() never
+        # mutates on ANY outcome -- they would pass just as well with
+        # self._unwind(depth) deleted from play() entirely. The real,
+        # discriminating check is the depth _unwind actually issued: an
+        # album is 2 descents (album_detail, then album_actions) plus the
+        # initial browse into the row, so pop_levels must be exactly 3 --
+        # not merely present, since a wrong depth is the exact bug fixed
+        # in _descend_to_action's out-param change (see
+        # TestUnwindOnDeepDeadEnd). Checked via pop_levels rather than
+        # api.current: invoking the terminal "Play Now" action item itself
+        # resets the fake to root (action items carry no _goes_to in
+        # yavin_levels()), before _unwind ever runs -- so api.current is
+        # "root" regardless of whether the unwind depth was right, and
+        # pop_levels is the only ground truth left to check.
+        pop_calls = [c["pop_levels"] for c in api.calls if "pop_levels" in c]
+        self.assertEqual(pop_calls, [3])
 
     def test_a_stale_level_id_plays_nothing(self):
         api, s, reply = at_albums()
@@ -88,6 +105,13 @@ class TestPlayTrack(unittest.TestCase):
         api.calls.clear()
         s.play(0, "play_now", reply["level_id"])
         self.assertIn("Play Now", invoked_titles(api, yavin_levels()))
+        # Ground truth on the unwind depth, same reasoning as the album
+        # test above: a track's row IS its own action list (1 descent),
+        # so the initial browse already reaches it and only the invoke
+        # itself follows -- pop_levels must be exactly 2, not merely
+        # present.
+        pop_calls = [c["pop_levels"] for c in api.calls if "pop_levels" in c]
+        self.assertEqual(pop_calls, [2])
 
 
 class TestNoAction(unittest.TestCase):
