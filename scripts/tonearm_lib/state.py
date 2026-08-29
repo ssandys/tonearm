@@ -53,6 +53,32 @@ def _now_playing_of(roon_zone: dict) -> dict | None:
     }
 
 
+def _seek_of(roon_zone: dict, np: dict) -> int:
+    """Current playback position, preferring the value Roon actually refreshes.
+
+    Roon emits `zones_seek_changed` about once a second carrying only
+    {zone_id, seek_position, queue_time_remaining}, and roonapi merges it with
+    `self._zones[zone_id].update(zone)` -- so that value lands at the TOP LEVEL
+    of the zone dict. The nested `now_playing.seek_position` is refreshed only
+    by a full `zones_changed`, which Roon sends on state transitions, not on a
+    timer.
+
+    Reading only the nested one froze the position at whatever it was during
+    the last full update: measured live, 13 pushes in 12 seconds every one of
+    them `position: 0` while the track advanced past its end into the next.
+    The widget could not compensate either -- Model.position() extrapolates
+    from `receivedAt`, and those same 1 Hz pushes reset it every second.
+
+    `is None` rather than `or`, because 0 is a real position (track start, or
+    a seek back to the beginning) and must not fall through to the stale
+    nested value.
+    """
+    pos = roon_zone.get("seek_position")
+    if pos is None:
+        pos = np.get("seek_position")
+    return pos or 0
+
+
 def normalize_zone(roon_zone: dict | None) -> dict | None:
     if not roon_zone:
         return None
@@ -63,7 +89,7 @@ def normalize_zone(roon_zone: dict | None) -> dict | None:
         "state": roon_zone.get("state", "stopped"),
         "pinned": False,          # the daemon overwrites this; see zones.py
         "volume": _volume_of(roon_zone),
-        "position": np.get("seek_position") or 0,
+        "position": _seek_of(roon_zone, np),
         "length": np.get("length") or 0,
         "now_playing": _now_playing_of(roon_zone),
     }

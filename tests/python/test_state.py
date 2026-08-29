@@ -129,3 +129,64 @@ class TestBuild(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSeekPosition(unittest.TestCase):
+    """Where `seek_position` actually lives after a zones_seek_changed event.
+
+    Roon pushes a seek update roughly once a second carrying only
+    {zone_id, seek_position, queue_time_remaining}. roonapi merges that with
+    `self._zones[zone_id].update(zone)` (roonapi.py:900), which lands
+    `seek_position` at the TOP LEVEL of the zone dict -- it never reaches the
+    nested `now_playing`, which is refreshed only by a full `zones_changed`.
+
+    Reading only `now_playing.seek_position` therefore froze the reported
+    position at whatever it was during the last full zone update. Measured
+    live against the Core: 13 pushes in 12 seconds, every one `position: 0`,
+    while `length` changed 150 -> 320 as the track advanced. The widget's own
+    clock-side extrapolation could not paper over it either, because each of
+    those pushes resets `receivedAt`, so the elapsed term never exceeds ~1s.
+    """
+
+    def _zone(self, top=None, nested=None):
+        z = {
+            "zone_id": "z1",
+            "display_name": "Living Room",
+            "state": "playing",
+            "now_playing": {
+                "length": 320,
+                "three_line": {"line1": "t", "line2": "a", "line3": "b"},
+            },
+        }
+        if top is not None:
+            z["seek_position"] = top
+        if nested is not None:
+            z["now_playing"]["seek_position"] = nested
+        return z
+
+    def test_reads_the_top_level_seek_position(self):
+        # The one a zones_seek_changed event actually updates.
+        self.assertEqual(state.normalize_zone(self._zone(top=137))["position"], 137)
+
+    def test_top_level_wins_over_a_stale_nested_value(self):
+        # now_playing is only as fresh as the last full zones_changed, so the
+        # top-level value is the newer of the two whenever both are present.
+        z = self._zone(top=137, nested=0)
+        self.assertEqual(state.normalize_zone(z)["position"], 137)
+
+    def test_falls_back_to_the_nested_value(self):
+        # A full zones_changed arriving before any seek event has no top-level
+        # key at all; that payload's nested position is the only one there is.
+        self.assertEqual(state.normalize_zone(self._zone(nested=42))["position"], 42)
+
+    def test_a_genuine_zero_is_not_mistaken_for_missing(self):
+        # Track start reports 0, which is a real position. If `or` chose the
+        # fallback on a falsy 0, a seek back to the start would show the
+        # previous track's stale offset instead.
+        z = self._zone(top=0, nested=271)
+        self.assertEqual(state.normalize_zone(z)["position"], 0)
+
+    def test_neither_present_is_zero_not_none(self):
+        # The widget divides by length and formats this; None would render
+        # "NaN" and poison the seek fill's width binding.
+        self.assertEqual(state.normalize_zone(self._zone())["position"], 0)
