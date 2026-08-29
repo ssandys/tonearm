@@ -94,11 +94,11 @@ Item {
     Quickshell.execDetached(argv)
   }
 
-  // One Process per call, created here and destroyed in onExited. Reassigning
-  // command on a running Process is silently ignored (galley trap #11), and a
-  // single shared Process would drop every overlapping browse request --
-  // which is exactly what happens when a keypress lands while a search is
-  // still in flight.
+  // One Process per call, created here and destroyed in onRunningChanged.
+  // Reassigning command on a running Process is silently ignored (galley
+  // trap #11), and a single shared Process would drop every overlapping
+  // browse request -- which is exactly what happens when a keypress lands
+  // while a search is still in flight.
   Component {
     id: rpcComponent
 

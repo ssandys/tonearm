@@ -49,6 +49,34 @@ configuration required.
 Once paired, the bar widget starts showing whatever is playing on your
 followed Roon zone.
 
+## Library search
+
+The popup can search your whole Roon library — not just the current zone or
+the album that's playing. **This section is the only place you'll learn that:**
+the search field is hidden until you use it, on purpose, so the popup keeps
+its normal size when you're just glancing at what's playing. Nothing on
+screen advertises it.
+
+To search, open the popup and press `/` — or just start typing; any letter
+opens the field and starts your query with it. Press `Enter` to submit.
+Results come back grouped the way Roon's own search groups them: a top
+match, then `Artists`, `Albums`, `Composers`, `Tracks`, and `Works`, each
+row showing a count.
+
+| Key | Behavior |
+|---|---|
+| `/` or any letter | Focus the search field |
+| `Enter` (while typing) | Submit the search |
+| `↑` / `↓` | Move the selection |
+| `Enter` (on a result) | Play if the row is playable, otherwise descend into it (e.g. `Albums` → its list of albums) |
+| `→` | Descend into the selected row |
+| `q` | Queue the selected row without closing the popup |
+| `←` | Back one level |
+| `Esc` | Back one level; closes the popup at the top level |
+
+Playing a row closes the popup; queuing leaves it open so you can keep
+adding.
+
 ## Settings
 
 Configure these from the widget's settings panel in the Omarchy shell:

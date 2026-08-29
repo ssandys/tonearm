@@ -42,7 +42,17 @@ block further subscribes, for as long as that send blocks. This extends the
 pre-existing design, where `broadcast()` already sends under the lock — it was
 inherited rather than chosen. The code now carries a comment saying so, which
 makes the decision explicit but does not change the availability characteristic.
-Revisit if a subscriber is ever slow or remote.
+
+No longer theoretical: browse makes concurrent socket traffic routine.
+Before this feature, the daemon mostly held one long-lived subscribe
+connection open per client; now every keystroke-driven browse op (search,
+activate, enter, back, queue) opens its own short-lived connection and does
+a synchronous round-trip while that subscribe connection is still live. The
+accept-and-thread path this hazard depends on is now exercised continuously
+during normal use, not occasionally — raising the odds that a slow or
+stalled peer's `sendall()` actually coincides with a subscribe handshake or
+a broadcast. This work does not fix it; revisit if a subscriber is ever slow
+or remote.
 
 ## 4. `setup.sh` uses `cp` where the modelled script uses `ln -s`
 
@@ -70,7 +80,76 @@ to be broken by someone who has not read `AGENTS.md`.
 E.g. `4200` → `"1:10:00"`. Correct by construction, but the minute-padding rule
 has a branch no test exercises.
 
-## 8. Tidiness
+## 8. The `status` verb serializes outside its guard
+
+`server.py`'s `browse` branch was fixed so that `json.dumps` runs inside the
+same `try` as the guard that catches it: a reply that fails to serialize
+becomes a `roon_error` response instead of an uncaught exception. The
+pre-existing `status` verb (`server.py:119-125`) still has the original
+shape — `json.dumps(self._session.snapshot())` runs inside a `try` that
+only catches `OSError`. A `TypeError` from a non-serializable snapshot would
+propagate out of `_handle`, skip `conn.close()`, and leave the client's
+`readline()` blocking forever, which is exactly the freeze the `browse`
+branch was fixed to prevent.
+
+Latent today because `RoonSession.snapshot()`'s payload is plain,
+JSON-serializable data — nothing currently puts a non-serializable value in
+it. The fix is the same shape as the `browse` fix: broaden the `except` (or
+move the serialization inside a `try`/`except Exception`) so `conn.close()`
+is guaranteed to run regardless of what `snapshot()` returns.
+
+## 9. The browse session dict is unbounded
+
+`RoonSession._browse_sessions` (`core.py:179`, populated by
+`browse_session()` at `core.py:439-451`) creates one `BrowseSession` per
+`multi_session_key` and never evicts one. The key comes straight off the
+wire, in the `browse` request's `session` field, with no validation.
+
+The socket is 0600 in the user's own runtime dir, so the realistic failure
+mode is a buggy consumer — a client that mints a fresh key per request
+instead of reusing one, or a future second consumer (an MCP server, say)
+that never converges on a stable key — leaking sessions over a long daemon
+uptime, not an attacker. This is a memory-leak guard, not a security fix.
+The remedy is an LRU cap on `_browse_sessions`, evicting the
+least-recently-used session once some bound is hit.
+
+## 10. Paging is implemented in the protocol but unreachable from the UI
+
+`BrowseSession.page(offset)`, the `page` op and `tonearmctl browse page` all
+work and are tested. `BrowsePane.qml` never calls them, so only the first 100
+rows of a level are reachable from the widget.
+
+This is invisible for search results, which are narrow — the measured
+`"Oingo Boingo"` case returns 21 albums and 44 tracks. It becomes visible on a
+common single-word search against a large library, where `Tracks` could exceed
+100. The fix is to call `page` when the `ListView` nears its end and append,
+which also needs the daemon to return rows for an offset without resetting the
+cursor — `page` already does exactly that.
+
+## 11. No progress indicator during a search
+
+A `browse` search round-trip (spawn `tonearmctl browse search`, wait for
+Roon's reply) shows nothing while in flight — no spinner, no "Searching…"
+text. `BrowsePane.qml`'s `hasContent` includes `busy` (`BrowsePane.qml:58`),
+so the pane and the submitted query stay on screen for the round-trip rather
+than vanishing, which is why this hasn't looked outright broken in testing.
+But nothing on screen says work is happening, so a slow search — a large
+library, a loaded Core — reads as a hang. The fix is a busy indicator bound
+to the existing `busy` property; no new state is needed, just something
+visible while it's true.
+
+## 12. Search is undiscoverable in the UI
+
+The search field is hidden until `/` or a letter is pressed
+(`Panel.qml:219-227`, gated through `BrowsePane.qml`'s `editing` /
+`hasContent`), a deliberate choice so the popup keeps its idle height rather
+than growing to fit a search box most sessions never use. The cost: nothing
+in the popup itself hints that search exists. Currently the README is the
+only place a user can learn about it. A discoverability affordance — a
+placeholder hint row, a `/` glyph near the popup header — would close this
+without giving up the idle-height goal, but nothing does yet.
+
+## 13. Tidiness
 
 - The `(started_at, id)` ranking tuple is duplicated between `Arbiter.observe()`'s
   recompute and `select()`'s active branch.
