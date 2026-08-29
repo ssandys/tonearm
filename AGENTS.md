@@ -66,6 +66,17 @@ silently. These are not hypotheticals; each was measured.
 | **Multicast SOOD draws no reply on this LAN.** Unicast does. | `RoonDiscovery` cannot find the Core here; `sood.discover()` falls back to a `/24` scan. If discovery ever returns `via: "multicast"`, the network changed. |
 | **`_status` only becomes `unreachable` during initial connect.** | It never reverts once `"ok"`. A live Roon disconnect leaves `status: "ok"` in the daemon's snapshot with zone data going stale — this is a known limitation, documented in the README, not (yet) fixed. |
 
+### Browse and search
+
+| Trap | What happens |
+|---|---|
+| **Roon's search is not a hierarchy.** | It is an item inside `Library` carrying `input_prompt`, and the query rides with that item's `item_key`. Every attempt to use a top-level `search` hierarchy returns one item titled `No Results` and never errors — indistinguishable from an empty library. |
+| **A stale `item_key` returns the browse ROOT with no error.** | Never re-walk to go back; use `pop_levels: 1`. This is why replies carry no `item_key` at all. |
+| **A category row and an album row are both `hint: "list"`.** | They cannot be told apart before descending. `image_key` is null on categories but also null on art-less albums, so it must never be used to infer playability — that is what the `activate` op is for. |
+| **Depth to a playable action is uneven.** | 1 descent for a track, 2 for an album. |
+| **`multi_session_key` works through the vendored library untouched**, because `browse_browse` passes its opts dict to `_request` verbatim. | Two consumers do not clobber each other. |
+| **Never use `list_media`/`play_media`.** | Both open with `pop_all: True` and reset the browse session as a side effect. |
+
 ### Art and color
 
 | Trap | What happens |
