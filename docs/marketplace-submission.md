@@ -121,11 +121,14 @@ For the GitHub repo's description field, which the marketplace links to:
 > zone switching and transfer. Backed by a Python daemon that speaks Roon's
 > MOO protocol and publishes MPRIS.
 
-## Open before filing
+## Ready to file
 
-1. **Set the repository description** to the text above. It is currently empty.
+Nothing outstanding. All five checklist boxes are verified true, the
+repository description is set, and the preview carries no third-party artwork.
 
 ## Closed while drafting
+
+- **The repository description was empty.** Now set to the text above.
 
 - **`preview.png` contained third-party album artwork.** The art region is now
   blurred past recognition, which clears checklist item 3 while keeping
