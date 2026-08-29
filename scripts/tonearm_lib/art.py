@@ -23,6 +23,8 @@ import http.client
 import logging
 import os
 import re
+import stat
+import tempfile
 import threading
 import urllib.error
 import urllib.parse
@@ -40,6 +42,16 @@ FETCH_TIMEOUT = 5.0
 # tight budget -- just enough to stop the directory from growing without
 # bound over a long-running daemon.
 MAX_CACHED = 10
+
+# The URL below asks the Core for a 64x64 thumbnail, which measures a few KB.
+# Only the reader can enforce that it got one: the request is a preference, and
+# whatever answers on that host:port decides what to send. 1 MiB is ~100x the
+# real size and still far too small to matter to the daemon.
+#
+# The same number bounds what is PUBLISHED as `art_path`, because that file is
+# read by ColorQuantizer inside the shared shell process, and Quickshell
+# exports no filesystem primitive able to bound it there.
+MAX_ART_BYTES = 1024 * 1024
 
 _SAFE_KEY = re.compile(r"[^A-Za-z0-9_-]")
 
@@ -71,14 +83,30 @@ def fetch(host: str, http_port: int, image_key: str, dest: str) -> bool:
     of taking the daemon down.
     """
     url = _image_url(host, http_port, image_key)
+    tmp = None
     try:
-        os.makedirs(os.path.dirname(dest), mode=0o700, exist_ok=True)
+        directory = os.path.dirname(dest)
+        os.makedirs(directory, mode=0o700, exist_ok=True)
         with urllib.request.urlopen(url, timeout=FETCH_TIMEOUT) as response:
-            data = response.read()
-        tmp = dest + ".tmp"
-        with open(tmp, "wb") as handle:
+            # One byte past the cap, so "at the limit" and "over it" are
+            # distinguishable without reading the rest of an endless body.
+            data = response.read(MAX_ART_BYTES + 1)
+        if len(data) > MAX_ART_BYTES:
+            LOG.warning("art for %s exceeds %d bytes; refusing it",
+                        image_key, MAX_ART_BYTES)
+            return False
+
+        # mkstemp, not `dest + ".tmp"`. The predictable name was openable with
+        # a plain "wb", which follows a symlink -- so anything able to plant
+        # one at that path redirected the daemon's write to its target. mkstemp
+        # creates O_EXCL at 0600 under a name nothing can guess, so there is
+        # nothing to pre-plant. Same directory as `dest`, because os.replace is
+        # only atomic within one filesystem.
+        handle_fd, tmp = tempfile.mkstemp(dir=directory, prefix=".art-", suffix=".tmp")
+        with os.fdopen(handle_fd, "wb") as handle:
             handle.write(data)
         os.replace(tmp, dest)  # atomic: a concurrent reader never sees a partial file
+        tmp = None             # replaced, so the finally must not unlink it
         return True
     except (OSError, urllib.error.URLError, http.client.HTTPException, ValueError):
         # OSError/URLError cover network failures and non-2xx responses;
@@ -88,6 +116,46 @@ def fetch(host: str, http_port: int, image_key: str, dest: str) -> bool:
         # fetch thread.
         LOG.warning("art fetch failed for %s", image_key, exc_info=True)
         return False
+    finally:
+        # _prune deliberately skips *.tmp, so nothing else would ever collect
+        # an orphan left by a failed fetch.
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def is_publishable(path: str) -> bool:
+    """May this path be handed to the widget as `art_path`?
+
+    Whatever this returns is read by `ColorQuantizer` inside the shared
+    omarchy-shell process, which carries no size cap, no stat and no symlink
+    control -- the same gap `FileView` has. Quickshell exports no filesystem
+    primitive that could bound it on that side, so the bound is enforced here,
+    before the path reaches QML.
+
+    `os.lstat`, never `os.path.exists`: exists() FOLLOWS a symlink, so the
+    check it replaced happily published one, and the shell would then read
+    whatever it aimed at. lstat describes the link itself.
+
+    Rejects a non-regular file for a different reason than size: a FIFO planted
+    at this path would block whoever opened it, and that is the shell.
+
+    A residual remains and is worth naming rather than papering over: this is a
+    check, and the shell opens the path afterwards, so a same-user race can
+    still swap the file in between. Closing that would need an open-time
+    guarantee (O_NOFOLLOW) on the reader's side, and the reader is Qt. The
+    cache directory is 0700, so the race needs an actor who is already the
+    user.
+    """
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    return info.st_size <= MAX_ART_BYTES
 
 
 def _prune(directory: str, keep: str, max_files: int = MAX_CACHED) -> None:
@@ -146,7 +214,7 @@ class Cache:
         if not image_key or not host:
             return None
         dest = path_for(self._dir, image_key)
-        if os.path.exists(dest):
+        if is_publishable(dest):
             return dest
         with self._lock:
             if self._last_key == image_key:

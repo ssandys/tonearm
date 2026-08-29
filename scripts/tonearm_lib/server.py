@@ -13,6 +13,13 @@ from . import browse
 LOG = logging.getLogger("tonearmd.server")
 
 
+# Longest request line accepted. The largest real request is a browse search,
+# whose term is whatever the user typed; 64 KiB is orders of magnitude past
+# that. Without a bound, `readline()` reads until a newline arrives or memory
+# runs out, so a client that simply never sends one is enough.
+MAX_REQUEST_BYTES = 64 * 1024
+
+
 def runtime_dir() -> str:
     base = os.environ.get("XDG_RUNTIME_DIR") or ("/run/user/%d" % os.getuid())
     return os.path.join(base, "tonearm")
@@ -71,7 +78,16 @@ class Server:
 
     def _handle(self, conn: socket.socket) -> None:
         try:
-            line = conn.makefile("r").readline()
+            # readline(SIZE), never a bare readline(): the bare form reads
+            # until a newline arrives or memory runs out, so a client that
+            # never sends one is a denial of service against the daemon with
+            # no packet larger than any other. A line that hits the cap comes
+            # back WITHOUT its terminator, which is how an over-long request
+            # is told apart from an ordinary one -- json.loads then rejects
+            # the truncated fragment and the connection closes below.
+            line = conn.makefile("r").readline(MAX_REQUEST_BYTES)
+            if not line.endswith("\n"):
+                raise ValueError("request line exceeds %d bytes" % MAX_REQUEST_BYTES)
             request = json.loads(line)
         except (ValueError, OSError):
             # Malformed input closes that one connection and nothing else.

@@ -38,6 +38,25 @@ class _ImageHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
+        if self.path.startswith("/api/image/huge"):
+            # A Core that ignores ?width=64&height=64, or anything else
+            # answering on that host:port. The URL asks for a thumbnail; only
+            # the reader can enforce that it got one.
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.end_headers()
+            self.wfile.write(b"\x00" * (art.MAX_ART_BYTES + 4096))
+            return
+        if self.path.startswith("/api/image/endless"):
+            # Sends the cap, then stalls. A reader that stops at the cap is
+            # done in milliseconds; one that reads to EOF waits here.
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.end_headers()
+            self.wfile.write(b"\x00" * (art.MAX_ART_BYTES + 1))
+            self.wfile.flush()
+            time.sleep(art.FETCH_TIMEOUT * 2)
+            return
         if self.path.startswith("/api/image/slow"):
             time.sleep(0.3)
         self.send_response(200)
@@ -358,3 +377,115 @@ class TestCachingSessionForwardsWhatServerNeeds(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFetchIsBounded(ArtServerTestCase):
+    """The daemon must not read an unbounded body, or write through a symlink.
+
+    Both patterns were rejected by name in the marketplace review of a sibling
+    plugin (HANCORE-linux/omarchy-plugin-marketplace#2659): unbounded
+    consumption on one round, and "predictable `headway.json.tmp` with direct
+    redirection, so a planted symlink can redirect the write" on the next.
+    This module had the same two shapes.
+    """
+
+    def test_the_read_STOPS_at_the_cap_rather_than_buffering_the_body(self):
+        """The bound is on the read, not merely on a check afterwards.
+
+        Refusing an oversize body after reading all of it still lets whatever
+        answers on that host:port decide how much memory the daemon spends and
+        how long it spends there. Only elapsed time can tell the two apart:
+        this endpoint sends exactly the cap and then stalls, so a reader that
+        stops at the cap returns immediately while one that reads to EOF waits
+        for the stall (or for FETCH_TIMEOUT to fire, which is just as slow).
+        """
+        dest = os.path.join(self.tmp.name, "endless.jpg")
+        started = time.monotonic()
+        result = art.fetch(self.host, self.port, "endless", dest)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, art.FETCH_TIMEOUT / 2,
+                        "read took %.1fs; it should stop at the cap" % elapsed)
+        self.assertFalse(result)
+        self.assertFalse(os.path.exists(dest))
+
+    def test_an_oversize_body_is_refused_and_writes_nothing(self):
+        dest = os.path.join(self.tmp.name, "huge.jpg")
+        self.assertFalse(art.fetch(self.host, self.port, "huge", dest))
+        self.assertFalse(os.path.exists(dest))
+
+    def test_a_symlink_planted_at_the_old_temp_path_cannot_redirect_the_write(self):
+        # `dest + ".tmp"` was the temp name, opened with a plain "wb" -- which
+        # follows a symlink and truncates whatever it points at.
+        victim = os.path.join(self.tmp.name, "victim")
+        with open(victim, "w") as handle:
+            handle.write("untouched")
+        dest = os.path.join(self.tmp.name, "art.jpg")
+        os.symlink(victim, dest + ".tmp")
+
+        self.assertTrue(art.fetch(self.host, self.port, "k", dest))
+        with open(victim) as handle:
+            self.assertEqual(handle.read(), "untouched")
+
+    def test_no_temp_file_survives_a_successful_fetch(self):
+        dest = os.path.join(self.tmp.name, "art.jpg")
+        self.assertTrue(art.fetch(self.host, self.port, "k", dest))
+        leftovers = [n for n in os.listdir(self.tmp.name) if n.endswith(".tmp")]
+        self.assertEqual(leftovers, [])
+
+    def test_no_temp_file_survives_a_refused_fetch(self):
+        # _prune deliberately skips *.tmp, so an orphan would never be cleaned
+        # up by anything else.
+        dest = os.path.join(self.tmp.name, "huge.jpg")
+        art.fetch(self.host, self.port, "huge", dest)
+        leftovers = [n for n in os.listdir(self.tmp.name) if n.endswith(".tmp")]
+        self.assertEqual(leftovers, [])
+
+
+class TestOnlyASafeFileIsPublished(ArtServerTestCase):
+    """`art_path` is consumed by ColorQuantizer inside the shared shell process.
+
+    Quickshell exports no filesystem primitive and ColorQuantizer carries no
+    size cap, no stat and no symlink control -- the same gap `FileView` has,
+    which is what the sibling plugin's first finding was about. The bound has
+    to be enforced producer-side, before the path reaches QML, which is
+    exactly the remedy that review asked for.
+    """
+
+    def cache(self):
+        return art.Cache(self.tmp.name)
+
+    def test_a_real_cached_file_is_published(self):
+        cache = self.cache()
+        dest = art.path_for(cache._dir, "k")
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "wb") as handle:
+            handle.write(IMAGE_BYTES)
+        self.assertEqual(cache.get(self.host, self.port, "k"), dest)
+
+    def test_a_symlink_at_the_cache_path_is_not_published(self):
+        # os.path.exists() follows symlinks, so the old check published one.
+        cache = self.cache()
+        dest = art.path_for(cache._dir, "k")
+        victim = os.path.join(self.tmp.name, "secret")
+        with open(victim, "wb") as handle:
+            handle.write(b"not an image")
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        os.symlink(victim, dest)
+        self.assertIsNone(cache.get(self.host, self.port, "k"))
+
+    def test_an_oversize_file_at_the_cache_path_is_not_published(self):
+        cache = self.cache()
+        dest = art.path_for(cache._dir, "k")
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "wb") as handle:
+            handle.write(b"\x00" * (art.MAX_ART_BYTES + 1))
+        self.assertIsNone(cache.get(self.host, self.port, "k"))
+
+    def test_a_non_regular_file_is_not_published(self):
+        # A FIFO would stall whatever opened it -- here, the shared shell.
+        cache = self.cache()
+        dest = art.path_for(cache._dir, "k")
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        os.mkfifo(dest)
+        self.addCleanup(os.unlink, dest)
+        self.assertIsNone(cache.get(self.host, self.port, "k"))

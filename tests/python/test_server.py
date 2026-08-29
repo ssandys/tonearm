@@ -176,3 +176,76 @@ class TestServer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRequestLineIsBounded(unittest.TestCase):
+    """A client that never sends a newline must not exhaust the daemon.
+
+    `conn.makefile("r").readline()` with no size argument reads until a
+    newline arrives or memory runs out. The socket is 0600 in the user's own
+    runtime dir, so this is a robustness bound rather than a privilege
+    boundary -- but the marketplace review of a sibling plugin
+    (HANCORE-linux/omarchy-plugin-marketplace#2659) treated "unbounded
+    consumption from a predictable local path" as a finding on its own terms,
+    in a directory that was equally user-owned.
+    """
+
+    def _server(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        prev = os.environ.get("XDG_RUNTIME_DIR")
+        os.environ["XDG_RUNTIME_DIR"] = tmp.name
+
+        def restore():
+            if prev is None:
+                os.environ.pop("XDG_RUNTIME_DIR", None)
+            else:
+                os.environ["XDG_RUNTIME_DIR"] = prev
+        self.addCleanup(restore)
+
+        srv = server.Server(FakeSession())
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(srv.shutdown)
+        for _ in range(200):
+            if os.path.exists(server.socket_path()):
+                break
+            time.sleep(0.01)
+        return srv
+
+    def test_an_endless_line_is_refused_rather_than_buffered(self):
+        self._server()
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        sock.connect(server.socket_path())
+        self.addCleanup(sock.close)
+
+        # Well past the cap, and never a newline.
+        chunk = b"x" * 65536
+        sent = 0
+        try:
+            while sent < server.MAX_REQUEST_BYTES * 3:
+                sock.sendall(chunk)
+                sent += len(chunk)
+        except OSError:
+            pass  # the daemon hung up early, which is the desired outcome
+
+        # The daemon hung up rather than accumulating. Either outcome proves
+        # that: a clean EOF if it closed after our last send, or ECONNRESET if
+        # it closed while we were still writing -- which is the usual race and
+        # is just as much a refusal. What must NOT happen is this blocking.
+        sock.settimeout(5)
+        try:
+            self.assertEqual(sock.recv(4096), b"")
+        except ConnectionResetError:
+            pass
+
+    def test_an_ordinary_request_still_works(self):
+        self._server()
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        sock.connect(server.socket_path())
+        self.addCleanup(sock.close)
+        sock.sendall(b'{"cmd": "status"}\n')
+        reply = sock.makefile("r").readline()
+        self.assertIn('"status"', reply)

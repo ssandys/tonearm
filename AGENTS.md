@@ -80,6 +80,23 @@ silently. These are not hypotheticals; each was measured.
 | **`multi_session_key` works through the vendored library untouched**, because `browse_browse` passes its opts dict to `_request` verbatim. | Two consumers do not clobber each other. |
 | **Never use `list_media`/`play_media`.** | Both open with `pop_all: True` and reset the browse session as a side effect. |
 
+### Shell-process safety
+
+Every one of these came out of the marketplace review of a sibling plugin
+(HANCORE-linux/omarchy-plugin-marketplace#2659), where the **automated
+baseline passed with zero findings and zero capabilities** and a human
+reviewer then returned two consecutive rounds of real defects. `omarchy plugin
+validate` exiting 0 is not the bar.
+
+| Trap | What happens |
+|---|---|
+| **A plugin runs inside the SHARED, always-loaded `omarchy-shell` process.** | Anything unbounded it consumes — a file, an array, a line — can stall or exhaust the whole shell, taking every other widget with it. The reviewer's phrasing is worth keeping: the input is "attacker/accident-controlled", and a user-owned directory is not an exemption. The sibling's state file lived in `~/.local/state/` and was still a finding. |
+| **`ColorQuantizer` and `FileView` have no size cap, no stat and no symlink control**, and Quickshell exports no filesystem primitive that could add one. | The bound has to be enforced producer-side, before the path ever reaches QML. `art.is_publishable()` is that gate: the daemon refuses to publish `art_path` for anything that is not a regular file within `MAX_ART_BYTES`. A residual same-user race remains and is documented in place rather than papered over — closing it needs `O_NOFOLLOW` on the reader, and the reader is Qt. |
+| **`os.path.exists()` FOLLOWS symlinks.** | It was the gate on `art_path`, so a symlink planted at the cache path was published and the shell read whatever it aimed at. Use `os.lstat` whenever the answer decides what a *different* process will open. |
+| **Never `dest + ".tmp"`.** | A predictable temp name opened with a plain `"wb"` follows a symlink, so anything able to plant one redirects the write. This exact pattern (`headway.json.tmp` with direct redirection) was rejected by name. Use `tempfile.mkstemp` in the destination's own directory — `O_EXCL`, 0600, unguessable — then `os.replace`. Clean up in a `finally`: `_prune` skips `*.tmp`, so nothing else collects an orphan. |
+| **A bare `readline()` on a socket is unbounded.** | It reads until a newline arrives or memory runs out, so a client that never sends one is a denial of service with no packet larger than any other. `readline(N)` returns a line WITHOUT its terminator when it hits the cap, which is how the over-long case is detected. |
+| **"Refused after reading it all" is not a bound.** | A size check after `response.read()` still lets the peer decide how much memory and time the daemon spends. The cap belongs on the read (`read(N + 1)`), and only elapsed time can tell the two apart in a test — a returned `False` looks identical either way. This is why `test_the_read_STOPS_at_the_cap_rather_than_buffering_the_body` asserts a deadline rather than a result. |
+
 ### Art and color
 
 | Trap | What happens |
