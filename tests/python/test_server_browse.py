@@ -99,6 +99,40 @@ class TestBrowseVerb(unittest.TestCase):
         reply = roundtrip(s, {"cmd": "browse", "op": "back"})
         self.assertNotIn("item_key", json.dumps(reply))
 
+    def test_an_unserializable_reply_becomes_roon_error_not_a_hang(self):
+        # A `set` cannot be JSON-encoded. If serialization ever happens
+        # OUTSIDE the guarded try/except again, json.dumps() raises
+        # TypeError there, killing the handler thread before conn.close()
+        # runs -- the client's readline() would then block forever instead
+        # of seeing a reply or EOF. The client socket gets a short timeout
+        # here specifically so a regression fails fast (socket.timeout)
+        # rather than hanging the whole suite.
+        s = StubSession(reply={"ok": True, "level_id": 1, "path": [],
+                                "count": 0, "offset": 0, "rows": {1, 2, 3}})
+        srv = server.Server(s)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "sock")
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(path)
+            listener.listen(1)
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.settimeout(2)
+            client.connect(path)
+            conn, _ = listener.accept()
+            client.sendall((json.dumps({"cmd": "browse", "op": "back"}) + "\n").encode())
+            thread = threading.Thread(target=srv._handle, args=(conn,))
+            thread.start()
+            try:
+                line = client.makefile("r").readline()
+            finally:
+                thread.join(timeout=5)
+                client.close()
+                listener.close()
+        self.assertTrue(line, "server never replied -- client would hang")
+        reply = json.loads(line)
+        self.assertFalse(reply["ok"])
+        self.assertEqual(reply["error"], "roon_error")
+
 
 class TestExistingVerbsStillWork(unittest.TestCase):
     def test_status_is_unaffected(self):

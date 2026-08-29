@@ -134,21 +134,34 @@ class Server:
             payload.pop("cmd", None)
             key = payload.pop("session", None) or "widget"
             op = payload.pop("op", None) or ""
+            # Serialization is deliberately INSIDE this guarded region, not
+            # a separate step after it. `json.dumps` on a reply that
+            # contains something non-serializable raises TypeError -- if
+            # that happened after the try/except below, it would kill this
+            # thread before conn.close() ran, and the client's readline()
+            # would block forever rather than see EOF. That is exactly the
+            # permanent-freeze failure this branch exists to prevent, so
+            # the only thing left outside the guard is the write itself,
+            # where OSError genuinely is the only expected failure.
             try:
                 reply = self._session.browse(key, op, **payload)
                 reply = dict(reply)
                 reply["v"] = 1
+                blob = (json.dumps(reply) + "\n").encode()
             except browse.BrowseError as exc:
                 reply = {"v": 1, "ok": False, "error": exc.token,
                          "message": exc.message}
+                blob = (json.dumps(reply) + "\n").encode()
             except Exception:
-                # A browse failure must never take the daemon down or leave
-                # the widget waiting on a line that never arrives.
+                # A browse failure -- including a reply that fails to
+                # serialize -- must never take the daemon down or leave the
+                # widget waiting on a line that never arrives.
                 LOG.exception("browse %r failed", op)
                 reply = {"v": 1, "ok": False, "error": "roon_error",
                          "message": "browse failed"}
+                blob = (json.dumps(reply) + "\n").encode()
             try:
-                conn.sendall((json.dumps(reply) + "\n").encode())
+                conn.sendall(blob)
             except OSError:
                 pass
             conn.close()
