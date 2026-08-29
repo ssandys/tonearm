@@ -8,6 +8,8 @@ import os
 import socket
 import threading
 
+from . import browse
+
 LOG = logging.getLogger("tonearmd.server")
 
 
@@ -117,6 +119,36 @@ class Server:
         if cmd == "status":
             try:
                 conn.sendall((json.dumps(self._session.snapshot()) + "\n").encode())
+            except OSError:
+                pass
+            conn.close()
+            return
+
+        if cmd == "browse":
+            # Deliberately NOT under self._lock. A browse round-trip is far
+            # slower than a snapshot, and holding the broadcast lock here
+            # would stall every subscriber for its duration (spec 7.5, and
+            # docs/FOLLOWUPS.md item 3). Nothing here touches the subscriber
+            # list, so there is nothing for that lock to protect.
+            payload = dict(request)
+            payload.pop("cmd", None)
+            key = payload.pop("session", None) or "widget"
+            op = payload.pop("op", None) or ""
+            try:
+                reply = self._session.browse(key, op, **payload)
+                reply = dict(reply)
+                reply["v"] = 1
+            except browse.BrowseError as exc:
+                reply = {"v": 1, "ok": False, "error": exc.token,
+                         "message": exc.message}
+            except Exception:
+                # A browse failure must never take the daemon down or leave
+                # the widget waiting on a line that never arrives.
+                LOG.exception("browse %r failed", op)
+                reply = {"v": 1, "ok": False, "error": "roon_error",
+                         "message": "browse failed"}
+            try:
+                conn.sendall((json.dumps(reply) + "\n").encode())
             except OSError:
                 pass
             conn.close()
