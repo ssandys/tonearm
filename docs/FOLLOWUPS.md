@@ -120,33 +120,6 @@ library, a loaded Core — reads as a hang. The fix is a busy indicator bound
 to the existing `busy` property; no new state is needed, just something
 visible while it's true.
 
-## 13. `tonearmctl` sets no socket timeout anywhere
-
-`scripts/tonearmctl` calls `socket.connect()`, `sendall()` and
-`makefile("r").readline()` on a socket left in blocking mode with no
-`settimeout()` on any path. A daemon that accepts the connection and then
-never answers — the exact shape of the Roon `tcp_port` hang recorded in
-`AGENTS.md`, and of any deadlock inside `_handle` — leaves `readline()`
-blocked forever. There is no timeout, no retry and no way out but a signal.
-
-Pre-existing, not introduced by browse: `status` has the identical exposure,
-and `setup.sh --check` uses `status` as its health probe, so a hung daemon
-turns the health check itself into a hang.
-
-Browse makes it reachable from the UI, and it **combines with the popup's own
-Esc handling into an unclosable popup**: `BrowsePane` gates every op on
-`busy`, and `busy` is only cleared when a reply arrives. A `browse` request
-that never gets an answer therefore pins `busy` true forever. (The fix wave
-made `handleBack()` return false when `busy` suppressed the send, so `Esc`
-now falls through to closing the popup instead of being swallowed — that
-closes the *unclosable* half. The wedged relay process and the permanently
-`busy` pane remain.)
-
-The fix is a `settimeout()` on the socket covering connect and the
-single-reply reads (`subscribe`'s stream is the one path that legitimately
-blocks indefinitely), plus a non-zero exit so `Service.qml`'s existing
-respawn-with-backoff treats it like any other failed relay.
-
 ## 14. A reset lost to `busy` at popup close is discarded, not delayed
 
 `resetPane()` routes through `_send`, which returns early when `busy` is true —
@@ -248,6 +221,18 @@ work rather than a line in the transfer change.
 ## Closed
 
 Recorded so they are not re-opened.
+
+Closed by the marketplace-review pass:
+
+- **`tonearmctl` set no socket timeout anywhere.** A daemon that accepted the
+  connection and then wedged left `readline()` blocked forever — including
+  `setup.sh --check`, which uses `status` as its health probe and so hung on
+  exactly the condition it exists to detect. Connect and both single-reply
+  reads now carry deadlines (per-verb: `status` 5s, `browse` 25s, overridable
+  with `TONEARM_REPLY_TIMEOUT`), and a timeout exits **4**, distinct from 3's
+  "not running", since the two faults have different remedies. `subscribe`
+  deliberately keeps blocking forever — it is a stream, and a paused zone can
+  emit nothing for hours.
 
 Closed by disconnect detection:
 

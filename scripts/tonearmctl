@@ -4,8 +4,9 @@
 `subscribe` streams NDJSON state until killed; `status` and `browse` send one
 command and read exactly one reply line (Task 13's setup.sh --check uses
 `status` as its health probe); every other verb sends one command and exits.
-Exit codes: 0 ok, 2 usage, 3 daemon not running -- except `browse`, which
-exits 1 rather than 0 when the reply's `ok` is false.
+Exit codes: 0 ok, 2 usage, 3 daemon not running, 4 daemon accepted but did not
+answer in time -- except `browse`, which exits 1 rather than 0 when the reply's
+`ok` is false.
 """
 
 import json
@@ -19,6 +20,37 @@ from tonearm_lib import cli, server, sood   # noqa: E402
 
 EXIT_USAGE = 2
 EXIT_NO_DAEMON = 3
+EXIT_TIMEOUT = 4
+
+CONNECT_TIMEOUT = 5.0
+
+# Per-verb, because the two verbs wait on different things. `status` is a
+# snapshot the daemon already holds and should answer in milliseconds. `browse`
+# goes out to Roon, and a single play walks up to four levels down plus an
+# unwind -- roughly ten round-trips, each of which roonapi itself allows ~2.5s.
+# One shared number would either cut a legitimate search short or leave the
+# health probe hanging for twenty seconds.
+REPLY_TIMEOUTS = {"status": 5.0, "browse": 25.0}
+DEFAULT_REPLY_TIMEOUT = 5.0
+
+
+def _reply_timeout(cmd):
+    """Seconds to wait for a single reply line. TONEARM_REPLY_TIMEOUT overrides.
+
+    The override earns its place twice: a Core on a slow link can exceed the
+    browse budget, and the tests need a deadline they do not have to sit
+    through. A malformed value falls back rather than raising -- a bad
+    environment variable must not be the thing that stops the bar working.
+    """
+    raw = os.environ.get("TONEARM_REPLY_TIMEOUT")
+    if raw:
+        try:
+            value = float(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return REPLY_TIMEOUTS.get(cmd, DEFAULT_REPLY_TIMEOUT)
 
 
 def main(argv):
@@ -34,6 +66,11 @@ def main(argv):
         return EXIT_USAGE
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    # A blocking connect to a unix socket whose server has stopped accepting
+    # waits on the backlog rather than failing fast. TimeoutError is an OSError
+    # subclass, so one handler covers both "no socket file" and "nobody
+    # accepting" -- from the caller's side those are the same fault.
+    sock.settimeout(CONNECT_TIMEOUT)
     try:
         sock.connect(server.socket_path())
     except OSError:
@@ -41,6 +78,7 @@ def main(argv):
         return EXIT_NO_DAEMON
 
     try:
+        sock.settimeout(_reply_timeout(request["cmd"]))
         sock.sendall((json.dumps(request) + "\n").encode())
 
         if request["cmd"] == "status":
@@ -66,6 +104,12 @@ def main(argv):
         if request["cmd"] != "subscribe":
             return 0
 
+        # The one path that must block indefinitely. A paused zone can emit
+        # nothing for hours, so a read deadline here would tear the relay down
+        # on an idle system and make the bar flap for no reason. Everything
+        # above this line is a single request/response and gets a deadline;
+        # this is a stream and does not.
+        sock.settimeout(None)
         stream = sock.makefile("r")
         for line in stream:
             sys.stdout.write(line)
@@ -73,6 +117,13 @@ def main(argv):
             # buffered relay would deliver state in silent bursts.
             sys.stdout.flush()
         return EXIT_NO_DAEMON     # the daemon closed on us
+    except TimeoutError:
+        # Distinct from EXIT_NO_DAEMON on purpose. "Not running" and "running
+        # but wedged" have different remedies, and setup.sh --check reports
+        # them differently. Must be caught BEFORE OSError, which it subclasses.
+        print("tonearmd accepted the connection but did not answer",
+              file=sys.stderr)
+        return EXIT_TIMEOUT
     except (OSError, KeyboardInterrupt):
         return EXIT_NO_DAEMON
     finally:

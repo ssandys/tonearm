@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -209,3 +210,135 @@ class TestSubscribeIsUnbuffered(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSilentDaemonTimesOut(unittest.TestCase):
+    """A daemon that accepts and then never answers must not hang the client.
+
+    Every socket call in tonearmctl -- connect, sendall, readline -- ran in
+    blocking mode with no settimeout() on any path. A daemon that accepted the
+    connection and then wedged (the shape of the Roon tcp_port hang recorded in
+    AGENTS.md, and of any deadlock inside Server._handle) left readline()
+    blocked forever, with no timeout, no retry and no way out but a signal.
+
+    Two things made that worse than a stuck command. `setup.sh --check` uses
+    `status` as its health probe, so the check written to detect a broken
+    daemon hung on exactly the condition it was checking for. And BrowsePane
+    gates every op on `busy`, cleared only when a reply lands, so a wedged
+    browse pinned the popup busy for the life of the process.
+    """
+
+    def _stub_socket_path(self, tmp):
+        directory = os.path.join(tmp, "tonearm")
+        os.makedirs(directory)
+        return os.path.join(directory, "sock")
+
+    def _silent_server(self, sock_path):
+        """Accepts, holds the connection open, and never writes a byte."""
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(sock_path)
+        srv.listen(1)
+        held = []
+
+        def accept():
+            try:
+                conn, _ = srv.accept()
+                held.append(conn)      # kept open: closing would end readline
+            except OSError:
+                pass
+
+        thread = threading.Thread(target=accept, daemon=True)
+        thread.start()
+        return srv, held
+
+    def _env(self, tmp, timeout="1"):
+        env = dict(os.environ)
+        env["XDG_RUNTIME_DIR"] = tmp
+        env["TONEARM_REPLY_TIMEOUT"] = timeout
+        return env
+
+    def test_status_gives_up_instead_of_hanging(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sock_path = self._stub_socket_path(tmp)
+            srv, held = self._silent_server(sock_path)
+            try:
+                started = time.monotonic()
+                proc = subprocess.run([CTL, "status"], env=self._env(tmp),
+                                      capture_output=True, timeout=15)
+                elapsed = time.monotonic() - started
+                # Non-zero, so setup.sh --check reports "not answering" rather
+                # than blocking, and Service.qml's respawn treats it like any
+                # other failed relay.
+                self.assertNotEqual(proc.returncode, 0)
+                # And it gave up on the REPLY deadline (1s, from the env
+                # override), not on some other timeout that happens to exist.
+                # Without this bound the test passes on the connect timeout
+                # still being set on the socket from before connect() --
+                # verified: deleting the reply settimeout() leaves this suite
+                # green at 5s and only this assertion catches it.
+                self.assertLess(elapsed, 4.0,
+                                "gave up after %.1fs; the reply deadline is 1s"
+                                % elapsed)
+            finally:
+                for conn in held:
+                    conn.close()
+                srv.close()
+
+    def test_not_answering_is_distinguishable_from_not_running(self):
+        # Exit 3 means "no daemon". A daemon that accepted and then went silent
+        # is a different fault with a different remedy, and collapsing the two
+        # would make the health probe say the wrong thing.
+        with tempfile.TemporaryDirectory() as tmp:
+            sock_path = self._stub_socket_path(tmp)
+            srv, held = self._silent_server(sock_path)
+            try:
+                silent = subprocess.run([CTL, "status"], env=self._env(tmp),
+                                        capture_output=True, timeout=15)
+            finally:
+                for conn in held:
+                    conn.close()
+                srv.close()
+
+        with tempfile.TemporaryDirectory() as tmp2:
+            env = dict(os.environ)
+            env["XDG_RUNTIME_DIR"] = tmp2      # nothing listening at all
+            absent = subprocess.run([CTL, "status"], env=env,
+                                    capture_output=True, timeout=15)
+
+        self.assertEqual(absent.returncode, 3)
+        self.assertNotEqual(silent.returncode, 3)
+        self.assertNotEqual(silent.returncode, 0)
+
+    def test_browse_gives_up_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sock_path = self._stub_socket_path(tmp)
+            srv, held = self._silent_server(sock_path)
+            try:
+                proc = subprocess.run([CTL, "browse", "search", "anything"],
+                                      env=self._env(tmp),
+                                      capture_output=True, timeout=15)
+                self.assertNotEqual(proc.returncode, 0)
+            finally:
+                for conn in held:
+                    conn.close()
+                srv.close()
+
+    def test_subscribe_still_blocks_forever_on_purpose(self):
+        # THE constraint this change must not break. `subscribe` is a stream:
+        # a paused zone can legitimately emit nothing for hours, and a read
+        # timeout there would tear down the relay on an idle system and make
+        # the bar flap. Only the single-reply reads get a deadline.
+        with tempfile.TemporaryDirectory() as tmp:
+            sock_path = self._stub_socket_path(tmp)
+            srv, held = self._silent_server(sock_path)
+            proc = subprocess.Popen([CTL, "subscribe"], env=self._env(tmp),
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    proc.wait(timeout=4)      # 4x the 1s reply timeout
+            finally:
+                proc.kill()
+                proc.wait(timeout=5)
+                for conn in held:
+                    conn.close()
+                srv.close()

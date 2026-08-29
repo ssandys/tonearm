@@ -130,6 +130,13 @@ describe a different component set. Do not substitute anything from them.
 | Column inside panel | Anchor `left`/`right`/`top` only | Anchoring `bottom` while `contentHeight` binds back to `implicitHeight` is a binding loop. |
 | Spawning a process | One `Process` per invocation | `Process.command` assigned mid-run is **silently ignored**. |
 
+### Python
+
+| Trap | What happens |
+|---|---|
+| **`TimeoutError` subclasses `OSError`, so `except OSError` swallows it.** | `tonearmctl` distinguishes "no daemon" (exit 3) from "daemon accepted but never answered" (exit 4), and the two handlers must stay in that order. Reversed, every timeout silently reports as exit 3 — the code compiles, the tests that only check "non-zero" still pass, and the health probe reports the wrong fault. `test_cli.py` pins the distinction for exactly this reason. |
+| **A socket's timeout persists after `connect()`.** | Setting one for connect and forgetting to set the read deadline does not leave reads unbounded — it leaves them on the *connect* timeout, which looks like the feature working. A test asserting only "it gave up" passes; one asserting *when* it gave up is what catches it. |
+
 ### Verification tooling
 
 | Trap | What happens |
