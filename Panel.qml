@@ -62,7 +62,13 @@ Panel {
   // Model.js and node-tested rather than living only in a QML binding.
   readonly property real volumeFraction: Model.volumeFraction(root.volume)
 
-  readonly property int artPx: root.setting("artSizePx", 118)
+  // Style.space(118), not a raw 118 and no longer a user setting. As a raw
+  // pixel value it was the one measurement in the card that did NOT scale with
+  // the theme's font, so a large base size grew the text and controls while
+  // the art stayed put and the card went text-heavy. As a SETTING it was a
+  // slider whose range (96-256) could push the popup to twice its height, for
+  // a dimension the layout now derives everything else from.
+  readonly property int artPx: Style.space(118)
   readonly property bool useArtAccent: root.setting("accentFromArt", true)
   // The daemon's now_playing carries art_path: a LOCAL cached copy of the
   // cover, nullable. ColorQuantizer cannot load the Core's own http:// art
@@ -380,11 +386,15 @@ Panel {
           // sticking out below the transport, and any font-size change would
           // have moved the number again.
           //
-          // The Math.max is the guard on that: `artPx` is a raw pixel setting
-          // (96-256) while every other measurement here scales with the theme's
-          // base font size, so a large font against a small art size is the one
-          // combination where the two groups could otherwise overlap. Then the
-          // card grows instead, and the art is the short edge.
+          // The Math.max is still the guard on that, though it is now a
+          // narrower case than it was. `artPx` used to be a raw pixel setting
+          // while everything else scaled with the theme's font, so the two
+          // could diverge on any large font; routing it through Style.space()
+          // makes them scale together by default. Not always, though --
+          // `Style.spacingScaleWithFont` is a theme-settable flag, and a theme
+          // that turns it off while raising the base font decouples them
+          // again. Cheaper to keep two lines than to rely on a theme's
+          // choices, so the card grows instead and the art is the short edge.
           Item {
             width: parent.width - root.artPx - Style.space(14)
             height: Math.max(root.artPx,
@@ -592,9 +602,12 @@ Panel {
         Row {
           width: parent.width
           spacing: Style.space(9)
-          // A fixed-volume output reports no volume object; a slider there
-          // would be a lie. Respects the showVolume setting too.
-          visible: root.setting("showVolume", true) && root.volume !== null
+          // A fixed- or incremental-volume output reports no volume object at
+          // all, and a slider there would be a lie. That auto-hide is why the
+          // `showVolume` setting was removed rather than kept: it was a second
+          // mechanism for the same outcome, and the automatic one is the one
+          // that is always right.
+          visible: root.volume !== null
 
           Text {
             // Model.GLYPH_VOLUME_MUTED/GLYPH_VOLUME_HIGH, built with

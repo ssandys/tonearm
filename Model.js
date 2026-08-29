@@ -550,11 +550,7 @@ function moveCursor(current, delta, count) {
 
 if (typeof module !== "undefined") {
   module.exports = {
-    THEME_ACCENT: THEME_ACCENT,
-    THEME_BACKGROUND: THEME_BACKGROUND,
-    CONTRAST_FLOOR: CONTRAST_FLOOR,
     normalizeHex: normalizeHex,
-    relativeLuminance: relativeLuminance,
     contrastRatio: contrastRatio,
     saturation: saturation,
     pickAccent: pickAccent,

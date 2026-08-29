@@ -19,30 +19,13 @@
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "accentFromArt": true,
-      "artSizePx": 118,
-      "showVolume": true
+      "accentFromArt": true
     },
     "schema": [
       {
         "key": "accentFromArt",
         "type": "boolean",
         "label": "Tint the seek bar with the album's color",
-        "defaultValue": true
-      },
-      {
-        "key": "artSizePx",
-        "type": "integer",
-        "label": "Album art size in the popup (pixels)",
-        "min": 96,
-        "max": 256,
-        "step": 8,
-        "defaultValue": 118
-      },
-      {
-        "key": "showVolume",
-        "type": "boolean",
-        "label": "Show the volume slider",
         "defaultValue": true
       }
     ]
