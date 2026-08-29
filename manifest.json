@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "ssandys.tonearm",
   "name": "Tonearm",
-  "version": "1.0.0",
+  "version": "0.9.0",
   "author": "Sean Sandys",
   "license": "MIT",
   "description": "Roon now-playing, transport, library search and zone transfer in the bar. Needs a one-time setup step that installs tonearmd, a Python systemd user service which talks to your Roon Core and starts at login. Summon with: omarchy-shell shell toggle ssandys.tonearm",
