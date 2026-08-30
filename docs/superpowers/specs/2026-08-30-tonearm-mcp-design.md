@@ -1,8 +1,9 @@
 # tonearm MCP server — design
 
 An MCP server letting an LLM read tonearm's state, search the Roon library, and
-put music on. Lives in its **own repository**; consumes `tonearmd`'s unix
-socket and nothing else.
+put music on. Lives in its own repository, **`tonearmd-mcp`**; consumes
+`tonearmd`'s unix socket and nothing else. The name is deliberate — it consumes
+the *daemon*, not the plugin, which is exactly the boundary this design draws.
 
 This document lives in the `tonearm` repo because the protocol it depends on is
 documented here and because `2026-08-27-tonearm-design.md` §10a is its direct
@@ -67,11 +68,32 @@ testable.
 
 | Module | Holds |
 |---|---|
-| `codec.py` | ref encode/decode |
-| `candidates.py` | expansion policy: a daemon search reply → a candidate list |
-| `zones.py` | zone name → id resolution |
-| `client.py` | socket, deadlines, error mapping |
-| `server.py` | MCP tool definitions; thin by construction |
+| `codec.js` | ref encode/decode |
+| `candidates.js` | expansion policy: a daemon search reply → a candidate list |
+| `zones.js` | zone name → id resolution |
+| `client.js` | socket, deadlines, error mapping |
+| `server.js` | MCP tool definitions; thin by construction |
+
+### Language: plain JavaScript, no build step
+
+Node, `@modelcontextprotocol/sdk`, and `node --test`. Not TypeScript: this
+matches `tonearm`'s existing JavaScript exactly — `Model.js` is plain, its 82
+tests are `node:test` with `node:assert`, and neither repo has a build step.
+What you read is what executes.
+
+Not Python either, despite the daemon being Python, and the reasoning is worth
+recording because the opposite looks obvious:
+
+- The server does **not** reuse `tonearmctl`; §3 has it speaking the socket
+  directly. It is a fresh client either way, and what carries over from
+  `tonearmctl` is its *design* — connect and reply deadlines, and separating
+  "not running" from "accepted but wedged" — not its code.
+- It needs **no Roon libraries**. `websocket-client` and `dbus-next` belong to
+  the daemon. This is a unix socket client, JSON shaping, and tool definitions.
+- Node is already a hard dependency of `tonearm` (`bin/test` runs
+  `node --test`). A Python server here would be the thing introducing a second
+  runtime story, not the reverse.
+- `net.createConnection({ path })` handles the unix socket natively.
 
 ## 4. Tool surface
 
@@ -176,9 +198,11 @@ reintroduces exactly the wrong-album failure §5 exists to prevent.
 
 ## 8. Testing
 
-Pure modules get unittest coverage with no fixtures beyond captured daemon
-replies. `client.py` gets a stub unix-socket server, the pattern
-`tonearm`'s `test_cli.py` already uses.
+Pure modules get `node --test` coverage with no fixtures beyond captured daemon
+replies — stdlib only, `node:test` and `node:assert`, matching `tonearm`'s JS
+suite. `client.js` gets a stub unix-socket server; `tonearm`'s `test_cli.py`
+already uses that pattern in Python and it ports directly, since
+`net.createServer({ path })` is the same shape.
 
 **Fixtures are captured from the live Core, not invented** — a common search, a
 one-hit search, a zero-result search, and something classical where
@@ -192,7 +216,7 @@ especially.
 
 ## 9. Shipping order
 
-1. `client.py` and the pure modules, against captured fixtures. Nothing
+1. `client.js` and the pure modules, against captured fixtures. Nothing
    user-visible; everything tested.
 2. The six tools.
 3. Live verification — actually asking Claude to put music on, and to move it
