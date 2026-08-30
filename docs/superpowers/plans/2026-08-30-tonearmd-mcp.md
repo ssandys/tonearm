@@ -1233,6 +1233,27 @@ git add -A && git commit -m "feat: the six MCP tools over stdio"
 
 ---
 
+## What live verification changed (recorded after execution)
+
+Task 7 found a bug class the 42 unit tests could not, and the plan's Task 6
+code is superseded by what shipped. Kept here so a re-run does not rediscover
+it the slow way.
+
+- **`tonearm_play` must NOT append a status read.** The daemon reflects a
+  change asynchronously, so the read raced it and the tool printed
+  "Playing Kind Of Blue" above "playing Jellybelly". `playRef` already knows
+  what it activated.
+- **A settle poll keyed on "the state changed" is wrong.** Pausing right after
+  a play saw the *play* still landing, counted that as the change, and
+  answered a pause with "playing". Use a per-verb predicate: `pause` wants
+  `paused`, `playpause` wants a flip, `next`/`previous` want a new track.
+- **Settle latency varies by two orders of magnitude.** Measured: ~154ms on a
+  steady zone, 1ms after a transport play, and **over 2s after a browse
+  activate**, where Roon is still loading a queue. Do not chase the number --
+  bound it at 3s and report an unconfirmed command honestly
+  ("Sent pause, but the zone had not reflected it after 3s"). Reporting the
+  opposite of the request is the worse failure.
+
 ## Task 7: Live verification and the README
 
 **Files:**
