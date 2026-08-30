@@ -533,6 +533,12 @@ Note also that §10's reason for excluding browse still stands: it is
 session-stateful and not addressable, and it is the bulk of roon-tui's
 913-line state machine. Search is the expensive feature, not the cheap one.
 
+> **Superseded in part.** The concurrency blocker named above was overturned:
+> `multi_session_key` works, and the wire protocol already lets any consumer
+> pick its own session key. See
+> `2026-08-30-tonearm-mcp-design.md`, which designs that server against the
+> daemon as it stands, with no daemon change required.
+
 ### MCP is what should trigger a repo split
 
 `omarchy plugin add <git-url>` does a `git clone` and moves **the whole repo** into
