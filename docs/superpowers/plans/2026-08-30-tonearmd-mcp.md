@@ -573,8 +573,14 @@ test("an unknown zone names the ones that exist", () => {
 });
 
 test("no zones at all is still an UnknownZoneError, with an empty list", () => {
-  const err = assert.throws(() => resolveZone([], "kitchen"), UnknownZoneError);
-  assert.deepStrictEqual(err.available, []);
+  // Node's assert.throws returns undefined -- it is NOT Python's assertRaises
+  // context manager, and `const err = assert.throws(...)` yields undefined.
+  // Inspect the error with a validation function instead.
+  assert.throws(() => resolveZone([], "kitchen"), (err) => {
+    assert.ok(err instanceof UnknownZoneError);
+    assert.deepStrictEqual(err.available, []);
+    return true;
+  });
 });
 ```
 
@@ -611,6 +617,10 @@ export function resolveZone(zones, name) {
 
 Run: `node --test test/zones.test.js`
 Expected: PASS, 6 tests.
+
+Note: pass test **files**, or run bare `node --test` for auto-discovery. Passing
+the `test/` **directory** throws `MODULE_NOT_FOUND` -- the same trap tonearm's
+own `bin/test` documents.
 
 - [ ] **Step 5: Verify each test can fail**
 
