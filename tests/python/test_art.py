@@ -15,6 +15,7 @@ import http.client
 import http.server
 import os
 import re
+import struct
 import sys
 import tempfile
 import threading
@@ -27,7 +28,30 @@ sys.path.insert(0, os.path.abspath(
 
 from tonearm_lib import art
 
-IMAGE_BYTES = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
+def jpeg_bytes(width=64, height=64):
+    """A JPEG header the daemon can actually parse: SOI, APP0/JFIF, SOF0, EOI.
+
+    The old fixture was `b"\\xff\\xd8\\xff\\xe0fake-jpeg-bytes"` -- the right
+    two magic bytes followed by nothing a dimension parser could read. Once
+    the daemon validates what it fetched, a fixture that is not an image is
+    testing the refusal path, not the success path.
+    """
+    return (b"\xff\xd8"                                     # SOI
+            b"\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+            b"\xff\xc0\x00\x11\x08"                          # SOF0, 8-bit
+            + struct.pack(">HH", height, width)
+            + b"\x03\x01\x11\x00\x02\x11\x01\x03\x11\x01"
+            + b"\xff\xd9")                                   # EOI
+
+
+def png_bytes(width=64, height=64):
+    """A PNG signature plus the IHDR the daemon reads dimensions out of."""
+    ihdr = struct.pack(">II", width, height) + b"\x08\x02\x00\x00\x00"
+    return (b"\x89PNG\r\n\x1a\n" + struct.pack(">I", len(ihdr)) + b"IHDR"
+            + ihdr)
+
+
+IMAGE_BYTES = jpeg_bytes()
 
 
 class _ImageHandler(http.server.BaseHTTPRequestHandler):
@@ -57,6 +81,39 @@ class _ImageHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.flush()
             time.sleep(art.FETCH_TIMEOUT * 2)
             return
+        if self.path.startswith("/api/image/offsite"):
+            # A Core -- or anything else answering on that host:port -- aiming
+            # the daemon's fetch somewhere it never asked to go.
+            self.send_response(302)
+            self.send_header("Location", self.server.offsite_url)
+            self.end_headers()
+            return
+        if self.path.startswith("/api/image/samesite"):
+            self.send_response(302)
+            self.send_header("Location", "/api/image/ok")
+            self.end_headers()
+            return
+        if self.path.startswith("/api/image/notanimage"):
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.end_headers()
+            self.wfile.write(b"<!DOCTYPE html><html>not an image at all</html>")
+            return
+        if self.path.startswith("/api/image/bomb"):
+            # Small on the wire, enormous once decoded: a few hundred bytes
+            # of PNG header declaring 30000x30000, which is 3.6 GB of RGBA
+            # in whatever process opens it -- here, the shared shell.
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.end_headers()
+            self.wfile.write(png_bytes(30000, 30000))
+            return
+        if self.path.startswith("/api/image/png"):
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.end_headers()
+            self.wfile.write(png_bytes())
+            return
         if self.path.startswith("/api/image/slow"):
             time.sleep(0.3)
         self.send_response(200)
@@ -72,7 +129,30 @@ class ArtServerTestCase(unittest.TestCase):
     """Base class that spins up a local HTTP server standing in for a Core."""
 
     def setUp(self):
+        # A second origin the daemon must never be talked into contacting.
+        # It records every request it receives; the assertion is that the
+        # list stays empty.
+        self.offsite_hits = []
+        offsite_hits = self.offsite_hits
+
+        class _Offsite(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 (stdlib method name)
+                offsite_hits.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.end_headers()
+                self.wfile.write(IMAGE_BYTES)
+
+            def log_message(self, *_args):
+                pass
+
+        self.offsite = http.server.HTTPServer(("127.0.0.1", 0), _Offsite)
+        threading.Thread(target=self.offsite.serve_forever, daemon=True).start()
+        self.addCleanup(self.offsite.shutdown)
+
         self.httpd = http.server.HTTPServer(("127.0.0.1", 0), _ImageHandler)
+        self.httpd.offsite_url = "http://127.0.0.1:%d/api/image/stolen" % (
+            self.offsite.server_address[1],)
         self.host, self.port = self.httpd.server_address
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
@@ -110,7 +190,11 @@ class TestFetch(ArtServerTestCase):
         # the fetch thread instead of degrading to art_path: null.
         dest = os.path.join(self.tmp.name, "art", "abc123.jpg")
         truncated = http.client.IncompleteRead(partial=b"", expected=100)
-        with unittest.mock.patch("urllib.request.urlopen", side_effect=truncated):
+        # Patched on the module's own opener, not urllib.request.urlopen:
+        # fetch() goes through _OPENER so that redirects are constrained to
+        # the Core's origin, and a mock on urlopen would never be reached.
+        with unittest.mock.patch.object(art._OPENER, "open",
+                                        side_effect=truncated):
             ok = art.fetch(self.host, self.port, "abc123", dest)
         self.assertFalse(ok)
         self.assertFalse(os.path.exists(dest))
@@ -373,6 +457,119 @@ class TestCachingSessionForwardsWhatServerNeeds(unittest.TestCase):
             self.assertTrue(
                 callable(getattr(art.CachingSession, name)),
                 "CachingSession.%s exists but is not callable" % name)
+
+
+# --- hardening: marketplace security review 2026-09-01 -------------------
+#
+# "Album-art HTTP follows redirects, enabling a LAN Core to redirect requests
+# to arbitrary targets; image type/dimension/pixel validation and open-time
+# path safety are also missing."
+
+
+class TestFetchStaysOnTheCore(ArtServerTestCase):
+    def test_a_redirect_off_the_core_is_refused(self):
+        # urlopen's default handler follows 30x. Whatever answers on the
+        # configured host:port could therefore aim the daemon's HTTP client
+        # at any other http origin it could reach -- another LAN device, or
+        # a service bound to loopback that trusts local callers.
+        dest = os.path.join(self.tmp.name, "art.jpg")
+        self.assertFalse(art.fetch(self.host, self.port, "offsite", dest))
+        self.assertEqual(self.offsite_hits, [],
+                         "the daemon was redirected off the Core")
+        self.assertFalse(os.path.exists(dest))
+
+    def test_a_redirect_within_the_core_is_still_followed(self):
+        # Same origin is not the hazard, and refusing it would break a Core
+        # that serves art from a second path.
+        dest = os.path.join(self.tmp.name, "art.jpg")
+        self.assertTrue(art.fetch(self.host, self.port, "samesite", dest))
+
+
+class TestFetchValidatesTheImage(ArtServerTestCase):
+    def test_a_body_that_is_not_an_image_is_refused(self):
+        # The size cap was the ONLY check on the body. An HTML error page,
+        # or anything else under 1 MiB, was written to <key>.jpg and handed
+        # to ColorQuantizer inside the shared shell process.
+        dest = os.path.join(self.tmp.name, "art.jpg")
+        self.assertFalse(art.fetch(self.host, self.port, "notanimage", dest))
+        self.assertFalse(os.path.exists(dest))
+
+    def test_an_image_declaring_enormous_dimensions_is_refused(self):
+        # A decode bomb is small on the wire and huge in memory, so a byte
+        # cap cannot see it. 30000x30000 is 3.6 GB of RGBA in the shell.
+        dest = os.path.join(self.tmp.name, "art.jpg")
+        self.assertFalse(art.fetch(self.host, self.port, "bomb", dest))
+        self.assertFalse(os.path.exists(dest))
+
+    def test_a_png_within_the_bounds_is_accepted(self):
+        dest = os.path.join(self.tmp.name, "art.png")
+        self.assertTrue(art.fetch(self.host, self.port, "png", dest))
+
+
+class TestImageDimensions(unittest.TestCase):
+    def test_reads_jpeg_dimensions_past_a_leading_app0_segment(self):
+        self.assertEqual(art.image_dimensions(jpeg_bytes(640, 480)), (640, 480))
+
+    def test_reads_png_dimensions_from_ihdr(self):
+        self.assertEqual(art.image_dimensions(png_bytes(320, 200)), (320, 200))
+
+    def test_returns_none_for_bytes_that_are_not_an_image(self):
+        self.assertIsNone(art.image_dimensions(b"<!DOCTYPE html>"))
+
+    def test_returns_none_for_a_jpeg_with_no_frame_header(self):
+        # The right two magic bytes are not an image. A parser that gave up
+        # and said "probably fine" would let exactly this through.
+        self.assertIsNone(art.image_dimensions(b"\xff\xd8\xff\xe0truncated"))
+
+    def test_returns_none_rather_than_raising_on_a_truncated_png(self):
+        self.assertIsNone(art.image_dimensions(png_bytes()[:12]))
+
+    def test_returns_none_for_zero_dimensions(self):
+        self.assertIsNone(art.image_dimensions(png_bytes(0, 0)))
+
+
+class TestOnlyAnImageIsPublished(ArtServerTestCase):
+    def cache(self):
+        return art.Cache(self.tmp.name)
+
+    def _plant(self, cache, data):
+        dest = art.path_for(cache._dir, "k")
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "wb") as handle:
+            handle.write(data)
+        return dest
+
+    def test_a_file_that_is_not_an_image_is_not_published(self):
+        # is_publishable() checked only "regular file, within 1 MiB". The
+        # shell will decode whatever is at this path, so the producer-side
+        # guard has to know it is an image.
+        cache = self.cache()
+        self._plant(cache, b"#!/bin/sh\necho not an image\n")
+        self.assertIsNone(cache.get(self.host, self.port, "k"))
+
+    def test_a_planted_decode_bomb_is_not_published(self):
+        cache = self.cache()
+        self._plant(cache, png_bytes(30000, 30000))
+        self.assertIsNone(cache.get(self.host, self.port, "k"))
+
+    def test_is_publishable_reports_on_the_descriptor_it_opened(self):
+        # The check used os.lstat(path) and then handed the PATH onward. It
+        # now opens the file O_NOFOLLOW and answers from that descriptor, so
+        # the daemon's own check cannot be aimed at a different file than the
+        # one it inspected.
+        cache = self.cache()
+        dest = self._plant(cache, IMAGE_BYTES)
+        self.assertTrue(art.is_publishable(dest))
+        os.unlink(dest)
+        os.symlink("/etc/passwd", dest)
+        self.addCleanup(os.unlink, dest)
+        self.assertFalse(art.is_publishable(dest))
+
+    def test_a_directory_at_the_cache_path_is_not_published(self):
+        cache = self.cache()
+        dest = art.path_for(cache._dir, "k")
+        os.makedirs(dest, exist_ok=True)
+        self.assertIsNone(cache.get(self.host, self.port, "k"))
 
 
 if __name__ == "__main__":

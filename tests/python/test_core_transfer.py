@@ -136,3 +136,45 @@ class TestTransferFollowsTheMusic(TransferCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPinArgumentIsConstrained(TransferCase):
+    """`zone` is the one verb whose argument reaches persistent state.
+
+    server.py passes `request.get("arg")` through untouched, and
+    _pin_locked() writes it into ~/.config/tonearm/config.json. Unvalidated,
+    any local process able to open the socket could persist an arbitrary
+    JSON value there -- and one large enough would push the file past
+    config.MAX_CONFIG_BYTES, so the NEXT start would refuse the whole file
+    and fall back to defaults, losing the Core address and re-running
+    discovery.
+    """
+
+    def test_an_over_long_zone_id_is_refused_and_nothing_is_persisted(self):
+        api = RecordingApi(playing=KITCHEN)
+        s = self.session(api)
+        s.command("zone", "z" * (core.MAX_ZONE_ID + 1))
+        self.assertIsNone(config.load()["pinned_zone_id"])
+        self.assertIsNone(s._arbiter.pinned_id)
+
+    def test_a_zone_id_that_is_not_a_string_is_refused(self):
+        api = RecordingApi(playing=KITCHEN)
+        s = self.session(api)
+        s.command("zone", {"not": "a string"})
+        self.assertIsNone(config.load()["pinned_zone_id"])
+        self.assertIsNone(s._arbiter.pinned_id)
+
+    def test_an_ordinary_zone_id_still_pins_and_persists(self):
+        api = RecordingApi(playing=KITCHEN)
+        s = self.session(api)
+        s.command("zone", DEN)
+        self.assertEqual(s._arbiter.pinned_id, DEN)
+        self.assertEqual(config.load()["pinned_zone_id"], DEN)
+
+    def test_unpin_still_clears_the_pin(self):
+        api = RecordingApi(playing=KITCHEN)
+        s = self.session(api)
+        s.command("zone", DEN)
+        s.command("zone", "unpin")
+        self.assertIsNone(s._arbiter.pinned_id)
+        self.assertIsNone(config.load()["pinned_zone_id"])

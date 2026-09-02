@@ -20,9 +20,56 @@ Type=simple
 ExecStart=%h/.config/omarchy/plugins/ssandys.tonearm/scripts/tonearmd
 Restart=on-failure
 RestartSec=3
-# The socket lives here; systemd creates and cleans it up.
+# The socket lives here; systemd creates and cleans it up. Under
+# ProtectSystem=strict below this is also the ONLY writable path under
+# $XDG_RUNTIME_DIR, so the name must stay in step with server.runtime_dir().
 RuntimeDirectory=tonearm
 RuntimeDirectoryMode=0700
+
+# --- sandbox ------------------------------------------------------------
+#
+# tonearmd needs very little: a unix socket under $XDG_RUNTIME_DIR, its own
+# ~/.config/tonearm, outbound TCP/UDP to the LAN, and the session bus for
+# MPRIS. Everything below is the difference between "the daemon needs that"
+# and "the daemon runs as you". Without it, a bug in this daemon -- or in
+# the vendored roonapi it feeds untrusted LAN bytes to -- reaches every file
+# the user owns.
+#
+# Every directive here was verified against a running daemon on 2026-09-02,
+# not copied from a template. Two of them are load-bearing in ways that are
+# not obvious:
+#
+#   * AF_NETLINK is REQUIRED. glibc's if_nameindex(3), which sood.py uses to
+#     enumerate interfaces, talks netlink. Drop it and _local_networks()
+#     returns nothing -- discovery finds no Core and reports no error, so a
+#     first run just sits at "unpaired" forever.
+#   * ReadWritePaths must EXIST at start or systemd fails the unit at step
+#     NAMESPACE (226) before the process runs. $HOME is read-only here, so
+#     the daemon can no longer create it; setup.sh does, and
+#     tests/python/test_setup.py asserts the two stay in step.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/tonearm
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# The pairing token is written here; 0600 no matter what the process asks for.
+UMask=0077
 
 [Install]
 WantedBy=default.target

@@ -190,8 +190,11 @@ the losing edge.
   outside the lock.
 - `_IGNORED_IFACE_PREFIXES` is a non-exhaustive heuristic (misses `wg`, `tun`,
   `virbr`, `zt`); an unlisted virtual interface costs one wasted `/24` scan.
-- `_local_networks()` does not dedup, so bonded or aliased interfaces on one
-  `/24` get scanned twice. Results dedup by host, so harmless.
+- ~~`_local_networks()` does not dedup, so bonded or aliased interfaces on one
+  `/24` get scanned twice.~~ Fixed 2026-09-01: deduplicated in
+  `_local_networks()` and again in `_scan_targets()`, which also enforces a
+  512-address total budget. "Results dedup by host, so harmless" was wrong --
+  the results deduplicated, the connect attempts did not.
 - Both `tests/__init__.py` and `tests/python/__init__.py` exist; only the latter
   is needed.
 - `THEME_BACKGROUND` and `CONTRAST_FLOOR` are exported beyond the interface the

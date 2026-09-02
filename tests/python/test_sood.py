@@ -1,3 +1,4 @@
+import ipaddress
 import os
 import random
 import struct
@@ -192,6 +193,73 @@ class TestLocalNetworksStayPrivate(unittest.TestCase):
         # _port_open is only reached at all if the fallback network passed
         # the private-space check and produced scan targets.
         self.assertTrue(port_open.called)
+
+
+# --- hardening: marketplace security review 2026-09-01 -------------------
+#
+# "Discovery does not actually enforce the documented total-host cap across
+# interfaces. ... enforce a strict deduplicated discovery budget."
+
+
+class TestScanBudget(unittest.TestCase):
+    """The /24 fallback must have a ceiling on how many hosts it touches.
+
+    `hosts = [str(h) for net in nets for h in net.hosts()]` had no cap and no
+    dedup: two aliased interfaces on one /24 produced 508 connect attempts
+    against 254 machines, and N interfaces produced 254*N with no ceiling at
+    all. What the docs described as a bounded scan was bounded only in which
+    /24s qualified, never in how many hosts that came to.
+    """
+
+    def _nets(self, *cidrs):
+        return [ipaddress.ip_network(c) for c in cidrs]
+
+    def test_two_interfaces_on_one_subnet_scan_it_once(self):
+        nets = self._nets("192.168.1.0/24", "192.168.1.0/24")
+        targets = sood._scan_targets(nets)
+        self.assertEqual(len(targets), 254)
+        self.assertEqual(len(set(targets)), len(targets))
+
+    def test_overlapping_networks_never_yield_a_host_twice(self):
+        nets = self._nets("10.0.0.0/24", "10.0.0.128/25")
+        targets = sood._scan_targets(nets)
+        self.assertEqual(len(set(targets)), len(targets))
+
+    def test_the_budget_caps_the_total_across_interfaces(self):
+        # Four distinct /24s is 1016 hosts. The budget is a total, not a
+        # per-interface allowance.
+        nets = self._nets("10.1.0.0/24", "10.2.0.0/24",
+                          "10.3.0.0/24", "10.4.0.0/24")
+        targets = sood._scan_targets(nets, budget=512)
+        self.assertEqual(len(targets), 512)
+
+    def test_the_default_budget_is_enforced(self):
+        nets = self._nets(*["10.%d.0.0/24" % n for n in range(1, 21)])
+        self.assertLessEqual(len(sood._scan_targets(nets)),
+                             sood.MAX_SCAN_HOSTS)
+
+    def test_discover_probes_no_more_hosts_than_the_budget(self):
+        # End to end: the ceiling has to hold on the path discover() takes,
+        # not only in the helper.
+        nets = [ipaddress.ip_network("10.%d.0.0/24" % n) for n in range(1, 21)]
+        with unittest.mock.patch.object(
+            sood, "_local_networks", return_value=nets
+        ), unittest.mock.patch.object(
+            sood, "_port_open", return_value=False
+        ) as port_open:
+            sood.discover(timeout=0)
+        self.assertLessEqual(port_open.call_count, sood.MAX_SCAN_HOSTS)
+
+    def test_local_networks_reports_an_aliased_subnet_once(self):
+        addrs = {"eth0": "192.168.1.50", "eth0:1": "192.168.1.51"}
+        with unittest.mock.patch.object(
+            sood.socket, "if_nameindex",
+            return_value=[(1, "eth0"), (2, "eth0:1")]
+        ), unittest.mock.patch.object(
+            sood, "_iface_ipv4", side_effect=lambda name: addrs[name]
+        ):
+            nets = sood._local_networks()
+        self.assertEqual([str(n) for n in nets], ["192.168.1.0/24"])
 
 
 if __name__ == "__main__":

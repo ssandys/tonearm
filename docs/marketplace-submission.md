@@ -60,7 +60,9 @@ instruction to the user. tonearm installs nothing.
 Roon Core: SOOD multicast first, and — because many networks filter multicast —
 falling back to opening a TCP connection to one port (9330) on each address in
 the local `/24`. That scan is bounded to interfaces whose own IPv4 address is
-`ipaddress.is_private`, and the subnet is taken from the interfaces themselves
+`ipaddress.is_private`, deduplicated across interfaces, and capped at 512
+addresses for the whole run (`sood.MAX_SCAN_HOSTS`) rather than 254 per
+qualifying interface; the subnet is taken from the interfaces themselves
 rather than a routing lookup, which a VPN would otherwise poison. The result is
 cached in `~/.config/tonearm/config.json` and never scanned again. After that
 the only traffic is to the Core: one WebSocket for Roon's MOO protocol and HTTP
@@ -82,8 +84,12 @@ Headway (#2659), which applies to this plugin too:
 - The art fetch caps the read itself at 1 MiB rather than checking the size
   after buffering the body, and writes through `tempfile.mkstemp` plus
   `os.replace` — never a predictable `<name>.tmp`.
-- The daemon's unix socket (0600, in `$XDG_RUNTIME_DIR`) bounds each request
-  line at 64 KiB, so a client that never sends a newline cannot exhaust it.
+- The daemon's unix socket (0600, in `$XDG_RUNTIME_DIR`) bounds every
+  resource a client can reach: the request line at 64 KiB, the time to send
+  it at 10s, concurrent handler threads at 32, registered subscribers at 16,
+  one write to a subscriber at 5s, and in-memory browse sessions at 8, keyed
+  on a `session` string of at most 64 characters. No I/O runs while the
+  subscriber-list lock is held, so one stalled peer cannot stall the rest.
 - Browse results are capped at 100 rows per level by the daemon.
 
 **Files written.** `~/.config/tonearm/` (0700) holds the Core address, the Roon

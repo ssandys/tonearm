@@ -139,3 +139,55 @@ class TestRefusesToWriteThroughAPlant(SetupTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSandboxPrerequisites(SetupTestCase):
+    """The hardened unit's mount namespace must be satisfiable at first start.
+
+    ProtectSystem=strict makes $HOME read-only, so the daemon can no longer
+    create ~/.config/tonearm itself -- and systemd refuses to start a unit
+    whose ReadWritePaths names a directory that does not exist, failing at
+    step NAMESPACE with 226 before the process ever runs. Measured
+    2026-09-02: a probe unit pointed at a missing path did exactly that.
+    So the installer has to create it.
+    """
+
+    def state_dir(self):
+        return os.path.join(self.home, ".config", "tonearm")
+
+    def test_creates_the_state_directory(self):
+        self.run_setup()
+        self.assertTrue(os.path.isdir(self.state_dir()))
+
+    def test_the_state_directory_is_private(self):
+        # It holds the Roon pairing token.
+        self.run_setup()
+        self.assertEqual(os.stat(self.state_dir()).st_mode & 0o077, 0)
+
+    def test_an_existing_loose_state_directory_is_tightened(self):
+        os.makedirs(self.state_dir(), exist_ok=True)
+        os.chmod(self.state_dir(), 0o755)
+        self.run_setup()
+        self.assertEqual(os.stat(self.state_dir()).st_mode & 0o077, 0)
+
+    def test_every_readwritepath_in_the_unit_exists_after_setup(self):
+        """The coupling, asserted rather than assumed.
+
+        A ReadWritePaths line added to the unit without a matching mkdir in
+        setup.sh does not degrade -- the unit refuses to start at all, with
+        an error that names systemd rather than this plugin. This catches
+        that at test time instead of on someone's first install.
+        """
+        self.run_setup()
+        with open(self.target) as handle:
+            unit = handle.read()
+        paths = [line.split("=", 1)[1].strip()
+                 for line in unit.splitlines()
+                 if line.startswith("ReadWritePaths=")]
+        self.assertTrue(paths, "the unit declares no ReadWritePaths")
+        for raw in paths:
+            for entry in raw.split():
+                path = entry.lstrip("-").replace("%h", self.home)
+                self.assertTrue(os.path.isdir(path),
+                                "%s is in ReadWritePaths but setup.sh does "
+                                "not create it" % entry)

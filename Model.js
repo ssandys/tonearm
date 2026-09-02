@@ -515,12 +515,19 @@ function nextRetryDelay(attempt) {
 // loaded by the widget straight from the Core (spec 4.4): a plain Image can
 // read these URLs -- only ColorQuantizer cannot -- so caching 100 images per
 // page in the daemon would be pure waste.
+// image_key is UNTRUSTED: it comes from the Core, and the URL built here is
+// handed to Image.source inside the shared shell process. art.py already
+// percent-encodes it on the daemon side ("treat it as untrusted before it
+// becomes part of a filesystem path"); this is the same rule on the side that
+// builds the network URL. Interpolated raw, a key carrying `&` or `?` rewrote
+// the query -- `k&width=99999` produced a second width parameter -- and one
+// carrying `/` or `..` walked the path.
 function imageUrl(core, imageKey, px) {
   if (!core || !core.host) return ""
   if (!imageKey) return ""
   var size = px || 256
   return "http://" + core.host + ":" + (core.http_port || 9330) +
-         "/api/image/" + imageKey +
+         "/api/image/" + encodeURIComponent(imageKey) +
          "?scale=fit&width=" + size + "&height=" + size
 }
 

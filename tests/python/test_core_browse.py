@@ -53,6 +53,34 @@ class TestBrowseSessionAccessor(unittest.TestCase):
         s = FakeSession(fake_api())
         self.assertIsNot(s.browse_session("widget"), s.browse_session("mcp"))
 
+    def test_browse_sessions_are_capped_and_evict_least_recently_used(self):
+        # The session key is a wire field: `key = payload.pop("session")` in
+        # server.py, straight from the request. Unbounded, any local process
+        # able to open the socket could allocate Roon browse state without
+        # limit, one dict entry per distinct string it sent. The docstring
+        # deferred the cap "if consumers multiply"; tonearmd-mcp is the
+        # second consumer, so they have.
+        s = FakeSession(fake_api())
+        first = s.browse_session("k0")
+        for n in range(1, core.MAX_BROWSE_SESSIONS):
+            s.browse_session("k%d" % n)
+        self.assertEqual(len(s._browse_sessions), core.MAX_BROWSE_SESSIONS)
+
+        s.browse_session("overflow")
+        self.assertEqual(len(s._browse_sessions), core.MAX_BROWSE_SESSIONS)
+        self.assertNotIn("k0", s._browse_sessions)
+        self.assertIsNot(s.browse_session("k0"), first)
+
+    def test_using_a_session_keeps_it_from_being_evicted(self):
+        # Eviction has to be least-RECENTLY-USED, not insertion order: the
+        # widget's long-lived session must outlive a burst of new keys.
+        s = FakeSession(fake_api())
+        widget = s.browse_session("widget")
+        for n in range(core.MAX_BROWSE_SESSIONS * 2):
+            s.browse_session("burst%d" % n)
+            s.browse_session("widget")      # still in use
+        self.assertIs(s.browse_session("widget"), widget)
+
     def test_the_session_carries_its_key_to_roon(self):
         api = fake_api()
         s = FakeSession(api)

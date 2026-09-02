@@ -23,8 +23,9 @@ import http.client
 import logging
 import os
 import re
+import secrets
 import stat
-import tempfile
+import struct
 import threading
 import urllib.error
 import urllib.parse
@@ -53,7 +54,110 @@ MAX_CACHED = 10
 # exports no filesystem primitive able to bound it there.
 MAX_ART_BYTES = 1024 * 1024
 
+# Bounds on what the bytes DECODE to, which the byte cap above cannot see. A
+# few hundred bytes of PNG header can declare 30000x30000 -- 3.6 GB of RGBA in
+# whatever opens it, which here is ColorQuantizer inside the shared shell
+# process. The URL asks for 64x64; 2048 per side is a wide margin for a Core
+# that ignores the hint and returns a full-size cover, and still two orders of
+# magnitude below a bomb.
+MAX_ART_DIMENSION = 2048
+MAX_ART_PIXELS = MAX_ART_DIMENSION * MAX_ART_DIMENSION
+
+# How much of a cached file is read back to re-check its header. The daemon
+# wrote it, so the header is at the front; this is a page-cache read of at
+# most 64 KiB, once per snapshot.
+HEADER_WINDOW = 64 * 1024
+
 _SAFE_KEY = re.compile(r"[^A-Za-z0-9_-]")
+
+# Start-of-frame markers, which carry the dimensions. C4 (Huffman table), C8
+# (JPEG extensions) and CC (arithmetic coding conditioning) share the range
+# but are not frames.
+_SOF_MARKERS = frozenset(m for m in range(0xC0, 0xD0)
+                         if m not in (0xC4, 0xC8, 0xCC))
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def image_dimensions(data: bytes) -> tuple[int, int] | None:
+    """(width, height) if `data` opens with a PNG or JPEG header, else None.
+
+    Header parsing only -- nothing here decodes pixels, which is the whole
+    point: the daemon must decide whether the bytes are worth handing to a
+    decoder without running one. None means "not an image this daemon will
+    publish", which covers a wrong magic number, a truncated header, and a
+    frame header that never arrives. There is deliberately no "looks close
+    enough" branch: the two JPEG magic bytes followed by junk is exactly the
+    shape a refusal has to catch.
+    """
+    if data.startswith(_PNG_MAGIC):
+        if len(data) < 24 or data[12:16] != b"IHDR":
+            return None
+        width, height = struct.unpack(">II", data[16:24])
+        return (width, height) if width and height else None
+    if data.startswith(b"\xff\xd8"):
+        return _jpeg_dimensions(data)
+    return None
+
+
+def _jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
+    """Walk JPEG segments to the first start-of-frame and read its size."""
+    i, end = 2, len(data)
+    while i + 3 < end:
+        if data[i] != 0xFF:
+            return None                     # not at a marker; refuse
+        marker = data[i + 1]
+        if marker == 0xFF:
+            i += 1                          # fill byte
+            continue
+        if marker == 0x01 or 0xD0 <= marker <= 0xD9:
+            i += 2                          # standalone: no length follows
+            continue
+        if marker == 0xDA:
+            return None                     # entropy data; no frame header
+        (length,) = struct.unpack(">H", data[i + 2:i + 4])
+        if length < 2:
+            return None
+        if marker in _SOF_MARKERS:
+            if i + 9 > end:
+                return None
+            height, width = struct.unpack(">HH", data[i + 5:i + 9])
+            return (width, height) if width and height else None
+        i += 2 + length
+    return None
+
+
+def _within_bounds(dims: tuple[int, int]) -> bool:
+    width, height = dims
+    if width > MAX_ART_DIMENSION or height > MAX_ART_DIMENSION:
+        return False
+    return width * height <= MAX_ART_PIXELS
+
+
+def _origin(url: str) -> tuple:
+    parts = urllib.parse.urlsplit(url)
+    return (parts.scheme, parts.hostname, parts.port)
+
+
+class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only when it stays on the Core.
+
+    urlopen's default handler follows any 30x to http, https or ftp. Since
+    whatever answers on the configured host:port decides the response, that
+    handed it the daemon's HTTP client as a proxy: one Location header and
+    the fetch goes to another LAN device, or to a service bound to loopback
+    that trusts local callers. Returning None leaves the redirect unhandled,
+    which raises HTTPError -- already on fetch()'s refusal path.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _origin(newurl) != _origin(req.full_url):
+            LOG.warning("refusing art redirect off the Core to %s",
+                        urllib.parse.urlsplit(newurl).netloc)
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(_SameOriginRedirect)
 
 
 def _safe_name(image_key: str) -> str:
@@ -78,16 +182,29 @@ def fetch(host: str, http_port: int, image_key: str, dest: str) -> bool:
     """Fetch a 64px copy of `image_key`'s art into `dest`.
 
     Returns whether it succeeded. Never raises: a network error, a timeout,
-    a non-2xx response, or a malformed/truncated body all end in a logged
-    warning and `False`, so a bad fetch degrades to `art_path: null` instead
-    of taking the daemon down.
+    a non-2xx response, a redirect off the Core, a malformed/truncated body
+    or a body that is not a small image all end in a logged warning and
+    `False`, so a bad fetch degrades to `art_path: null` instead of taking
+    the daemon down.
     """
     url = _image_url(host, http_port, image_key)
+    directory = os.path.dirname(dest)
+    name = os.path.basename(dest)
+    dir_fd = None
     tmp = None
+    placed = False
     try:
-        directory = os.path.dirname(dest)
         os.makedirs(directory, mode=0o700, exist_ok=True)
-        with urllib.request.urlopen(url, timeout=FETCH_TIMEOUT) as response:
+        # Opened once and written through, the same contract config.py uses:
+        # every create and the rename below resolve against THIS descriptor,
+        # so the walk happens once and cannot resolve differently the second
+        # time. O_NOFOLLOW refuses a symlinked art directory outright.
+        dir_fd = os.open(directory,
+                         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+
+        # _OPENER, not urlopen: its redirect handler refuses to leave the
+        # Core's origin. See _SameOriginRedirect.
+        with _OPENER.open(url, timeout=FETCH_TIMEOUT) as response:
             # One byte past the cap, so "at the limit" and "over it" are
             # distinguishable without reading the rest of an endless body.
             data = response.read(MAX_ART_BYTES + 1)
@@ -96,32 +213,56 @@ def fetch(host: str, http_port: int, image_key: str, dest: str) -> bool:
                         image_key, MAX_ART_BYTES)
             return False
 
-        # mkstemp, not `dest + ".tmp"`. The predictable name was openable with
-        # a plain "wb", which follows a symlink -- so anything able to plant
-        # one at that path redirected the daemon's write to its target. mkstemp
-        # creates O_EXCL at 0600 under a name nothing can guess, so there is
-        # nothing to pre-plant. Same directory as `dest`, because os.replace is
-        # only atomic within one filesystem.
-        handle_fd, tmp = tempfile.mkstemp(dir=directory, prefix=".art-", suffix=".tmp")
+        # The byte cap says nothing about what the bytes ARE. Whatever
+        # answers on that host:port chose this body, and the file written
+        # below is decoded by ColorQuantizer inside the shared shell
+        # process -- so an HTML error page, a shell script, or a header
+        # declaring 30000x30000 must be refused here, before it is written.
+        dims = image_dimensions(data)
+        if dims is None:
+            LOG.warning("art for %s is not a PNG or JPEG; refusing it",
+                        image_key)
+            return False
+        if not _within_bounds(dims):
+            LOG.warning("art for %s declares %dx%d, past the %d limit; "
+                        "refusing it", image_key, dims[0], dims[1],
+                        MAX_ART_DIMENSION)
+            return False
+
+        # An unguessable name created O_EXCL|O_NOFOLLOW. The predictable
+        # `dest + ".tmp"` this replaced was openable with a plain "wb",
+        # which follows a symlink -- so anything able to plant one at that
+        # path redirected the daemon's write to its target. Same directory
+        # as `dest`, because os.replace is only atomic within one filesystem.
+        tmp = ".art-%s.tmp" % secrets.token_hex(8)
+        handle_fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                            | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
         with os.fdopen(handle_fd, "wb") as handle:
             handle.write(data)
-        os.replace(tmp, dest)  # atomic: a concurrent reader never sees a partial file
-        tmp = None             # replaced, so the finally must not unlink it
+        # Atomic: a concurrent reader never sees a partial file.
+        os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        placed = True
         return True
-    except (OSError, urllib.error.URLError, http.client.HTTPException, ValueError):
-        # OSError/URLError cover network failures and non-2xx responses;
-        # http.client.HTTPException (e.g. IncompleteRead on a truncated
-        # body) is a *sibling* of OSError, not a subclass of it, so it needs
-        # naming explicitly or it would slip past this handler and crash the
-        # fetch thread.
+    except (OSError, urllib.error.URLError, http.client.HTTPException,
+            ValueError):
+        # OSError/URLError cover network failures, non-2xx responses and the
+        # HTTPError a refused redirect raises; http.client.HTTPException
+        # (e.g. IncompleteRead on a truncated body) is a *sibling* of
+        # OSError, not a subclass of it, so it needs naming explicitly or it
+        # would slip past this handler and crash the fetch thread.
         LOG.warning("art fetch failed for %s", image_key, exc_info=True)
         return False
     finally:
         # _prune deliberately skips *.tmp, so nothing else would ever collect
         # an orphan left by a failed fetch.
-        if tmp is not None:
+        if tmp is not None and not placed and dir_fd is not None:
             try:
-                os.unlink(tmp)
+                os.unlink(tmp, dir_fd=dir_fd)
+            except OSError:
+                pass
+        if dir_fd is not None:
+            try:
+                os.close(dir_fd)
             except OSError:
                 pass
 
@@ -135,27 +276,44 @@ def is_publishable(path: str) -> bool:
     primitive that could bound it on that side, so the bound is enforced here,
     before the path reaches QML.
 
-    `os.lstat`, never `os.path.exists`: exists() FOLLOWS a symlink, so the
-    check it replaced happily published one, and the shell would then read
-    whatever it aimed at. lstat describes the link itself.
+    Answered from a DESCRIPTOR, not from the path: the file is opened
+    `O_NOFOLLOW` and every question -- regular file, size, image header -- is
+    asked of that one open file. The `os.lstat(path)` this replaced described
+    a file the process never opened, so nothing tied the thing inspected to
+    the thing that existed a moment later. `O_NONBLOCK` so a FIFO planted here
+    fails the S_ISREG check instead of blocking this open until someone writes
+    to it.
 
-    Rejects a non-regular file for a different reason than size: a FIFO planted
-    at this path would block whoever opened it, and that is the shell.
+    The header is re-read rather than trusted from fetch time, because the
+    threat is a file swapped after it was written.
 
-    A residual remains and is worth naming rather than papering over: this is a
-    check, and the shell opens the path afterwards, so a same-user race can
-    still swap the file in between. Closing that would need an open-time
-    guarantee (O_NOFOLLOW) on the reader's side, and the reader is Qt. The
-    cache directory is 0700, so the race needs an actor who is already the
-    user.
+    A residual remains and is worth naming rather than papering over: the
+    SHELL opens this path afterwards, by name, so a same-user race can still
+    swap the file in between. Closing that would need an open-time guarantee
+    on the reader's side, and the reader is Qt. The cache directory is 0700,
+    so the race needs an actor who is already the user.
     """
+    fd = None
     try:
-        info = os.lstat(path)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return False
+        if info.st_size > MAX_ART_BYTES:
+            return False
+        with os.fdopen(fd, "rb") as handle:
+            fd = None                       # the file object owns it now
+            header = handle.read(HEADER_WINDOW)
     except OSError:
         return False
-    if not stat.S_ISREG(info.st_mode):
-        return False
-    return info.st_size <= MAX_ART_BYTES
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    dims = image_dimensions(header)
+    return dims is not None and _within_bounds(dims)
 
 
 def _prune(directory: str, keep: str, max_files: int = MAX_CACHED) -> None:
