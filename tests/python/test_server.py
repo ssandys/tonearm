@@ -80,8 +80,10 @@ class TestServer(unittest.TestCase):
 
         self.assertTrue(entered_snapshot.wait(3), "handler never reached snapshot()")
 
-        # Racer blocks on Server._lock until the handshake (reply + register)
-        # finishes -- that is the property under test.
+        # The racer blocks on this subscriber's own send lock until the
+        # handshake finishes, NOT on Server._lock -- which the handshake no
+        # longer holds across snapshot() or the write. Ordering is the
+        # property under test; which lock enforces it is not.
         racer = threading.Thread(
             target=self.srv.broadcast, args=({"v": 1, "status": "racing"},))
         racer.start()
@@ -174,8 +176,161 @@ class TestServer(unittest.TestCase):
         srv.shutdown()
 
 
-if __name__ == "__main__":
-    unittest.main()
+# --- hardening: marketplace security review 2026-09-01 -------------------
+#
+# "The thread-per-client Unix socket has no connection cap or read/write
+# deadline, and subscriber `sendall()` can block while the global lock is
+# held."
+
+
+class _StalledPeer:
+    """A subscriber whose sendall() blocks until released.
+
+    A real peer that stops reading needs ~200 KiB of queued broadcast before
+    its socket buffer fills, which makes the timing of the property under
+    test depend on the kernel's default wmem. This blocks on command
+    instead, the same way the existing handshake-race test above blocks
+    snapshot() on command rather than hoping timing exposes the bug.
+    """
+
+    def __init__(self):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def sendall(self, blob):
+        self.entered.set()
+        self.release.wait(5)
+
+    def settimeout(self, timeout):
+        pass
+
+    def close(self):
+        pass
+
+
+class TestServerBounds(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        os.environ["XDG_RUNTIME_DIR"] = self.tmp.name
+        # Restore every bound this class lowers, so a failure mid-test cannot
+        # leave a 0.3s request deadline in place for the rest of the suite.
+        for name in ("REQUEST_TIMEOUT", "MAX_CONNECTIONS", "MAX_SUBSCRIBERS"):
+            self.addCleanup(setattr, server, name, getattr(server, name))
+        self.session = FakeSession()
+
+    def _server(self):
+        srv = server.Server(self.session)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        for _ in range(200):
+            if os.path.exists(server.socket_path()):
+                break
+            time.sleep(0.01)
+        self.addCleanup(srv.shutdown)
+        return srv
+
+    def _connect(self, timeout=5):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect(server.socket_path())
+        self.addCleanup(sock.close)
+        return sock
+
+    def test_a_silent_client_is_hung_up_on_rather_than_pinning_a_thread(self):
+        # A client that connects and never sends a newline held its handler
+        # thread in readline() forever. No packet is larger than any other,
+        # and nothing ever timed it out -- so N such connections cost N
+        # permanently parked threads.
+        server.REQUEST_TIMEOUT = 0.3
+        self._server()
+        sock = self._connect()
+        started = time.monotonic()
+        self.assertEqual(sock.recv(4096), b"")
+        self.assertLess(time.monotonic() - started, 3.0)
+
+    def test_concurrent_connections_are_capped(self):
+        # accept() spawned a thread per connection with no ceiling. Past the
+        # cap the daemon must refuse immediately rather than keep spawning.
+        server.REQUEST_TIMEOUT = 30.0     # the held slots must not just expire
+        server.MAX_CONNECTIONS = 2
+        self._server()
+        held = [self._connect() for _ in range(2)]
+        for sock in held:
+            sock.sendall(b'{"cmd": "sub')  # a partial line: parks in readline()
+        time.sleep(0.2)
+
+        overflow = self._connect()
+        started = time.monotonic()
+        self.assertEqual(overflow.recv(4096), b"")
+        self.assertLess(time.monotonic() - started, 3.0,
+                        "the overflow connection was queued, not refused")
+
+    def test_subscribers_are_capped(self):
+        server.MAX_SUBSCRIBERS = 2
+        self._server()
+        for _ in range(2):
+            sock = self._connect()
+            sock.sendall(b'{"cmd":"subscribe"}\n')
+            self.assertIn('"status"', sock.makefile("r").readline())
+
+        overflow = self._connect()
+        overflow.sendall(b'{"cmd":"subscribe"}\n')
+        self.assertEqual(overflow.makefile("r").readline(), "")
+
+    def test_a_non_object_request_is_refused_like_malformed_input(self):
+        # `3\n` is valid JSON but not a request. request.get() then raised
+        # AttributeError, which no handler caught: the thread died WITHOUT
+        # closing the connection, leaking the socket and leaving the client
+        # blocked on a reply that never came.
+        self._server()
+        for body in (b"3\n", b'"subscribe"\n', b"[1,2]\n", b"null\n"):
+            sock = self._connect()
+            sock.sendall(body)
+            self.assertEqual(sock.recv(4096), b"", "not closed for %r" % body)
+
+    def test_a_stalled_subscriber_does_not_block_a_new_subscribe(self):
+        # broadcast() serialized the payload before taking the lock, but then
+        # ran sendall() INSIDE it -- so one peer that had stopped reading
+        # stalled every other subscriber and every new subscribe for as long
+        # as it took to time out. The send must happen outside the lock.
+        srv = self._server()
+        stalled = _StalledPeer()
+        srv._subscribers.append(server._Subscriber(stalled))
+
+        broadcaster = threading.Thread(
+            target=srv.broadcast, args=({"v": 1, "status": "connecting"},))
+        broadcaster.start()
+        self.addCleanup(stalled.release.set)
+        self.addCleanup(broadcaster.join, 5)
+        self.assertTrue(stalled.entered.wait(3), "broadcast never reached the peer")
+
+        # The stalled peer is mid-sendall. A fresh subscribe must still
+        # complete: it needs the subscriber list, which nothing is holding.
+        sock = self._connect()
+        sock.sendall(b'{"cmd":"subscribe"}\n')
+        self.assertIn('"status"', sock.makefile("r").readline())
+
+    def test_a_stalled_subscriber_does_not_block_delivery_to_a_healthy_one(self):
+        srv = self._server()
+        healthy = self._connect()
+        healthy.sendall(b'{"cmd":"subscribe"}\n')
+        reader = healthy.makefile("r")
+        reader.readline()                       # the initial snapshot
+
+        stalled = _StalledPeer()
+        srv._subscribers.insert(0, server._Subscriber(stalled))
+        self.addCleanup(stalled.release.set)
+
+        broadcaster = threading.Thread(
+            target=srv.broadcast, args=({"v": 1, "status": "unreachable"},))
+        broadcaster.start()
+        self.addCleanup(broadcaster.join, 5)
+        self.assertTrue(stalled.entered.wait(3))
+
+        # Ahead of the healthy peer in the list, and still blocked. The
+        # healthy peer must be served anyway.
+        self.assertEqual(json.loads(reader.readline())["status"], "unreachable")
 
 
 class TestRequestLineIsBounded(unittest.TestCase):
@@ -249,3 +404,7 @@ class TestRequestLineIsBounded(unittest.TestCase):
         sock.sendall(b'{"cmd": "status"}\n')
         reply = sock.makefile("r").readline()
         self.assertIn('"status"', reply)
+
+
+if __name__ == "__main__":
+    unittest.main()
