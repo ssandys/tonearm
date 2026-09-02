@@ -64,7 +64,7 @@ def main() -> int:
 
     def shutdown(_signum, _frame):
         raw_session.stop()
-        srv.shutdown()
+        srv.shutdown()   # clears srv.running, so supervise() stays quiet
 
         async def _teardown():
             # Withdraw the MPRIS name rather than leave it advertising a
@@ -79,7 +79,20 @@ def main() -> int:
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    def on_server_failure() -> None:
+        """Bring the daemon down so systemd's Restart=on-failure can fire.
+
+        The socket IS this daemon's purpose, so unlike MPRIS below -- which
+        is deliberately not load-bearing -- losing it must be visible. On a
+        daemon thread it was not: the loop below kept running, systemd kept
+        reporting the unit active, and the bar sat on a stale track with
+        nothing retrying. See tonearm_lib.server.supervise.
+        """
+        holder["failed"] = True
+        loop.call_soon_threadsafe(loop.stop)
+
+    threading.Thread(target=server.supervise, args=(srv, on_server_failure),
+                     daemon=True).start()
     raw_session.start()
 
     async def boot():
@@ -103,7 +116,10 @@ def main() -> int:
         loop.run_forever()
     finally:
         loop.close()
-    return 0
+    # Non-zero only when the socket server died on its own. A clean SIGTERM
+    # leaves this unset, so `systemctl --user stop` still exits 0 and does
+    # not trip Restart=on-failure.
+    return 1 if holder.get("failed") else 0
 
 
 if __name__ == "__main__":

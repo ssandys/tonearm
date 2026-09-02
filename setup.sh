@@ -43,6 +43,16 @@ fi
 
 mkdir -p "$unit_dir"
 
+# The daemon's state directory (Core address, pairing token, pinned zone).
+# Created HERE rather than by the daemon because the unit runs with
+# ProtectSystem=strict and ProtectHome=read-only: $HOME is read-only inside
+# the sandbox, and systemd refuses to start a unit whose ReadWritePaths names
+# a path that does not exist -- failing at step NAMESPACE before the process
+# runs at all. chmod as well as mkdir, since mkdir -p leaves an existing
+# directory's mode alone and this one holds the token.
+mkdir -p "$HOME/.config/tonearm"
+chmod 700 "$HOME/.config/tonearm"
+
 # `cp` FOLLOWS a symlink at its destination, so a link planted at the unit path
 # would redirect this write to whatever it names. Refuse rather than write.
 if [[ -L "$target_unit" ]]; then

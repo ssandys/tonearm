@@ -56,6 +56,13 @@ MAX_SUBSCRIBERS = 16
 # here rather than wherever it lands. Real keys are "widget", "mcp", "cli".
 MAX_SESSION_KEY = 64
 
+# How often the accept loop wakes to re-check whether it should still be
+# running. Closing the listening socket does NOT interrupt another thread
+# already blocked in accept(), so without this shutdown() sets a flag nobody
+# ever reads again and the thread stays parked. It was masked in production
+# only because the thread is daemon=True and the process was exiting anyway.
+ACCEPT_POLL = 0.25
+
 
 class _Subscriber:
     """One registered subscriber, with its own write lock.
@@ -95,6 +102,37 @@ def socket_path() -> str:
     return os.path.join(runtime_dir(), "sock")
 
 
+def supervise(srv, on_failure) -> None:
+    """Run `srv.serve_forever()`, calling `on_failure()` if it ever stops unbidden.
+
+    The server runs on a daemon thread, so without this its death is
+    invisible: the entrypoint's asyncio loop keeps running, systemd still
+    sees an active unit, and Restart=on-failure never fires. Measured under
+    a hardened unit -- an OSError on the bind path left the process
+    `active`, NRestarts 0, and no socket on disk. The bar sits on a stale
+    track forever with nothing retrying, which is exactly the outcome the
+    unit file's own StartLimitIntervalSec comment calls worse than a visible
+    failure.
+
+    A deliberate shutdown() closes the listener, so accept() raises and
+    serve_forever returns on the ordinary SIGTERM path -- told apart by
+    `srv.running`, which shutdown() clears first. Reporting that as a
+    failure would make every clean stop exit non-zero and have systemd
+    restart a daemon the user just stopped.
+
+    MPRIS is deliberately not load-bearing (see scripts/tonearmd). The
+    socket is the daemon's entire purpose, so the opposite rule applies.
+    """
+    try:
+        srv.serve_forever()
+    except BaseException:
+        LOG.exception("socket server crashed")
+    if not srv.running:
+        return
+    LOG.error("socket server stopped unexpectedly")
+    on_failure()
+
+
 class Server:
     def __init__(self, session) -> None:
         self._session = session
@@ -102,6 +140,11 @@ class Server:
         self._lock = threading.Lock()
         self._sock: socket.socket | None = None
         self._running = False
+
+    @property
+    def running(self) -> bool:
+        """False once shutdown() has been called. See supervise()."""
+        return self._running
 
     def serve_forever(self) -> None:
         path = socket_path()
@@ -115,6 +158,9 @@ class Server:
         self._sock.bind(path)
         os.chmod(path, 0o600)
         self._sock.listen(16)
+        # See ACCEPT_POLL: this is what makes shutdown() actually reach a
+        # thread already blocked in accept().
+        self._sock.settimeout(ACCEPT_POLL)
         self._running = True
         # Read at start, not at import, so the bound is one number to change
         # and tests can lower it. BoundedSemaphore, not Semaphore: a release
@@ -124,6 +170,8 @@ class Server:
         while self._running:
             try:
                 conn, _ = self._sock.accept()
+            except TimeoutError:
+                continue          # nothing waiting; re-check self._running
             except OSError:
                 break
             if not slots.acquire(blocking=False):

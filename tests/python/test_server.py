@@ -408,3 +408,79 @@ class TestRequestLineIsBounded(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestServerFailureIsVisible(unittest.TestCase):
+    """A dead socket server must become a dead process.
+
+    The server runs on a daemon=True thread, so its death is invisible:
+    the asyncio loop in scripts/tonearmd keeps running, systemd still sees
+    an active unit, and Restart=on-failure never fires. Measured under a
+    hardened unit on 2026-09-02 -- an OSError on the bind path left the
+    process `active`, NRestarts 0, and no socket on disk. The bar would sit
+    on a stale track forever with nothing retrying, which is the exact
+    outcome systemd/tonearmd.service's own StartLimitIntervalSec comment
+    calls worse than a visible failure.
+
+    MPRIS is deliberately NOT load-bearing (scripts/tonearmd catches
+    everything around it). The socket is the daemon's entire purpose, so
+    the opposite rule applies to it.
+    """
+
+    class _Boom:
+        running = True
+
+        def serve_forever(self):
+            raise OSError("bind failed")
+
+    class _ReturnsEarly:
+        running = True
+
+        def serve_forever(self):
+            return
+
+    class _StoppedDeliberately:
+        running = False
+
+        def serve_forever(self):
+            return
+
+    def test_a_crashing_server_reports_failure(self):
+        called = []
+        server.supervise(self._Boom(), lambda: called.append(True))
+        self.assertEqual(called, [True])
+
+    def test_a_server_that_returns_while_running_reports_failure(self):
+        # accept() falling out of the loop without shutdown() is just as
+        # dead as a raised exception, and was just as silent.
+        called = []
+        server.supervise(self._ReturnsEarly(), lambda: called.append(True))
+        self.assertEqual(called, [True])
+
+    def test_a_deliberate_shutdown_reports_nothing(self):
+        # shutdown() closes the listener, so accept() raises and
+        # serve_forever returns -- on the ordinary SIGTERM path. That must
+        # not be reported as a failure or every clean stop exits non-zero
+        # and systemd restarts a daemon the user just stopped.
+        called = []
+        server.supervise(self._StoppedDeliberately(), lambda: called.append(True))
+        self.assertEqual(called, [])
+
+    def test_a_real_server_shutting_down_reports_nothing(self):
+        # The fakes above assert the contract; this asserts the real Server
+        # actually satisfies it, so `running` cannot drift from shutdown().
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["XDG_RUNTIME_DIR"] = tmp
+            srv = server.Server(FakeSession())
+            called = []
+            thread = threading.Thread(
+                target=server.supervise, args=(srv, lambda: called.append(True)))
+            thread.start()
+            for _ in range(200):
+                if os.path.exists(server.socket_path()):
+                    break
+                time.sleep(0.01)
+            srv.shutdown()
+            thread.join(5)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(called, [])
