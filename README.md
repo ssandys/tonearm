@@ -96,6 +96,10 @@ Constraints on that scan:
   a routing lookup — on a host running a VPN, the usual "UDP-connect to a
   scratch address" trick returns the tunnel's address and would point the scan
   at an unrelated subnet.
+- **At most 512 addresses, total.** That is a ceiling on the whole run, not per
+  interface, and the list is deduplicated first, so two interfaces sharing a
+  subnet probe it once rather than twice. A machine with more qualifying
+  interfaces than that stops at the budget and logs it.
 
 **After that**, the only traffic is to your Core: a WebSocket to port 9330 for
 the Roon MOO protocol, and HTTP GETs to the same host for album art.

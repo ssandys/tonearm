@@ -60,7 +60,9 @@ instruction to the user. tonearm installs nothing.
 Roon Core: SOOD multicast first, and — because many networks filter multicast —
 falling back to opening a TCP connection to one port (9330) on each address in
 the local `/24`. That scan is bounded to interfaces whose own IPv4 address is
-`ipaddress.is_private`, and the subnet is taken from the interfaces themselves
+`ipaddress.is_private`, deduplicated across interfaces, and capped at 512
+addresses for the whole run (`sood.MAX_SCAN_HOSTS`) rather than 254 per
+qualifying interface; the subnet is taken from the interfaces themselves
 rather than a routing lookup, which a VPN would otherwise poison. The result is
 cached in `~/.config/tonearm/config.json` and never scanned again. After that
 the only traffic is to the Core: one WebSocket for Roon's MOO protocol and HTTP

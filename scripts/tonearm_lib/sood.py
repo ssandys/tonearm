@@ -18,6 +18,7 @@ rather than from a routing decision; see `_local_networks`.
 from __future__ import annotations
 
 import ipaddress
+import logging
 import socket
 import struct
 import time
@@ -31,11 +32,21 @@ except ImportError:  # pragma: no cover - not exercised on Linux, the only
                       # platform this daemon ships on
     fcntl = None
 
+LOG = logging.getLogger("tonearmd.sood")
+
 SOOD_PORT = 9003
 SOOD_MULTICAST = "239.255.90.90"
 SERVICE_ID = "00720724-5143-4a9b-abac-0e50cba674bb"
 DEFAULT_TCP_PORT = 9150
 DEFAULT_HTTP_PORT = 9330
+
+# Hard ceiling on how many hosts one discovery run may touch, across every
+# interface together. The private-address restriction below decides WHICH
+# /24s qualify; it says nothing about how many, so on its own a machine with
+# several qualifying interfaces sent 254 connect attempts per interface with
+# no ceiling at all. 512 covers the two subnets a normal host has (a wired
+# and a wireless leg, 508 hosts) and stops there.
+MAX_SCAN_HOSTS = 512
 
 
 def _tlv(key: str, value: str) -> bytes:
@@ -171,9 +182,39 @@ def _local_networks() -> list[ipaddress.IPv4Network]:
         addr = _iface_ipv4(name)
         if addr:
             net = ipaddress.ip_network(addr + "/24", strict=False)
-            if net.is_private:
+            # Deduplicated here as well as in _scan_targets: bonded and
+            # aliased interfaces share a subnet, and reporting it twice
+            # spent half the scan budget re-probing machines already probed.
+            if net.is_private and net not in nets:
                 nets.append(net)
     return nets
+
+
+def _scan_targets(nets: list[ipaddress.IPv4Network],
+                  budget: int = None) -> list[str]:
+    """The addresses one discovery run may probe: deduplicated, and capped.
+
+    The budget is a TOTAL across every network, not a per-network allowance.
+    Networks are walked in address order so a truncated scan covers the same
+    hosts every run rather than a different arbitrary slice each time.
+    """
+    if budget is None:
+        budget = MAX_SCAN_HOSTS
+    seen: set[str] = set()
+    targets: list[str] = []
+    for net in sorted(set(nets)):
+        for host in net.hosts():
+            addr = str(host)
+            if addr in seen:
+                continue
+            seen.add(addr)
+            targets.append(addr)
+            if len(targets) >= budget:
+                LOG.warning(
+                    "discovery budget of %d hosts reached; not scanning the "
+                    "rest of %s", budget, ", ".join(str(n) for n in nets))
+                return targets
+    return targets
 
 
 def _port_open(host: str, port: int, timeout: float = 0.6) -> bool:
@@ -230,7 +271,7 @@ def discover(timeout: float = 6.0) -> list[dict]:
             net = ipaddress.ip_network(local + "/24", strict=False)
             if net.is_private:
                 nets = [net]
-    hosts = [str(h) for net in nets for h in net.hosts()]
+    hosts = _scan_targets(nets)
     with ThreadPoolExecutor(max_workers=128) as pool:
         candidates = [
             host for host, is_open
