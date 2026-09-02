@@ -73,6 +73,12 @@ APPINFO = {
 # the widget uses one, tonearmd-mcp uses one, and `tonearm browse` uses one.
 MAX_BROWSE_SESSIONS = 8
 
+# Longest zone id accepted from a client. Roon's are UUID-shaped, around 36
+# characters. This is the only wire argument that reaches persistent state
+# (the pin, written to config.json), so it is bounded where it is used rather
+# than trusted to be reasonable.
+MAX_ZONE_ID = 128
+
 # Seconds to wait for one port to answer the MOO/WS handshake before giving
 # up on it, when a token is ALREADY known (a paired reconnect). Measured
 # against yavin (Roon 2.71 build 1683): the SOOD-advertised tcp_port (9150)
@@ -650,6 +656,13 @@ class RoonSession:
         if zone_id is None:
             self._arbiter.unpin()
         else:
+            if not isinstance(zone_id, str) or len(zone_id) > MAX_ZONE_ID:
+                # Refused, not truncated. This value is persisted, and one
+                # large enough would push config.json past
+                # config.MAX_CONFIG_BYTES -- so the next start would refuse
+                # the whole file, lose the Core address and re-run discovery.
+                LOG.warning("dropping zone pin: bad zone id")
+                return
             self._arbiter.pin(zone_id)
         self._cfg["pinned_zone_id"] = zone_id
         config.save(self._cfg)
