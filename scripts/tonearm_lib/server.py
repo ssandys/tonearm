@@ -56,6 +56,11 @@ MAX_SUBSCRIBERS = 16
 # here rather than wherever it lands. Real keys are "widget", "mcp", "cli".
 MAX_SESSION_KEY = 64
 
+# Longest search term forwarded to the Core. The widget sends what the user
+# typed; a term measured in kilobytes is not a search, and every one of them
+# was a round trip the daemon made a Core do on a client's say-so.
+MAX_SEARCH_TERM = 512
+
 # How often the accept loop wakes to re-check whether it should still be
 # running. Closing the listening socket does NOT interrupt another thread
 # already blocked in accept(), so without this shutdown() sets a flag nobody
@@ -100,6 +105,15 @@ def runtime_dir() -> str:
 
 def socket_path() -> str:
     return os.path.join(runtime_dir(), "sock")
+
+
+def _bad_field(name: str, value, limit: int) -> str | None:
+    """Why `value` is not an acceptable `name`, or None if it is fine."""
+    if not isinstance(value, str):
+        return "%s must be a string" % name
+    if len(value) > limit:
+        return "%s must be at most %d characters" % (name, limit)
+    return None
 
 
 def supervise(srv, on_failure) -> None:
@@ -272,21 +286,18 @@ class Server:
             payload.pop("cmd", None)
             key = payload.pop("session", None) or "widget"
             op = payload.pop("op", None) or ""
-            if not isinstance(key, str) or len(key) > MAX_SESSION_KEY:
-                # Refused rather than coerced: the daemon keys browse state
-                # on this, so a client that sent something else has a bug
-                # worth reporting back, and str() of a dict would silently
-                # become a perfectly good cache key.
-                LOG.warning("refusing browse: bad session key")
-                blob = (json.dumps({
-                    "v": 1, "ok": False, "error": "bad_request",
-                    "message": "session must be a string of at most %d "
-                               "characters" % MAX_SESSION_KEY}) + "\n").encode()
-                try:
-                    conn.sendall(blob)
-                except OSError:
-                    pass
-                conn.close()
+            # Refused rather than coerced. The daemon keys long-lived browse
+            # state on `session` and forwards `term` to the Core, so a client
+            # that sent the wrong shape has a bug worth reporting back --
+            # and str() of a dict makes a perfectly good cache key.
+            complaint = _bad_field("session", key, MAX_SESSION_KEY)
+            if complaint is None and "term" in payload:
+                complaint = _bad_field("term", payload["term"], MAX_SEARCH_TERM)
+            if complaint is not None:
+                LOG.warning("refusing browse: %s", complaint)
+                self._reply_once(conn, {"v": 1, "ok": False,
+                                        "error": "bad_request",
+                                        "message": complaint})
                 return
             # Serialization is deliberately INSIDE this guarded region, not
             # a separate step after it. `json.dumps` on a reply that
@@ -376,6 +387,14 @@ class Server:
                 # than left in the list writing to a socket nobody closed.
                 LOG.warning("subscriber handshake failed", exc_info=True)
                 self._drop(sub)
+
+    def _reply_once(self, conn: socket.socket, payload: dict) -> None:
+        """Send one JSON line and close. Used by the request-refusal paths."""
+        try:
+            conn.sendall((json.dumps(payload) + "\n").encode())
+        except OSError:
+            pass
+        conn.close()
 
     def _drop(self, sub: "_Subscriber") -> None:
         with self._lock:

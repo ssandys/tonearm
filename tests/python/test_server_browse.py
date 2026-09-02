@@ -215,3 +215,34 @@ class TestSessionKeyIsConstrained(unittest.TestCase):
         session = StubSession()
         roundtrip(session, {"cmd": "browse", "op": "home"})
         self.assertEqual(session.seen[0][0], "widget")
+
+
+class TestSearchTermIsBounded(unittest.TestCase):
+    """`term` is forwarded to the Core, and was accepted at any size.
+
+    `session.search(kwargs.get("term") or "")` took whatever arrived, so a
+    client could push most of a 64 KiB request line at the Core on every
+    keystroke-shaped request. A search term that long is not a search.
+    """
+
+    def test_an_over_long_term_is_refused(self):
+        session = StubSession()
+        reply = roundtrip(session, {"cmd": "browse", "op": "search",
+                                    "term": "t" * (server.MAX_SEARCH_TERM + 1)})
+        self.assertFalse(reply["ok"])
+        self.assertEqual(reply["error"], "bad_request")
+        self.assertEqual(session.seen, [])
+
+    def test_a_term_that_is_not_a_string_is_refused(self):
+        session = StubSession()
+        reply = roundtrip(session, {"cmd": "browse", "op": "search",
+                                    "term": ["not", "a", "string"]})
+        self.assertFalse(reply["ok"])
+        self.assertEqual(reply["error"], "bad_request")
+        self.assertEqual(session.seen, [])
+
+    def test_an_ordinary_term_is_passed_through_unchanged(self):
+        session = StubSession()
+        roundtrip(session, {"cmd": "browse", "op": "search",
+                            "term": "oingo boingo"})
+        self.assertEqual(session.seen[0][2]["term"], "oingo boingo")

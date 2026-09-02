@@ -24,6 +24,26 @@ test("imageUrl returns empty string with no key", () => {
   assert.strictEqual(M.imageUrl(CORE, null, 64), "")
 })
 
+// --- hardening: the widget side of the same rule the daemon already applies.
+// art.py percent-encodes image_key before building its URL ("image_key is
+// untrusted (it comes from the Core)"). Model.js interpolated it raw, and the
+// URL it produces is handed to Image.source inside the shared shell process.
+test("imageUrl percent-encodes a key carrying URL syntax", () => {
+  const url = M.imageUrl(CORE, "a/b?c#d", 64)
+  assert.ok(url.indexOf("/api/image/a%2Fb%3Fc%23d?") > 0, url)
+})
+
+test("imageUrl keeps the caller's query parameters intact", () => {
+  // A key containing ? or & must not be able to add or replace scale/width.
+  const url = M.imageUrl(CORE, "k&width=99999", 64)
+  assert.ok(url.indexOf("width=64") > 0, url)
+  assert.strictEqual(url.split("width=").length, 2, url)
+})
+
+test("imageUrl leaves an ordinary key unchanged", () => {
+  assert.ok(M.imageUrl(CORE, "abc123", 64).indexOf("/api/image/abc123?") > 0)
+})
+
 test("imageUrl falls back to port 9330", () => {
   assert.ok(M.imageUrl({ host: "h" }, "k", 32).indexOf(":9330/") > 0)
 })
