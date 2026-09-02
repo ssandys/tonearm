@@ -15,6 +15,7 @@ import os
 import sys
 import threading
 import time
+from collections import OrderedDict
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vendor"))
 
@@ -66,6 +67,11 @@ APPINFO = {
     "publisher": "Sean Sandys",
     "email": "sean@onemanposse.com",
 }
+
+# Concurrent browse sessions kept in memory. The key is a wire field, so this
+# is a ceiling on what a client can make the daemon hold, not a tuning knob:
+# the widget uses one, tonearmd-mcp uses one, and `tonearm browse` uses one.
+MAX_BROWSE_SESSIONS = 8
 
 # Seconds to wait for one port to answer the MOO/WS handshake before giving
 # up on it, when a token is ALREADY known (a paired reconnect). Measured
@@ -221,7 +227,7 @@ class RoonSession:
         # far slower than a snapshot; sharing a lock with the publish path
         # would stall subscribers (spec 7.5).
         self._browse_lock = threading.Lock()
-        self._browse_sessions: dict = {}
+        self._browse_sessions: OrderedDict = OrderedDict()
         # Consecutive polls that found the socket down. A drop is only
         # reported once this reaches DOWN_SAMPLES, so a socket that closes and
         # reopens between two polls never reaches the bar.
@@ -580,15 +586,29 @@ class RoonSession:
         """One BrowseSession per multi_session_key, created on first use.
 
         Sessions are in-memory and lost on restart (spec 7.4); the widget's
-        next request rebuilds from root. Not bounded today because only the
-        widget uses one -- add an LRU cap if consumers multiply (spec 11).
+        next request rebuilds from root.
+
+        Bounded at MAX_BROWSE_SESSIONS, least-recently-used evicted first.
+        `key` is a wire field -- server.py takes it from the request -- so an
+        unbounded store meant any local process able to open the socket could
+        allocate Roon browse state without limit, one entry per distinct
+        string it sent. Eviction is by USE rather than insertion so the
+        widget's long-lived session survives a burst of new keys; an evicted
+        consumer rebuilds from root on its next request, which is the same
+        thing a daemon restart already does to it.
         """
         with self._browse_lock:
             existing = self._browse_sessions.get(key)
             if existing is None:
                 existing = browse.BrowseSession(
                     self._api, key, self.selected_zone_id)
-                self._browse_sessions[key] = existing
+            else:
+                self._browse_sessions.pop(key)
+            self._browse_sessions[key] = existing      # newest at the end
+            while len(self._browse_sessions) > MAX_BROWSE_SESSIONS:
+                evicted, _ = self._browse_sessions.popitem(last=False)
+                LOG.info("evicting least recently used browse session %r",
+                         evicted)
             return existing
 
     def browse(self, key: str, op: str, **kwargs) -> dict:

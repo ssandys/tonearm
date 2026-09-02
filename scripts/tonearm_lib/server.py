@@ -51,6 +51,11 @@ MAX_CONNECTIONS = 32
 # to an unbounded list under lock.
 MAX_SUBSCRIBERS = 16
 
+# Longest `session` key accepted on a browse request. The key names a
+# long-lived per-consumer browse state in the daemon, so its shape is settled
+# here rather than wherever it lands. Real keys are "widget", "mcp", "cli".
+MAX_SESSION_KEY = 64
+
 
 class _Subscriber:
     """One registered subscriber, with its own write lock.
@@ -219,6 +224,22 @@ class Server:
             payload.pop("cmd", None)
             key = payload.pop("session", None) or "widget"
             op = payload.pop("op", None) or ""
+            if not isinstance(key, str) or len(key) > MAX_SESSION_KEY:
+                # Refused rather than coerced: the daemon keys browse state
+                # on this, so a client that sent something else has a bug
+                # worth reporting back, and str() of a dict would silently
+                # become a perfectly good cache key.
+                LOG.warning("refusing browse: bad session key")
+                blob = (json.dumps({
+                    "v": 1, "ok": False, "error": "bad_request",
+                    "message": "session must be a string of at most %d "
+                               "characters" % MAX_SESSION_KEY}) + "\n").encode()
+                try:
+                    conn.sendall(blob)
+                except OSError:
+                    pass
+                conn.close()
+                return
             # Serialization is deliberately INSIDE this guarded region, not
             # a separate step after it. `json.dumps` on a reply that
             # contains something non-serializable raises TypeError -- if

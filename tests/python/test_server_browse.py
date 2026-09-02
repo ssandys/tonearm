@@ -177,3 +177,41 @@ class TestExistingVerbsStillWork(unittest.TestCase):
         s = StubSession()
         reply = roundtrip(s, {"cmd": "status"})
         self.assertEqual(reply["status"], "ok")
+
+
+class TestSessionKeyIsConstrained(unittest.TestCase):
+    """`session` is a wire field that becomes a long-lived dict key.
+
+    `key = payload.pop("session", None) or "widget"` passed whatever arrived
+    straight through: any string of any length, or a value that is not a
+    string at all. The daemon keys per-session Roon browse state on it, so
+    the wire boundary is where its shape has to be settled.
+    """
+
+    def test_an_over_long_session_key_is_refused(self):
+        session = StubSession()
+        reply = roundtrip(session, {"cmd": "browse", "op": "home",
+                                    "session": "k" * (server.MAX_SESSION_KEY + 1)})
+        self.assertFalse(reply["ok"])
+        self.assertEqual(reply["error"], "bad_request")
+        self.assertEqual(session.seen, [], "the browse ran anyway")
+
+    def test_a_session_key_that_is_not_a_string_is_refused(self):
+        session = StubSession()
+        reply = roundtrip(session, {"cmd": "browse", "op": "home",
+                                    "session": {"not": "a string"}})
+        self.assertFalse(reply["ok"])
+        self.assertEqual(reply["error"], "bad_request")
+        self.assertEqual(session.seen, [])
+
+    def test_an_ordinary_session_key_is_passed_through(self):
+        session = StubSession()
+        reply = roundtrip(session, {"cmd": "browse", "op": "home",
+                                    "session": "mcp"})
+        self.assertTrue(reply["ok"])
+        self.assertEqual(session.seen[0][0], "mcp")
+
+    def test_an_absent_session_key_still_defaults_to_the_widget(self):
+        session = StubSession()
+        roundtrip(session, {"cmd": "browse", "op": "home"})
+        self.assertEqual(session.seen[0][0], "widget")
