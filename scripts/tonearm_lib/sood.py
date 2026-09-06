@@ -48,6 +48,15 @@ DEFAULT_HTTP_PORT = 9330
 # and a wireless leg, 508 hosts) and stops there.
 MAX_SCAN_HOSTS = 512
 
+# Longest TLV value kept from a response. Every field a Core really sends is
+# far shorter (a unique_id is 36 characters, "2.71 (build 1683) production" is
+# 28), but the wire format allows 64KB per value and the datagram itself is the
+# only other bound. These values are DISPLAYED (the Core name reaches the bar
+# and MPRIS) and PERSISTED (config.json), and they arrive in an unauthenticated
+# UDP packet that anyone on the LAN can send -- the same reasoning that bounds
+# the persisted zone id in core._pin_locked.
+MAX_SOOD_FIELD = 256
+
 
 def _tlv(key: str, value: str) -> bytes:
     kb, vb = key.encode(), value.encode()
@@ -81,7 +90,15 @@ def parse(buf: bytes) -> dict | None:
         i += 2
         if i + vlen > len(buf):
             break
-        out[key] = buf[i:i + vlen].decode("utf-8", "replace")
+        if vlen > MAX_SOOD_FIELD:
+            # The field is dropped, not truncated, and not fatal to the rest of
+            # the frame: a `name` this long leaves `to_core` falling back to the
+            # host address, which then fails core._relocated_core's identity
+            # match -- the safe direction. Refusing the whole response instead
+            # would let one absurd field hide an otherwise healthy Core.
+            LOG.warning("dropping oversized SOOD field %r (%d bytes)", key[:32], vlen)
+        else:
+            out[key] = buf[i:i + vlen].decode("utf-8", "replace")
         i += vlen
     return out
 
@@ -228,8 +245,17 @@ def _port_open(host: str, port: int, timeout: float = 0.6) -> bool:
         sock.close()
 
 
-def discover(timeout: float = 6.0) -> list[dict]:
-    """Multicast first; on silence, scan the /24 and unicast-probe the hits."""
+def discover(timeout: float = 6.0, scan: bool = True) -> list[dict]:
+    """Multicast first; on silence, scan the /24 and unicast-probe the hits.
+
+    `scan=False` keeps the multicast half only. The sweep is 254 TCP connects
+    on this LAN (measured), which is a fair price ONCE, on first run, with a
+    human waiting -- and much too high for anything that repeats. A Core that
+    has merely MOVED is by definition up and answering SOOD, so the caller
+    looking for a relocated Core (core.RoonSession._find_relocated) has no use
+    for the sweep: it would fire on every restart for as long as a Core stayed
+    switched off, which is unsolicited scanning of someone else's network.
+    """
     found: dict[str, dict] = {}
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -258,6 +284,9 @@ def discover(timeout: float = 6.0) -> list[dict]:
 
     if found:
         return list(found.values())
+
+    if not scan:
+        return []
 
     nets = _local_networks()
     if not nets:

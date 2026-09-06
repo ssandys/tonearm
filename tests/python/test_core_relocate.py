@@ -171,6 +171,37 @@ class TestStartFallsBackToDiscovery(_ConfigIsolated):
         self.assertEqual(ctx.exception.code, 1)
         self.assertEqual(published[-1]["status"], "unreachable")
 
+    def test_a_relocation_that_cannot_connect_leaves_the_old_address_alone(self):
+        """The address on disk is the last one known to WORK.
+
+        Discovery is unauthenticated UDP; a stale or forged reply must not be
+        able to cost the daemon an address that a Core has answered on. So an
+        address is applied in memory, and written only once proven.
+        """
+        config.save(a_config())          # the known-good address
+        session = core.RoonSession(lambda _p: None)
+        session._cfg = config.load()
+        with unittest.mock.patch.object(core.RoonSession, "_connect",
+                                        return_value=None), \
+             unittest.mock.patch.object(core.sood, "discover",
+                                        return_value=[a_core(host="10.0.0.9")]):
+            with self.assertRaises(SystemExit):
+                session.start()
+        self.assertEqual(config.load()["host"], "192.168.50.118")
+
+    def test_first_run_discovery_is_not_persisted_until_a_core_answers(self):
+        # Same rule on the path that has no stored address yet: a Core that
+        # never completes a connection is not worth writing down.
+        session = core.RoonSession(lambda _p: None)
+        session._cfg = config.load()     # no host at all
+        with unittest.mock.patch.object(core.RoonSession, "_connect",
+                                        return_value=None), \
+             unittest.mock.patch.object(core.sood, "discover",
+                                        return_value=[a_core()]):
+            with self.assertRaises(SystemExit):
+                session.start()
+        self.assertIsNone(config.load()["host"])
+
     def test_a_core_that_has_not_moved_is_not_reconnected_twice(self):
         # Discovery answering from the address we already failed on tells us
         # nothing new; a second identical connect attempt is pure delay.
@@ -220,7 +251,10 @@ class TestTheWatcherRelocates(_ConfigIsolated):
                 s._check_connection()
         self.assertEqual(discover.call_count, 1)
         self.assertEqual(restarts, [1])
-        self.assertEqual(config.load()["host"], "192.168.50.119")
+        # Deliberately NOT persisted here. The restarted process fails against
+        # the address still on disk and relocates through `start()`, which
+        # writes only what a Core actually answered on.
+        self.assertIsNone(config.load()["host"])
 
     def test_a_short_outage_never_runs_discovery(self):
         s, restarts = self._down_session()
@@ -263,6 +297,22 @@ class TestTheWatcherRelocates(_ConfigIsolated):
             s._check_connection()
         discover.assert_not_called()
         self.assertEqual(restarts, [])
+
+    def test_relocation_never_sweeps_the_lan(self):
+        """The /24 sweep is 254 TCP connects (measured on a live LAN).
+
+        Paid once on first run, with a human waiting, it is reasonable. Here it
+        would fire on every restart for as long as a Core stayed switched off
+        -- unsolicited scanning of someone else's network, on a loop, and the
+        `MAX_SCAN_HOSTS` bound only limits one pass of it. A Core that MOVED is
+        up and answering SOOD; one that answers nothing is off.
+        """
+        s, _restarts = self._down_session()
+        with unittest.mock.patch.object(core.sood, "discover",
+                                        return_value=[]) as discover:
+            for _ in range(core.RELOCATE_SAMPLES):
+                s._check_connection()
+        discover.assert_called_once_with(scan=False)
 
     def test_a_daemon_with_no_restart_hook_does_not_crash_the_watcher(self):
         # RoonSession is constructed without the hook in several tests and in

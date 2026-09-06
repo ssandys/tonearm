@@ -236,6 +236,16 @@ def _relocated_core(cfg: dict, cores: list[dict]) -> dict | None:
     connection watcher) so the "is this really our Core?" rule has its own
     regression test rather than being reachable only with a live LAN.
 
+    What this rule does and does not buy is worth being exact about. SOOD is
+    unauthenticated UDP and a Core broadcasts its `unique_id` in the clear, so
+    an attacker on the same LAN can forge a reply carrying the right id and
+    name; matching cannot authenticate anything. What it does prevent is
+    ACCIDENTAL capture -- the second Core in the house, a neighbour's on a
+    shared network, a Core that answers while ours is down -- which is the
+    realistic failure. The daemon inherits Roon's own LAN trust assumption
+    here, and `_find_relocated`'s caller keeps the blast radius small by never
+    persisting an address until a Core has answered on it.
+
     The rule is deliberately conservative, because adopting the wrong answer
     points a paired daemon -- and the user's widget -- at a stranger's Roon:
 
@@ -292,6 +302,9 @@ class RoonSession:
         # reported once this reaches DOWN_SAMPLES, so a socket that closes and
         # reopens between two polls never reaches the bar.
         self._down_samples = 0
+        # Set by `_apply`, cleared by `_save_cfg`: an address taken in memory
+        # that no Core has answered on yet.
+        self._cfg_dirty = False
 
     @property
     def status(self) -> str:
@@ -404,43 +417,67 @@ class RoonSession:
         # took a new DHCP lease is invisible to it. Discovery is the only way
         # to tell that case apart from a Core that is merely switched off --
         # and only the first costs a restart.
-        if self._relocate() and self._on_restart_needed is not None:
+        #
+        # Nothing is applied or written here, deliberately. The restarted
+        # process runs `start()`, fails against the address still on disk, and
+        # relocates through the path that persists only what a Core answered.
+        # Handing the new address over by writing it first would just be a way
+        # to persist an address nothing has connected to yet.
+        if self._find_relocated() is not None and self._on_restart_needed is not None:
             self._on_restart_needed()
 
-    def _adopt(self, found: dict) -> None:
-        """Persist a newly discovered address for this Core.
+    def _apply(self, found: dict) -> None:
+        """Take a Core's address in memory. Deliberately does NOT write it.
+
+        Persistence is `_save_cfg`, and `start()` calls it only once a Core has
+        actually answered. An address that is applied and then never proven
+        dies with the process, leaving the last known-good one on disk -- so a
+        stale reply, or a forged one, cannot cost the daemon an address that
+        works.
 
         Under `_lock` for the same reason `_pin_locked` writes under it: the
-        watcher thread is not the only writer of `_cfg`, and a config write
-        that interleaved with a zone pin would drop one of the two.
+        watcher thread is not the only writer of `_cfg`.
         """
         with self._lock:
             self._cfg.update({k: found[k] for k in
                               ("host", "tcp_port", "http_port", "name",
                                "unique_id") if k in found})
+            self._cfg_dirty = True
+
+    def _save_cfg(self) -> None:
+        """Write config, if `_apply` changed anything since the last write."""
+        with self._lock:
+            if not self._cfg_dirty:
+                return
             config.save(self._cfg)
+            self._cfg_dirty = False
 
-    def _relocate(self) -> bool:
-        """Ask the network where this Core is now. True if it has moved.
+    def _find_relocated(self) -> dict | None:
+        """Is this Core answering at a NEW address? Returns it, or None.
 
-        Both callers treat a True as "the address on disk is now correct, act
-        on it": `start()` retries the connect, the watcher asks for a restart.
+        Multicast only (`sood.discover(scan=False)`): the /24 sweep is 254 TCP
+        connects on a typical LAN and this runs on every restart for as long as
+        a Core stays switched off, which is not a thing to point at someone
+        else's network. A Core that has MOVED is up and answering SOOD anyway;
+        one that answers nothing is off, and no amount of scanning finds it.
+
+        Reads nothing and writes nothing beyond the log: the callers decide.
         """
         try:
-            cores = sood.discover()
-        except OSError:
-            # Discovery is best-effort: a transient network error here must
-            # not kill the watcher thread or turn a recoverable outage into a
-            # crash loop. The next window tries again.
+            cores = sood.discover(scan=False)
+        except Exception:
+            # Best effort, and broad on purpose. On the watcher thread an
+            # escape would kill the poll loop; in `start()` it would turn a
+            # recoverable outage into a crash. The next window tries again.
             LOG.exception("discovery failed while looking for a moved Core")
-            return False
-        found = _relocated_core(self._cfg, cores)
-        if found is None:
-            return False
-        LOG.warning("Core %s moved from %s to %s", found.get("name"),
-                    self._cfg.get("host"), found["host"])
-        self._adopt(found)
-        return True
+            return None
+        with self._lock:
+            cfg = dict(self._cfg)
+        found = _relocated_core(cfg, cores)
+        if found is not None:
+            LOG.warning("Core %s is answering at %s, not %s",
+                        found.get("name"), found["host"], cfg.get("host"))
+        return found
 
     def _watch_connection(self) -> None:
         """Timing only; every decision lives in `_check_connection`.
@@ -501,7 +538,7 @@ class RoonSession:
             core = cores[0]
             LOG.info("discovered %s at %s via %s",
                      core["name"], core["host"], core["via"])
-            self._adopt(core)
+            self._apply(core)
 
         token = config.load_token()
         if token is None:
@@ -511,18 +548,25 @@ class RoonSession:
             self._publish()
 
         self._api = self._connect(token)
-        if self._api is None and self._relocate():
-            # The stored address answered nothing, but this Core is on the LAN
-            # at a new one -- a DHCP lease change, measured on 2026-09-06.
+        if self._api is None:
+            # The stored address answered nothing. This Core may simply be on
+            # the LAN at a new one -- a DHCP lease change, measured 2026-09-06.
             # Without this the daemon would exit, restart, and retry the same
             # dead address forever: discovery above runs only when `host` is
             # ABSENT, so an address once stored was never revisited.
-            self._api = self._connect(token)
+            found = self._find_relocated()
+            if found is not None:
+                self._apply(found)
+                self._api = self._connect(token)
         if self._api is None:
             self._status = "unreachable"
             self._publish()
             sys.exit(1)
 
+        # A Core answered here, so this address is finally worth keeping. One
+        # applied above but never proven dies with the process instead, leaving
+        # the last known-good address on disk for the next start to try.
+        self._save_cfg()
         if self._api.token:
             config.save_token(self._api.token)
 

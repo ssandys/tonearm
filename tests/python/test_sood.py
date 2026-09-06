@@ -45,6 +45,59 @@ class TestSoodFraming(unittest.TestCase):
         self.assertEqual(sood.parse(buf).get("name"), "yavin")
 
 
+class TestOversizedFieldsAreRefused(unittest.TestCase):
+    """A SOOD response is unauthenticated UDP that anyone on the LAN can send,
+    and its values are both displayed (the Core name reaches the bar and MPRIS)
+    and persisted (config.json, via core.RoonSession._apply). The wire format
+    allows 64KB per value; nothing a real Core sends comes close.
+    """
+
+    def test_an_oversized_value_is_dropped_and_the_rest_of_the_frame_survives(self):
+        body = (tlv("name", "y" * (sood.MAX_SOOD_FIELD + 1))
+                + tlv("http_port", "9330"))
+        parsed = sood.parse(b"SOOD" + b"\x02" + b"R" + body)
+        self.assertNotIn("name", parsed)
+        # Refusing the whole response would let one absurd field hide an
+        # otherwise healthy Core.
+        self.assertEqual(parsed["http_port"], "9330")
+
+    def test_a_field_at_the_limit_is_kept(self):
+        body = tlv("name", "y" * sood.MAX_SOOD_FIELD)
+        parsed = sood.parse(b"SOOD" + b"\x02" + b"R" + body)
+        self.assertEqual(len(parsed["name"]), sood.MAX_SOOD_FIELD)
+
+    def test_a_core_with_no_usable_name_falls_back_to_its_address(self):
+        # to_core's fallback, reached once parse drops the name -- and the
+        # address is never a match for a stored Core name, so an adoption
+        # decision made on it fails safe (core._relocated_core).
+        core = sood.to_core("192.168.50.9", {"http_port": "9330"}, via="multicast")
+        self.assertEqual(core["name"], "192.168.50.9")
+
+
+class TestScanIsOptional(unittest.TestCase):
+    """`discover(scan=False)` is the multicast half only.
+
+    The sweep is 254 TCP connects on a /24 (measured). Fair once, on first run,
+    with a human waiting; far too high for the relocation check, which reruns
+    on every restart for as long as a Core stays switched off.
+    """
+
+    def test_scan_false_never_touches_the_lan(self):
+        with unittest.mock.patch.object(sood, "_local_networks") as nets, \
+             unittest.mock.patch.object(sood, "_port_open") as port_open, \
+             unittest.mock.patch.object(sood, "_probe_unicast") as probe:
+            self.assertEqual(sood.discover(timeout=0, scan=False), [])
+        nets.assert_not_called()
+        port_open.assert_not_called()
+        probe.assert_not_called()
+
+    def test_the_default_still_scans(self):
+        with unittest.mock.patch.object(sood, "_local_networks",
+                                        return_value=[]) as nets:
+            sood.discover(timeout=0)
+        nets.assert_called()
+
+
 class TestParseNeverRaises(unittest.TestCase):
     """`parse()` must never raise (see its docstring): Service-side, an
     exception is indistinguishable from "no Core found" and would discard a
