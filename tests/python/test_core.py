@@ -217,7 +217,12 @@ class TestStartRetriesByExiting(unittest.TestCase):
         published = []
         session = core.RoonSession(published.append)
         session._cfg["host"] = "192.168.50.118"  # host known: skip discovery
-        with unittest.mock.patch.object(core.RoonSession, "_connect", return_value=None):
+        # `discover` is stubbed even though the host is known: a failed connect
+        # now asks the network whether the Core has MOVED before giving up
+        # (test_core_relocate.py). Without this the test would put real
+        # multicast on the wire and pass or fail by what is on the LAN.
+        with unittest.mock.patch.object(core.RoonSession, "_connect", return_value=None), \
+             unittest.mock.patch.object(core.sood, "discover", return_value=[]):
             with self.assertRaises(SystemExit) as ctx:
                 session.start()
         self.assertEqual(ctx.exception.code, 1)

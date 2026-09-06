@@ -39,6 +39,20 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(cfg["host"], "192.168.50.118")
         self.assertEqual(cfg["pinned_zone_id"], "z1")
 
+    def test_the_cores_identity_round_trips(self):
+        # `save`/`load` filter against DEFAULTS, so a field missing from that
+        # whitelist is dropped in silence. `unique_id` is what lets a Core that
+        # changes address still be recognized as ours (core._relocated_core);
+        # losing it downgrades that match to the Core's display name.
+        config.save({"host": "192.168.50.119", "name": "yavin",
+                     "unique_id": "96e11146-4bec-466e-afe9-e82a1d8f7b4d"})
+        self.assertEqual(config.load()["unique_id"],
+                         "96e11146-4bec-466e-afe9-e82a1d8f7b4d")
+
+    def test_a_config_written_before_relocation_support_still_loads(self):
+        config.save({"host": "192.168.50.118", "name": "yavin"})
+        self.assertIsNone(config.load()["unique_id"])
+
     def test_load_survives_a_corrupt_file(self):
         # A truncated write must degrade to defaults, not crash the daemon on
         # boot -- systemd would restart it into the same crash forever.

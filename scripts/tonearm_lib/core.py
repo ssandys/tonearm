@@ -218,12 +218,66 @@ def _connect_timeout(token) -> float:
 POLL_INTERVAL = 2.0
 DOWN_SAMPLES = 2
 
+# How long an outage must last before the daemon suspects the Core has MOVED
+# rather than merely gone away for a while, and asks the network where it went.
+# roonapi's own reconnect (a fresh socket ~21s after each failure, forever) gets
+# several clean attempts inside this window: a Core that comes back at the same
+# address recovers with no restart at all, which is strictly cheaper than the
+# exit/rediscover/reconnect cycle a relocation costs. Re-checked once per window
+# for as long as the outage lasts, since a Core can move while already down.
+RELOCATE_AFTER = 120.0
+RELOCATE_SAMPLES = int(RELOCATE_AFTER / POLL_INTERVAL)
+
+
+def _relocated_core(cfg: dict, cores: list[dict]) -> dict | None:
+    """Which discovered Core, if any, is ours at a NEW address? None if none is.
+
+    A pure decision, factored out of its two callers (`start()` and the
+    connection watcher) so the "is this really our Core?" rule has its own
+    regression test rather than being reachable only with a live LAN.
+
+    The rule is deliberately conservative, because adopting the wrong answer
+    points a paired daemon -- and the user's widget -- at a stranger's Roon:
+
+      * a stored `unique_id` must match exactly, and nothing else counts. Two
+        Cores can share a display name; only the id is identity.
+      * without one (every config written before 0.11.0), the Core's name
+        identifies it -- unless `name` is just the address, which is
+        config.DEFAULTS' fallback label rather than anything the Core said.
+      * with no identity at all (a hand-written config: an address and nothing
+        else), a LAN holding exactly one Core is unambiguous -- that is the
+        Core a fresh install would have discovered. Two or more, and we refuse.
+
+    An answer at the address already in config is not a relocation: that is a
+    Core rebooting, and roonapi's reconnect handles it without a restart.
+    """
+    unique_id = cfg.get("unique_id")
+    name = cfg.get("name")
+    if unique_id:
+        matches = [c for c in cores if c.get("unique_id") == unique_id]
+    elif name and name != cfg.get("host"):
+        matches = [c for c in cores if c.get("name") == name]
+    else:
+        matches = list(cores)
+    if len(matches) != 1:
+        return None
+    found = matches[0]
+    if all(found.get(k) == cfg.get(k) for k in ("host", "tcp_port", "http_port")):
+        return None
+    return found
+
 
 class RoonSession:
     """Owns the Roon connection and publishes normalized state on change."""
 
-    def __init__(self, on_change) -> None:
+    def __init__(self, on_change, on_restart_needed=None) -> None:
         self._on_change = on_change
+        # Called when the Core has demonstrably moved and only a fresh process
+        # can follow it. Optional: the CLI and most tests build a session with
+        # no hook, and a watcher that cannot request a restart must degrade to
+        # logging rather than raise on a daemon thread. scripts/tonearmd wires
+        # it to the same exit path as a dead socket server.
+        self._on_restart_needed = on_restart_needed
         self._api: RoonApi | None = None
         self._cfg = config.load()
         self._arbiter = zones.Arbiter(self._cfg.get("pinned_zone_id"))
@@ -343,6 +397,50 @@ class RoonSession:
             LOG.warning("Roon connection lost after %d polls", self._down_samples)
             self._status = "unreachable"
             self._publish()
+        if self._down_samples % RELOCATE_SAMPLES:
+            return
+        # An outage this long is no longer roonapi's to recover: it rebuilds
+        # the socket against the address it was given, forever, so a Core that
+        # took a new DHCP lease is invisible to it. Discovery is the only way
+        # to tell that case apart from a Core that is merely switched off --
+        # and only the first costs a restart.
+        if self._relocate() and self._on_restart_needed is not None:
+            self._on_restart_needed()
+
+    def _adopt(self, found: dict) -> None:
+        """Persist a newly discovered address for this Core.
+
+        Under `_lock` for the same reason `_pin_locked` writes under it: the
+        watcher thread is not the only writer of `_cfg`, and a config write
+        that interleaved with a zone pin would drop one of the two.
+        """
+        with self._lock:
+            self._cfg.update({k: found[k] for k in
+                              ("host", "tcp_port", "http_port", "name",
+                               "unique_id") if k in found})
+            config.save(self._cfg)
+
+    def _relocate(self) -> bool:
+        """Ask the network where this Core is now. True if it has moved.
+
+        Both callers treat a True as "the address on disk is now correct, act
+        on it": `start()` retries the connect, the watcher asks for a restart.
+        """
+        try:
+            cores = sood.discover()
+        except OSError:
+            # Discovery is best-effort: a transient network error here must
+            # not kill the watcher thread or turn a recoverable outage into a
+            # crash loop. The next window tries again.
+            LOG.exception("discovery failed while looking for a moved Core")
+            return False
+        found = _relocated_core(self._cfg, cores)
+        if found is None:
+            return False
+        LOG.warning("Core %s moved from %s to %s", found.get("name"),
+                    self._cfg.get("host"), found["host"])
+        self._adopt(found)
+        return True
 
     def _watch_connection(self) -> None:
         """Timing only; every decision lives in `_check_connection`.
@@ -403,8 +501,7 @@ class RoonSession:
             core = cores[0]
             LOG.info("discovered %s at %s via %s",
                      core["name"], core["host"], core["via"])
-            self._cfg.update({k: core[k] for k in ("host", "tcp_port", "http_port", "name")})
-            config.save(self._cfg)
+            self._adopt(core)
 
         token = config.load_token()
         if token is None:
@@ -414,6 +511,13 @@ class RoonSession:
             self._publish()
 
         self._api = self._connect(token)
+        if self._api is None and self._relocate():
+            # The stored address answered nothing, but this Core is on the LAN
+            # at a new one -- a DHCP lease change, measured on 2026-09-06.
+            # Without this the daemon would exit, restart, and retry the same
+            # dead address forever: discovery above runs only when `host` is
+            # ABSENT, so an address once stored was never revisited.
+            self._api = self._connect(token)
         if self._api is None:
             self._status = "unreachable"
             self._publish()

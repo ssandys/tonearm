@@ -30,6 +30,21 @@ def main() -> int:
     loop = asyncio.new_event_loop()
     holder = {}
 
+    def fail(reason: str) -> None:
+        """Bring the daemon down so systemd's Restart=on-failure can fire.
+
+        The daemon's only retry mechanism is exiting non-zero: `RestartSec=3`
+        with `StartLimitIntervalSec=0` (systemd/tonearmd.service) means this
+        can be used freely and forever. Both callers below are cases where
+        the running process cannot recover in place -- a dead socket server,
+        and a Core that has moved to an address this process is not connected
+        to -- and where staying up would leave the unit reporting `active`
+        with a stale track and nothing retrying.
+        """
+        logging.getLogger("tonearmd").warning("restarting: %s", reason)
+        holder["failed"] = True
+        loop.call_soon_threadsafe(loop.stop)
+
     def broadcast_current() -> None:
         # Used both as the on_change hook (a Roon push) and as art.Cache's
         # on_ready callback (a background art fetch finishing after the
@@ -52,7 +67,12 @@ def main() -> int:
     def on_change(_payload) -> None:
         broadcast_current()
 
-    raw_session = RoonSession(on_change)
+    # on_restart_needed: the connection watcher never exits on its own (roonapi
+    # reconnects underneath it), with one exception -- discovery proving the
+    # Core now lives at a different address, which only a fresh connect can
+    # follow. See RoonSession._relocate.
+    raw_session = RoonSession(on_change,
+                              on_restart_needed=lambda: fail("the Roon Core moved"))
     # ColorQuantizer cannot load the Core's remote :9330 image URL (measured:
     # zero colors vs. eight for the identical bytes as a local file) -- so the
     # daemon keeps a small local copy and hands back a path. See art.py.
@@ -80,16 +100,14 @@ def main() -> int:
     signal.signal(signal.SIGINT, shutdown)
 
     def on_server_failure() -> None:
-        """Bring the daemon down so systemd's Restart=on-failure can fire.
+        """The socket IS this daemon's purpose, so losing it must be visible.
 
-        The socket IS this daemon's purpose, so unlike MPRIS below -- which
-        is deliberately not load-bearing -- losing it must be visible. On a
-        daemon thread it was not: the loop below kept running, systemd kept
-        reporting the unit active, and the bar sat on a stale track with
+        Unlike MPRIS below -- deliberately not load-bearing -- a dead server
+        was invisible on a daemon thread: the loop below kept running, systemd
+        kept reporting the unit active, and the bar sat on a stale track with
         nothing retrying. See tonearm_lib.server.supervise.
         """
-        holder["failed"] = True
-        loop.call_soon_threadsafe(loop.stop)
+        fail("the socket server died")
 
     threading.Thread(target=server.supervise, args=(srv, on_server_failure),
                      daemon=True).start()

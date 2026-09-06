@@ -43,6 +43,11 @@ DEFAULTS = {
     "tcp_port": 9150,
     "http_port": 9330,
     "name": None,
+    # The Core's SOOD identity. Stored so a Core that changes address can be
+    # recognized as the SAME Core rather than merely one with a matching name
+    # (core._relocated_core). Absent from every config written before 0.11.0,
+    # which is why name matching is still a fallback there.
+    "unique_id": None,
     "pinned_zone_id": None,
 }
 

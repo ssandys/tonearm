@@ -4,6 +4,22 @@ Notable changes to tonearm. Versions follow [semantic versioning](https://semver
 while the major version is 0, the minor version carries changes that would
 otherwise be breaking.
 
+## Unreleased
+
+### Fixed
+
+- **A Core that changes IP address no longer strands the daemon**
+  ([#1](https://github.com/ssandys/tonearm/issues/1)). Discovery used to run
+  only when no address was stored, so a new DHCP lease left tonearm retrying a
+  dead address forever — reachable only by editing `config.json` by hand. When
+  the Core is unreachable, tonearm now asks the network where it went and
+  adopts the answer only when it is identifiably the same Core: matched on the
+  SOOD `unique_id`, now persisted in `config.json`, and falling back to the
+  Core's name for configs written before this release. A Core answering at the
+  address already stored is not a move, so one that is merely rebooting still
+  recovers through roonapi with no restart, and an ambiguous or unmatched
+  answer is refused rather than adopted.
+
 ## 0.10.0 — 2026-09-02
 
 A security-hardening release. No new features.
