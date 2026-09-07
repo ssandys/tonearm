@@ -314,7 +314,8 @@ var STATUS_SEVERITY = {
   ok: "ok",
   connecting: "warn",
   unpaired: "warn",
-  unreachable: "error"
+  unreachable: "error",
+  no_network: "error"
 }
 
 function severityFor(status) {
@@ -378,6 +379,14 @@ function faultText(state) {
     // The daemon's normal startup state, reaching for the Core, which may not
     // even be resolved yet -- this is not a failure and must not read as one.
     return "Connecting to " + coreNameOf(state) + "\u2026"
+  }
+  if (state.status === "no_network") {
+    // The daemon probed the default gateway and it did not answer, so the
+    // Core is not the thing to go and look at. Saying "Roon Core
+    // unreachable" here sends people to the wrong end of the problem --
+    // measured 2026-09-07, when a VPN swallowed the local subnet and the
+    // Core was healthy the whole time.
+    return "No route to your network"
   }
   if (severityFor(state.status) !== "ok") return "Roon Core unreachable"
   return ""

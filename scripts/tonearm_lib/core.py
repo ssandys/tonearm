@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vendor"))
 
 from roonapi import RoonApi              # noqa: E402  (vendored, path-inserted)
 
-from . import browse, config, sood, state, zones  # noqa: E402
+from . import browse, config, net, sood, state, zones  # noqa: E402
 
 LOG = logging.getLogger("tonearmd.core")
 
@@ -229,6 +229,18 @@ RELOCATE_AFTER = 120.0
 RELOCATE_SAMPLES = int(RELOCATE_AFTER / POLL_INTERVAL)
 
 
+def _unreachable_status() -> str:
+    """Name the fault behind a connect that never answered.
+
+    The Core not answering and this machine having no path to the LAN are
+    the same symptom, and the difference is the whole of what the person
+    reading the bar needs. An inconclusive probe keeps the old wording --
+    telling someone their network is down when it is not would be a worse
+    error than the one this fixes.
+    """
+    return "no_network" if net.lan_reachable() is False else "unreachable"
+
+
 def _relocated_core(cfg: dict, cores: list[dict]) -> dict | None:
     """Which discovered Core, if any, is ours at a NEW address? None if none is.
 
@@ -391,7 +403,7 @@ class RoonSession:
         still waiting to be enabled in Roon Remote is "unpaired", and a socket
         existing does not make it paired.
         """
-        if self._status not in ("ok", "unreachable"):
+        if self._status not in ("ok", "unreachable", "no_network"):
             return
 
         sock = getattr(self._api, "_roonsocket", None) if self._api else None
@@ -407,11 +419,22 @@ class RoonSession:
 
         self._down_samples += 1
         if self._status == "ok" and self._down_samples >= DOWN_SAMPLES:
-            LOG.warning("Roon connection lost after %d polls", self._down_samples)
-            self._status = "unreachable"
+            self._status = _unreachable_status()
+            LOG.warning("Roon connection lost after %d polls: %s",
+                        self._down_samples, self._status)
             self._publish()
         if self._down_samples % RELOCATE_SAMPLES:
             return
+
+        # Which fault this is can change while we are down: a network that
+        # comes back with the Core still switched off must stop claiming
+        # there is no route to it. Only re-checked on this slow cadence --
+        # it is a blocking probe, and the poll loop runs every 2s.
+        fault = _unreachable_status()
+        if fault != self._status:
+            LOG.info("fault changed: %s -> %s", self._status, fault)
+            self._status = fault
+            self._publish()
         # An outage this long is no longer roonapi's to recover: it rebuilds
         # the socket against the address it was given, forever, so a Core that
         # took a new DHCP lease is invisible to it. Discovery is the only way
@@ -532,7 +555,7 @@ class RoonSession:
         if not self._cfg.get("host"):
             cores = sood.discover()
             if not cores:
-                self._status = "unreachable"
+                self._status = _unreachable_status()
                 self._publish()
                 sys.exit(1)
             core = cores[0]
@@ -559,7 +582,7 @@ class RoonSession:
                 self._apply(found)
                 self._api = self._connect(token)
         if self._api is None:
-            self._status = "unreachable"
+            self._status = _unreachable_status()
             self._publish()
             sys.exit(1)
 

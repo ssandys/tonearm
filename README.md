@@ -208,6 +208,12 @@ Recovery is automatic — the underlying Roon library retries about every 20
 seconds, and tonearm goes back to normal on its own when the Core answers
 again. There is nothing to restart.
 
+If the problem is *your* network rather than the Core — a VPN that captures
+your local subnet, wifi associated but not routing — the header says **No
+route to your network** instead. Tonearm works this out by probing your
+default gateway when a connection fails: if the gateway itself does not
+answer, the Core is not the thing to go and look at.
+
 ## Removal
 
 Removing just the plugin folder is not enough on its own: the systemd user

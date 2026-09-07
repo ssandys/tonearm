@@ -8,6 +8,19 @@ otherwise be breaking.
 
 ### Fixed
 
+- **A network fault no longer masquerades as a dead Core**
+  ([#2](https://github.com/ssandys/tonearm/issues/2)). "Roon Core unreachable"
+  was shown whenever a connection failed, including when the Core was healthy
+  and this machine simply had no path to it — a VPN capturing the local subnet,
+  a link up but not routing. Observed on 2026-09-07: five hours pointing at the
+  wrong end of the problem while the Core sat 1.9ms away. When a connection
+  fails, tonearm now probes the default gateway (read from the main routing
+  table, so it is found even while policy routing diverts traffic) and reports
+  the new status `no_network` — "No route to your network" — when the gateway
+  itself does not answer. A refused connection counts as reachable, since it
+  proves a host answered; an inconclusive probe keeps the old wording rather
+  than guess.
+
 - **A Core that changes IP address no longer strands the daemon**
   ([#1](https://github.com/ssandys/tonearm/issues/1)). Discovery used to run
   only when no address was stored, so a new DHCP lease left tonearm retrying a
