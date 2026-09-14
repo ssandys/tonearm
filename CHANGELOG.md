@@ -4,6 +4,25 @@ Notable changes to tonearm. Versions follow [semantic versioning](https://semver
 while the major version is 0, the minor version carries changes that would
 otherwise be breaking.
 
+## 0.10.1 — 2026-09-14
+
+### Security
+
+- **The plugin no longer installs instructions for coding agents.** Installing
+  a plugin clones the repository into `~/.config/omarchy/plugins/<id>/`, so a
+  root `AGENTS.md` landed in a directory coding agents routinely work in or
+  below, where it is discovered and applied automatically. That is an
+  instruction channel into the user's agent that the user never agreed to, and
+  it is a problem regardless of what the text happens to say. The contributor
+  guide is now `CONTRIBUTING.md`, which carries no such meaning. Raised in the
+  marketplace security review of 2026-09-14.
+
+  A test (`tests/python/test_installable_tree.py`) now asserts that no tracked
+  file is named `AGENTS.md`, `CLAUDE.md`, `.cursorrules` or any sibling,
+  asking `git ls-files` because that is exactly what a clone delivers. An
+  untracked file in a local worktree is unaffected; nothing about how the
+  repository is developed needs to change.
+
 ## 0.10.0 — 2026-09-02
 
 A security-hardening release. No new features.

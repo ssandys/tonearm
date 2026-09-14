@@ -47,7 +47,7 @@ docstring promises best-effort.
 Both constraints exist because `Model.js` is loaded by both node and Qt's V4,
 and both are currently checked by human review on every change. A lint-style
 test would close a whole class of regression. This is the constraint most likely
-to be broken by someone who has not read `AGENTS.md`.
+to be broken by someone who has not read `CONTRIBUTING.md`.
 
 ## 7. Untested branch: `formatTime` with `h > 0 && m >= 10`
 

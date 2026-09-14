@@ -218,7 +218,7 @@ class TestSilentDaemonTimesOut(unittest.TestCase):
     Every socket call in tonearmctl -- connect, sendall, readline -- ran in
     blocking mode with no settimeout() on any path. A daemon that accepted the
     connection and then wedged (the shape of the Roon tcp_port hang recorded in
-    AGENTS.md, and of any deadlock inside Server._handle) left readline()
+    CONTRIBUTING.md, and of any deadlock inside Server._handle) left readline()
     blocked forever, with no timeout, no retry and no way out but a signal.
 
     Two things made that worse than a stuck command. `setup.sh --check` uses

@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.abspath(
 from tonearm_lib import browse
 from fakes import FakeRoon, yavin_levels
 
-# A value the implementation could not produce by accident (AGENTS.md's
+# A value the implementation could not produce by accident (CONTRIBUTING.md's
 # "a fixture whose value coincides with a default proves nothing"): it is
 # neither a Roon item_key shape nor anything else this module constructs.
 ZONE = "zone-kitchen-7f3a"

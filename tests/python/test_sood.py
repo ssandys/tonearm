@@ -113,7 +113,7 @@ class TestCoreRecord(unittest.TestCase):
         # using the defaults here means a stub that always returns the
         # default -- skipping both string->int coercion and the actual
         # dict lookup -- would leave this green. Port selection is the
-        # trickiest thing in this project (see AGENTS.md); this fixture
+        # trickiest thing in this project (see CONTRIBUTING.md); this fixture
         # must actually exercise it.
         raw = {
             "name": "yavin", "tcp_port": "9151", "http_port": "9331",
