@@ -34,10 +34,11 @@ class TestServer(unittest.TestCase):
         self.srv = server.Server(self.session)
         self.thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
         self.thread.start()
-        for _ in range(100):
-            if os.path.exists(server.socket_path()):
-                break
-            time.sleep(0.01)
+        # Waiting on the socket FILE is a race -- bind() creates it and
+        # listen() happens afterwards, so a connect in that window is
+        # refused. Found on CI, where the machine is slow enough to land in
+        # it. Wait for "listening", which is what the tests actually need.
+        self.assertTrue(self.srv.ready.wait(5), "server never started listening")
         self.addCleanup(self.srv.shutdown)
 
     def _connect(self):
@@ -223,10 +224,8 @@ class TestServerBounds(unittest.TestCase):
         srv = server.Server(self.session)
         thread = threading.Thread(target=srv.serve_forever, daemon=True)
         thread.start()
-        for _ in range(200):
-            if os.path.exists(server.socket_path()):
-                break
-            time.sleep(0.01)
+        # "listening", not "the file exists": see the note in TestServer.setUp.
+        srv.ready.wait(5)
         self.addCleanup(srv.shutdown)
         return srv
 
@@ -362,10 +361,8 @@ class TestRequestLineIsBounded(unittest.TestCase):
         thread = threading.Thread(target=srv.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(srv.shutdown)
-        for _ in range(200):
-            if os.path.exists(server.socket_path()):
-                break
-            time.sleep(0.01)
+        # "listening", not "the file exists": see the note in TestServer.setUp.
+        srv.ready.wait(5)
         return srv
 
     def test_an_endless_line_is_refused_rather_than_buffered(self):
@@ -476,10 +473,7 @@ class TestServerFailureIsVisible(unittest.TestCase):
             thread = threading.Thread(
                 target=server.supervise, args=(srv, lambda: called.append(True)))
             thread.start()
-            for _ in range(200):
-                if os.path.exists(server.socket_path()):
-                    break
-                time.sleep(0.01)
+            srv.ready.wait(5)
             srv.shutdown()
             thread.join(5)
             self.assertFalse(thread.is_alive())
@@ -506,10 +500,11 @@ class TestStatusSurvivesAnUnserializableSnapshot(unittest.TestCase):
         self.srv = server.Server(self.session)
         self.thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
         self.thread.start()
-        for _ in range(100):
-            if os.path.exists(server.socket_path()):
-                break
-            time.sleep(0.01)
+        # Waiting on the socket FILE is a race -- bind() creates it and
+        # listen() happens afterwards, so a connect in that window is
+        # refused. Found on CI, where the machine is slow enough to land in
+        # it. Wait for "listening", which is what the tests actually need.
+        self.assertTrue(self.srv.ready.wait(5), "server never started listening")
         self.addCleanup(self.srv.shutdown)
 
     def _connect(self):
@@ -584,10 +579,11 @@ class TestDeadSubscribersAreReaped(unittest.TestCase):
         self.srv = server.Server(self.session)
         self.thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
         self.thread.start()
-        for _ in range(100):
-            if os.path.exists(server.socket_path()):
-                break
-            time.sleep(0.01)
+        # Waiting on the socket FILE is a race -- bind() creates it and
+        # listen() happens afterwards, so a connect in that window is
+        # refused. Found on CI, where the machine is slow enough to land in
+        # it. Wait for "listening", which is what the tests actually need.
+        self.assertTrue(self.srv.ready.wait(5), "server never started listening")
         self.addCleanup(self.srv.shutdown)
 
     def _subscribe(self):

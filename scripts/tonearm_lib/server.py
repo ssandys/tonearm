@@ -187,6 +187,10 @@ class Server:
         self._lock = threading.Lock()
         self._sock: socket.socket | None = None
         self._running = False
+        # Set once the socket is LISTENING, not merely bound; see
+        # serve_forever. Anything waiting for the daemon to be connectable
+        # should wait on this rather than on the socket file appearing.
+        self.ready = threading.Event()
 
     @property
     def running(self) -> bool:
@@ -209,6 +213,11 @@ class Server:
         # thread already blocked in accept().
         self._sock.settimeout(ACCEPT_POLL)
         self._running = True
+        # Bound is not the same as listening. bind() creates the socket file,
+        # so anything watching for the path to appear can connect in the gap
+        # before listen() and get ECONNREFUSED. Rare on a quiet machine and
+        # reproducible on a loaded CI runner, which is where it was found.
+        self.ready.set()
         # Read at start, not at import, so the bound is one number to change
         # and tests can lower it. BoundedSemaphore, not Semaphore: a release
         # without a matching acquire is a bug worth raising on, not one to
@@ -254,6 +263,7 @@ class Server:
 
     def shutdown(self) -> None:
         self._running = False
+        self.ready.clear()
         if self._sock:
             try:
                 self._sock.close()
