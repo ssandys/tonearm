@@ -70,9 +70,10 @@ A review pass over the whole codebase, plus the two outages that prompted it.
 
 - **The zone arbiter no longer remembers every zone id forever**
   ([#5](https://github.com/ssandys/tonearm/issues/5)). Two dicts keyed on zone
-  ids from the Core were never pruned. Not only an abuse case: Roon mints a new
-  id whenever zones are grouped or ungrouped, so an ordinary household
-  accumulated entries just by grouping rooms. A zone that leaves and later
+  ids from the Core were never pruned. Not only an abuse case: grouping
+  speakers creates a zone of its own, which exists only while the group does —
+  measured on a real Core, where grouping two Sonos speakers produced a
+  transient `"Sonos Move + 1"` zone that vanished on ungroup. A zone that leaves and later
   returns playing now counts as a fresh start, which is what it is from the
   listener's point of view.
 - **Text from the Core is bounded** (`MAX_TEXT`, `MAX_ZONES`,

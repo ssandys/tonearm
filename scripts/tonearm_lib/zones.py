@@ -63,19 +63,30 @@ class Arbiter:
 
         # Forget ids that are not in this listing. Both dicts are keyed on
         # zone ids straight off the wire and nothing ever removed one, so
-        # they grew for the life of the process -- and not only under abuse:
-        # Roon mints a NEW id whenever zones are grouped or ungrouped, so an
-        # ordinary household accumulates entries just by grouping rooms.
+        # they grew for the life of the process -- and not only under abuse.
         #
-        # Everything select() can still reach is kept: the ids in this
-        # listing, plus `_last_followed`, which select() falls back to when
-        # nothing is active. A zone that leaves and later returns playing is
-        # then a fresh transition, which is what it is from the listener's
-        # point of view -- previously it kept a stale counter and could
-        # outrank a zone that had genuinely just started.
+        # Measured on a real Core, 2026-09-19: grouping two Sonos speakers
+        # creates a zone of its OWN ("Sonos Move + 1",
+        # 160141644c41c0f46b48a526b5dbed57e530) which exists only while the
+        # group does and vanishes on ungroup. The members keep their ids
+        # across the cycle, so it is the group zone, not the members, that
+        # adds an id. Whether regrouping the same pair reproduces that id or
+        # mints another is NOT measured -- if it mints, the set of ids a
+        # long-running daemon has seen grows with grouping activity.
+        #
+        # The listing is the whole of what select() can reach. Its fallback
+        # to `_last_followed` is guarded by `in by_id`, so a followed zone
+        # that is still selectable is in this listing already and survives on
+        # that basis; one that is absent cannot be selected however much
+        # state is kept for it. Pinning it separately would only retain
+        # entries for ids select() has no way to use -- which is exactly
+        # what a dissolved group is.
+        #
+        # A zone that leaves and later returns playing is then a fresh
+        # transition, which is what it is from the listener's point of view:
+        # previously it kept a stale counter and could outrank a zone that
+        # had genuinely just started.
         live = {zone.get("id", "") for zone in zones}
-        if self._last_followed:
-            live.add(self._last_followed)
         self._started_at = {k: v for k, v in self._started_at.items() if k in live}
         self._last_state = {k: v for k, v in self._last_state.items() if k in live}
 

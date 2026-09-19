@@ -180,3 +180,56 @@ class TestTheArbiterDoesNotGrowForever(unittest.TestCase):
         picked = arb.select([{"id": "new", "state": "playing"},
                              {"id": "old", "state": "playing"}])
         self.assertEqual(picked["id"], "old")
+
+
+class TestGroupingChurnFromARealCore(unittest.TestCase):
+    """The transition measured on a real Core on 2026-09-19.
+
+    Captured by polling the daemon's own status every 2s while two Sonos
+    speakers were grouped and then ungrouped. The group is a zone of its own
+    and lives only as long as the grouping; the members keep their ids across
+    the cycle. Real ids, so this pins behaviour against something Roon
+    actually did rather than something modelled.
+    """
+
+    LIVING_ROOM_STEREO = "1601bdb56757fb6c57dedd8a2d4adcfcd486"
+    CHIMAERA = "16012352e4acb1f5e9bae8bec7bf5df87fa4"
+    GROUP = "160141644c41c0f46b48a526b5dbed57e530"      # "Sonos Move + 1"
+    LIVING_ROOM = "16013f624837e553d24437fb74e3848da6f7"
+    SONOS_MOVE = "160103a37af930504bd1135c69d08d4ea53b"
+
+    def _grouped(self):
+        return [{"id": self.LIVING_ROOM_STEREO, "state": "paused"},
+                {"id": self.CHIMAERA, "state": "stopped"},
+                {"id": self.GROUP, "state": "playing"}]
+
+    def _ungrouped(self):
+        return [{"id": self.LIVING_ROOM_STEREO, "state": "paused"},
+                {"id": self.CHIMAERA, "state": "stopped"},
+                {"id": self.LIVING_ROOM, "state": "stopped"},
+                {"id": self.SONOS_MOVE, "state": "stopped"}]
+
+    def test_the_dissolved_group_is_forgotten(self):
+        arb = zones.Arbiter()
+        arb.observe(self._grouped())
+        arb.select(self._grouped())
+        arb.observe(self._ungrouped())
+        self.assertNotIn(self.GROUP, arb._started_at)
+
+    def test_repeated_grouping_does_not_accumulate(self):
+        arb = zones.Arbiter()
+        for _ in range(50):
+            arb.observe(self._grouped())
+            arb.select(self._grouped())
+            arb.observe(self._ungrouped())
+            arb.select(self._ungrouped())
+        # Exactly the live listing: four zones, no residue from 50 groupings.
+        self.assertLessEqual(len(arb._started_at), 4)
+        self.assertLessEqual(len(arb._last_state), 4)
+
+    def test_the_group_can_still_be_followed_while_it_exists(self):
+        # The group is the zone actually playing, so it must be selectable --
+        # forgetting must not make a live group unfollowable.
+        arb = zones.Arbiter()
+        arb.observe(self._grouped())
+        self.assertEqual(arb.select(self._grouped())["id"], self.GROUP)
