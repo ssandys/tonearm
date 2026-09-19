@@ -4,10 +4,26 @@ Notable changes to tonearm. Versions follow [semantic versioning](https://semver
 while the major version is 0, the minor version carries changes that would
 otherwise be breaking.
 
-## Unreleased
+## 0.11.0 — 2026-09-19
+
+A review pass over the whole codebase, plus the two outages that prompted it.
 
 ### Fixed
 
+- **The album-art cache no longer raises while pruning itself**
+  ([#3](https://github.com/ssandys/tonearm/issues/3)). `_prune()` guarded
+  `listdir` and `unlink` but not the `getmtime` between them, so a file removed
+  in that window — two art fetches finishing together, which is two quick track
+  changes — raised `FileNotFoundError` out of a function documented
+  best-effort, from a thread, leaving an unhandled traceback and a cache over
+  its cap.
+- **The `status` verb no longer leaks its connection**
+  ([#4](https://github.com/ssandys/tonearm/issues/4)). A snapshot that would
+  not serialize escaped an `except OSError` and skipped the close on the next
+  line, so the handler thread died with the descriptor still open and the
+  client waited on a reply that never came. The subscribe path had handled this
+  since it was written; the defect was the decision reaching only one of the
+  two places that needed it.
 - **A network fault no longer masquerades as a dead Core**
   ([#2](https://github.com/ssandys/tonearm/issues/2)). "Roon Core unreachable"
   was shown whenever a connection failed, including when the Core was healthy
@@ -51,6 +67,39 @@ otherwise be breaking.
   format allows 64KB per value; a Core's name reaches the bar and MPRIS, and is
   persisted. Oversized values are dropped rather than truncated, and the rest of
   the response still parses.
+
+- **The zone arbiter no longer remembers every zone id forever**
+  ([#5](https://github.com/ssandys/tonearm/issues/5)). Two dicts keyed on zone
+  ids from the Core were never pruned. Not only an abuse case: Roon mints a new
+  id whenever zones are grouped or ungrouped, so an ordinary household
+  accumulated entries just by grouping rooms. A zone that leaves and later
+  returns playing now counts as a fresh start, which is what it is from the
+  listener's point of view.
+- **Text from the Core is bounded** (`MAX_TEXT`, `MAX_ZONES`,
+  [#6](https://github.com/ssandys/tonearm/issues/6)). Every bound in the daemon
+  constrained the socket client or files on disk; nothing constrained the Core,
+  whose zone names and track metadata are rendered inside `omarchy-shell` — the
+  shared, always-loaded process — and published onto the session bus. Clipped
+  rather than refused, because these are labels and a truncated title beats no
+  title.
+
+### Documentation
+
+- `docs/FOLLOWUPS.md` listed four items as open that were fixed
+  ([#7](https://github.com/ssandys/tonearm/issues/7)); they are now in
+  **Closed** with the commit that closed each.
+- `CONTRIBUTING.md` recommended the `os.lstat` pattern the security review
+  rejected ([#8](https://github.com/ssandys/tonearm/issues/8)). Rewritten
+  around what was learned: answer from a descriptor you hold, not from a path
+  you will re-resolve.
+- `docs/marketplace-submission.md` was a second, older copy of a document whose
+  canonical version is the submission issue
+  ([#9](https://github.com/ssandys/tonearm/issues/9)). Reduced to the standing
+  claims that belong to the repository.
+
+Two recurring sources of staleness were removed rather than refreshed: quoted
+test counts, and the enumerated list of retired follow-up numbers. Both had
+gone wrong twice. Code is now cited by symbol rather than by line.
 
 **Trust model, stated plainly:** SOOD is unauthenticated, and a Core broadcasts
 its `unique_id` in the clear, so identity matching cannot authenticate a reply —
