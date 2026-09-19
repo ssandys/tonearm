@@ -5,8 +5,13 @@ re-deriving it. Roughly ordered by whether a user can notice.
 
 **The numbers are permanent identifiers, not positions.** Code comments cite
 them (`browse.py`, `server.py`, `Panel.qml`), so a closed item's number is
-retired rather than reused and the sequence is expected to have gaps. 1 and 12
-are retired. So is 4.
+retired rather than reused and the sequence is expected to have gaps. The gaps
+are not enumerated here -- that list went stale twice. Every retired number is
+either in **Closed** below or was retired without one.
+
+Cite code by symbol rather than by line. Line references in this file have
+drifted twice; `Server._handle`'s `status` branch does not move when something
+above it does.
 
 Closed items are recorded at the bottom so a future reader does not re-open
 them.
@@ -16,31 +21,6 @@ them.
 A paused zone reporting `position > length` returns the unclamped value, so the
 seek bar could render past its end. Low probability (depends on Roon's data),
 cosmetic.
-
-## 3. The subscribe handshake calls `conn.sendall()` under `Server._lock`
-
-A stalled new client can block `broadcast()` to every other subscriber, and
-block further subscribes, for as long as that send blocks. This extends the
-pre-existing design, where `broadcast()` already sends under the lock — it was
-inherited rather than chosen. The code now carries a comment saying so, which
-makes the decision explicit but does not change the availability characteristic.
-
-No longer theoretical: browse makes concurrent socket traffic routine.
-Before this feature, the daemon mostly held one long-lived subscribe
-connection open per client; now every keystroke-driven browse op (search,
-activate, enter, back, queue) opens its own short-lived connection and does
-a synchronous round-trip while that subscribe connection is still live. The
-accept-and-thread path this hazard depends on is now exercised continuously
-during normal use, not occasionally — raising the odds that a slow or
-stalled peer's `sendall()` actually coincides with a subscribe handshake or
-a broadcast. This work does not fix it; revisit if a subscriber is ever slow
-or remote.
-
-## 5. `Cache._prune()`'s `getmtime` is unguarded
-
-`listdir`/`unlink` are guarded; `getmtime` is not. Two rapid track changes both
-completing fetches could race a `FileNotFoundError` out of a function whose
-docstring promises best-effort.
 
 ## 6. Nothing enforces `Model.js`'s ES3-subset or no-mutable-module-state rules
 
@@ -53,39 +33,6 @@ to be broken by someone who has not read `CONTRIBUTING.md`.
 
 E.g. `4200` → `"1:10:00"`. Correct by construction, but the minute-padding rule
 has a branch no test exercises.
-
-## 8. The `status` verb serializes outside its guard
-
-`server.py`'s `browse` branch was fixed so that `json.dumps` runs inside the
-same `try` as the guard that catches it: a reply that fails to serialize
-becomes a `roon_error` response instead of an uncaught exception. The
-pre-existing `status` verb (`server.py:119-125`) still has the original
-shape — `json.dumps(self._session.snapshot())` runs inside a `try` that
-only catches `OSError`. A `TypeError` from a non-serializable snapshot would
-propagate out of `_handle`, skip `conn.close()`, and leave the client's
-`readline()` blocking forever, which is exactly the freeze the `browse`
-branch was fixed to prevent.
-
-Latent today because `RoonSession.snapshot()`'s payload is plain,
-JSON-serializable data — nothing currently puts a non-serializable value in
-it. The fix is the same shape as the `browse` fix: broaden the `except` (or
-move the serialization inside a `try`/`except Exception`) so `conn.close()`
-is guaranteed to run regardless of what `snapshot()` returns.
-
-## 9. The browse session dict is unbounded
-
-`RoonSession._browse_sessions` (`core.py:179`, populated by
-`browse_session()` at `core.py:439-451`) creates one `BrowseSession` per
-`multi_session_key` and never evicts one. The key comes straight off the
-wire, in the `browse` request's `session` field, with no validation.
-
-The socket is 0600 in the user's own runtime dir, so the realistic failure
-mode is a buggy consumer — a client that mints a fresh key per request
-instead of reusing one, or a future second consumer (an MCP server, say)
-that never converges on a stable key — leaking sessions over a long daemon
-uptime, not an attacker. This is a memory-leak guard, not a security fix.
-The remedy is an LRU cap on `_browse_sessions`, evicting the
-least-recently-used session once some bound is hit.
 
 ## 10. Paging is implemented in the protocol but unreachable from the UI
 
@@ -216,6 +163,37 @@ work rather than a line in the transfer change.
 ## Closed
 
 Recorded so they are not re-opened.
+
+Closed by the 0.11.0 review pass:
+
+- **The subscribe handshake called `conn.sendall()` under `Server._lock`.**
+  Fixed in `099a1fd`, during the marketplace review. `Server._subscribe` now
+  registers the subscriber under the global lock -- a list append and nothing
+  else -- and writes the snapshot outside it, under that subscriber's own
+  send lock. The ordering guarantee the item worried about losing is kept:
+  a broadcast racing the handshake finds the connection registered, blocks on
+  the per-socket lock only, and lands after the snapshot. This was item 3.
+
+- **`Cache._prune()`'s `getmtime` was unguarded.** Fixed in `cd3baca` (#3).
+  `listdir` and `unlink` were guarded; the stat in the sort key between them
+  was not, so a file removed in that window raised `FileNotFoundError` out of
+  a function documented best-effort -- from a thread target, so it surfaced as
+  an unhandled traceback and left the cache over its cap. Candidates are now
+  stated before anything is decided, and a missing one is skipped. This was
+  item 5.
+
+- **The `status` verb serialized outside its guard.** Fixed in `493fa29` (#4).
+  `except OSError` did not cover `json.dumps` raising `TypeError`, nor
+  `snapshot()` raising for an invalid status; either skipped the `conn.close()`
+  on the next line and leaked the descriptor. The guard is now `except
+  Exception` and the close is in a `finally`. `_subscribe` had handled this
+  case since it was written -- the defect was the decision being applied in
+  only one of the two places that needed it. This was item 8.
+
+- **The browse session dict was unbounded.** Fixed in `d0a5a0e`, during the
+  marketplace review, implementing exactly the remedy the item proposed:
+  `RoonSession._browse_sessions` is an `OrderedDict` capped at
+  `MAX_BROWSE_SESSIONS`, least-recently-used evicted first. This was item 9.
 
 Closed by the marketplace-review pass:
 

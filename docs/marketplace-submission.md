@@ -1,175 +1,110 @@
-# Marketplace submission draft
+# Marketplace submission
 
-For `HANCORE-linux/omarchy-plugin-marketplace`. Fields below map 1:1 to the
-**"Submit a plugin"** issue form (`.github/ISSUE_TEMPLATE/submit-plugin.yml`)
-and to the CLI path documented in the marketplace's own `SUBMISSION.md`, which
-is the authority for exact values. Not yet filed.
+**The canonical submission text is the issue itself**, not this file:
+[omacom/omarchy-plugin-marketplace#3414](https://github.com/omacom/omarchy-plugin-marketplace/issues/3414).
+It is edited in place as the review proceeds, and editing it is what
+re-runs validation and the security baseline against the current commit.
 
-The marketplace's `SUBMISSION.md` carries an "Instructions for AI agents"
-section requiring that the completed title and body be shown to the owner, and
-that the issue be created only after the owner explicitly approves. That is
-why this document exists rather than a filed issue.
+This file used to hold a copy of that text, field by field, including the
+issue form's own scaffolding. The copy went stale — it described the
+pre-0.10.0 design, contradicted the shipped code on a point a reviewer had
+specifically raised, and quoted test counts that were two releases old.
+Keeping two versions of one document in step was never going to work, so it
+no longer tries.
 
-Target commit: set to `git rev-parse master` at filing time.
+What remains is the part that belongs to the repository rather than to the
+submission: the standing claims about what tonearm does on your network and
+on your disk. These are also stated in `README.md` under "What it does on
+your network", for users rather than reviewers.
 
----
+## Network
 
-## Repository URL
+Discovery runs on first run only, if no Core is configured: SOOD multicast
+first, then — because many networks filter multicast — a TCP connection to
+one port (9330) on each address in the local `/24`. The scan is restricted
+to interfaces whose own IPv4 address is `ipaddress.is_private`, and the
+subnet comes from the interfaces themselves rather than a routing lookup,
+which a VPN would otherwise poison. A total budget of `MAX_SCAN_HOSTS`
+addresses is enforced across every interface, deduplicated, walking networks
+in address order so a truncated scan is deterministic.
 
-https://github.com/ssandys/tonearm
+If the Core stops answering, tonearm re-runs discovery to find it at a new
+address — multicast only, never the `/24` sweep, because that is a first-run
+cost and not something to repeat while a Core is switched off. It moves only
+to a Core it can identify as the one it paired with, and writes an address
+to disk only after a Core has answered on it.
 
-## Category
+After that the only traffic is to the Core: one WebSocket for Roon's MOO
+protocol, and HTTP GETs for album art through an opener whose redirect
+handler compares `(scheme, host, port)` and refuses anything that leaves the
+Core. No telemetry, no third-party endpoints.
 
-`Widgets`
+## Files written
 
-## Tags
+`~/.config/tonearm/` (0700) holds the Core address, the Roon pairing token
+and the pinned zone. All state I/O is descriptor-relative: the directory is
+opened once `O_DIRECTORY|O_NOFOLLOW` and every leaf is opened against that
+descriptor, so the path walk happens once and a component swapped afterwards
+cannot redirect a later open. Reads add `O_NOFOLLOW`, an `S_ISREG` check and
+a size cap; writes go to an unguessable name created `O_EXCL|O_NOFOLLOW` and
+are renamed with both ends resolved against the same descriptor.
 
-`bar`, `media`, `quickshell`
+`$XDG_RUNTIME_DIR/tonearm/` (0700) holds the socket and the art cache,
+capped at `MAX_CACHED` files. No user configuration outside tonearm's own
+directories is modified.
 
-Exactly three — more are rejected. **Lowercase**: the web dropdown displays
-them title-cased, but `SUBMISSION.md`'s CLI path lists the allowed values as
-lowercase kebab (`bar`, `media`, `quickshell`, `power-management`). Category is
-the opposite — case-sensitive and title-cased (`Widgets`).
+## Privilege and sandboxing
 
-## Suggest a missing tag
+There is no `sudo` and no `pkexec` anywhere in the repository — code, scripts
+or documentation. `setup.sh` uses `systemctl --user` and writes only under
+`~/.config/systemd/user/`, refusing to install through a symlink, over a
+non-regular file, or over a regular file that is not tonearm's own unit.
 
-*(leave empty — `Media` covers it, and suggesting a tag that duplicates an
-existing one is noise for the reviewer)*
+The unit runs under `ProtectSystem=strict` and `ProtectHome=read-only` with
+a single `ReadWritePaths`, `NoNewPrivileges`, `ProtectProc=invisible`, a
+syscall filter and a restricted address-family set. `AF_NETLINK` is required
+and documented in the unit: `if_nameindex(3)` needs it, and without it
+discovery silently finds nothing.
 
-## Maintainer notes
+## What the shared shell process consumes
 
-Roon now-playing, transport, library search and zone transfer in the bar.
-QML widget plus a Python daemon; the widget itself makes no network calls and
-does no filesystem access of its own.
+The widget runs inside `omarchy-shell`, so everything it reads is bounded
+producer-side. `art.is_publishable()` opens the cached thumbnail
+`O_NOFOLLOW|O_NONBLOCK` and answers every question from that descriptor;
+fetched art is refused unless it is a PNG or JPEG within `MAX_ART_BYTES` and
+`MAX_ART_DIMENSION` per side, read from the PNG `IHDR` or by walking JPEG
+segments — decoding nothing. Text from the Core is bounded by `MAX_TEXT`
+and the zone listing by `MAX_ZONES`. The socket bounds every resource a
+client can reach: request line, connection deadline, handler threads,
+subscribers, per-write deadline, browse sessions, session key and search
+term.
 
-**What installing commits the user to.** `setup.sh` installs and starts
-`tonearmd.service`, a systemd **user** service that starts at login. That is
-the one thing a user should know before enabling this, so it is in the
-manifest description, not just the README. `README.md` documents removal
-including the service teardown, because removing only the plugin folder would
-leave a unit retrying against a missing path.
+One residual is stated rather than papered over: the shell re-opens
+`art_path` by name, so a same-user race between the check and Qt's open
+survives. Closing it needs an open-time guarantee from the reader, and the
+reader is `ColorQuantizer`, which exposes none.
 
-**No privilege.** There is no `sudo` and no `pkexec` anywhere in the
-repository — code, scripts or documentation. `setup.sh` uses `systemctl --user`
-and writes only under `~/.config/systemd/user/`. The `package-manager`
-capability the baseline will report comes from prose only: `README.md`,
-`LICENSE` and one `setup.sh` error message all mention `omarchy pkg add` as an
-instruction to the user. tonearm installs nothing.
+## Dependencies
 
-**Network.** On first run only, if no Core is configured, it discovers the
-Roon Core: SOOD multicast first, and — because many networks filter multicast —
-falling back to opening a TCP connection to one port (9330) on each address in
-the local `/24`. That scan is bounded to interfaces whose own IPv4 address is
-`ipaddress.is_private`, deduplicated across interfaces, and capped at 512
-addresses for the whole run (`sood.MAX_SCAN_HOSTS`) rather than 254 per
-qualifying interface; the subnet is taken from the interfaces themselves
-rather than a routing lookup, which a VPN would otherwise poison. The result is
-cached in `~/.config/tonearm/config.json` and never scanned again. After that
-the only traffic is to the Core: one WebSocket for Roon's MOO protocol and HTTP
-GETs for album art. No telemetry, no third-party endpoints. This is documented
-in the README under "What it does on your network" rather than left for a
-reviewer to discover in `sood.py`.
+Two Arch packages the user installs themselves, `python-dbus-next` and
+`python-websocket-client`; neither is bundled. `scripts/vendor/roonapi/` is
+a vendored, unmodified copy of `roonapi` 0.1.6 (Apache-2.0) with its licence
+retained in place and the reason for vendoring in `scripts/vendor/README.md`.
+tonearm's own code is MIT; `LICENSE` carries the dependency breakdown below
+the grant.
 
-**What the shared shell process consumes.** Informed by your review of
-Headway (#2659), which applies to this plugin too:
+## Tests
 
-- The widget reads exactly one file, the cached album-art thumbnail, via
-  `ColorQuantizer`. That class has no size cap, no stat and no symlink control,
-  so the bound is enforced producer-side: the daemon refuses to publish
-  `art_path` for anything that is not a regular file within 1 MiB
-  (`art.is_publishable`, using `os.lstat`, not `os.path.exists`, which follows
-  symlinks). A residual same-user race is documented in the source rather than
-  papered over — closing it would need `O_NOFOLLOW` on the reader, and the
-  reader is Qt.
-- The art fetch caps the read itself at 1 MiB rather than checking the size
-  after buffering the body, and writes through `tempfile.mkstemp` plus
-  `os.replace` — never a predictable `<name>.tmp`.
-- The daemon's unix socket (0600, in `$XDG_RUNTIME_DIR`) bounds every
-  resource a client can reach: the request line at 64 KiB, the time to send
-  it at 10s, concurrent handler threads at 32, registered subscribers at 16,
-  one write to a subscriber at 5s, and in-memory browse sessions at 8, keyed
-  on a `session` string of at most 64 characters. No I/O runs while the
-  subscriber-list lock is held, so one stalled peer cannot stall the rest.
-- Browse results are capped at 100 rows per level by the daemon.
+`./bin/test` runs the Python and JS suites; CI runs it on every push.
+Counts are deliberately not quoted here — they were wrong in this file twice.
 
-**Files written.** `~/.config/tonearm/` (0700) holds the Core address, the Roon
-pairing token and the pinned zone — token and config are 0600, written to a
-temp file and `os.replace`d. `$XDG_RUNTIME_DIR/tonearm/` (0700) holds the
-socket and the art cache, capped at 10 files. Nothing else on disk is touched,
-and no user configuration outside tonearm's own directories is modified.
+## Agent instructions
 
-**Dependencies.** Two Arch packages the user installs themselves,
-`python-dbus-next` and `python-websocket-client`; neither is bundled.
-`scripts/vendor/roonapi/` is a vendored, unmodified copy of `roonapi` 0.1.6
-(Apache-2.0) with its licence retained in place and the reason for vendoring in
-`scripts/vendor/README.md`. tonearm's own code is MIT. `LICENSE` carries the
-dependency breakdown below the grant.
-
-**Tests.** `./bin/test` runs 256 Python and 82 JS tests; CI runs it on every
-push.
-
-## Submission checklist
-
-- [x] The repository is public and contains installation and removal
-      instructions. — `README.md` "Install" and "Removal".
-- [x] I have documented the plugin license and any external dependencies. —
-      `LICENSE` carries a Dependencies section covering the vendored
-      Apache-2.0 `roonapi` and the two runtime packages.
-- [x] I confirm that I own or have permission to submit this plugin and its
-      preview assets. — `preview.png` is a screenshot of the running widget on
-      the author's own machine; the album art in frame is blurred past
-      recognition. Track and album titles remain, which are factual metadata
-      rather than a reproduction of artwork.
-- [x] The plugin does not overwrite user configuration without explicit
-      consent. — the only file written outside tonearm's own directories is
-      `~/.config/systemd/user/tonearmd.service`, created by a setup script the
-      user runs deliberately. **See "Open before filing".**
-- [x] I understand that approval is for listing and is not a security review.
-
----
-
-## Repository description
-
-For the GitHub repo's description field, which the marketplace links to:
-
-> Omarchy shell bar widget for Roon: now-playing, transport, library search,
-> zone switching and transfer. Backed by a Python daemon that speaks Roon's
-> MOO protocol and publishes MPRIS.
-
-## Ready to file
-
-Nothing outstanding. All five checklist boxes are verified true, the
-repository description is set, and the preview carries no third-party artwork.
-
-## Closed while drafting
-
-- **The repository description was empty.** Now set to the text above.
-
-- **`preview.png` contained third-party album artwork.** The art region is now
-  blurred past recognition, which clears checklist item 3 while keeping
-  everything the image exists to show: the layout, the metadata, the transport,
-  the search hint, the transfer icons — and the seek fill, which takes its
-  colour from that art, so the blurred colours still explain where the gold
-  came from. Reproducible:
-
-  ```
-  magick preview.png -crop 236x236+32+104 +repage \
-      -virtual-pixel edge -blur 0x18 art.png
-  magick -size 236x236 xc:black -fill white \
-      -draw "roundrectangle 0,0 235,235 12,12" mask.png
-  magick preview.png art.png mask.png -geometry +32+104 -composite preview.png
-  ```
-
-  Blurring the region in isolation with `-virtual-pixel edge` rather than in
-  place matters: an in-place blur pulls panel background into the box and
-  softens its edge. The mask restores the widget's own corner radius
-  (`Style.space(6)`), so the preview still shows what the widget renders.
-
-- **`setup.sh` copied onto a predictable path unguarded.** `cp` follows a
-  symlink at its destination, so a link planted at
-  `~/.config/systemd/user/tonearmd.service` redirected the write — the same
-  class as both findings in #2659. The script now refuses a symlink, refuses a
-  non-regular file, refuses a regular file that is not tonearm's own unit, and
-  writes through `mktemp` plus an atomic rename. Seven tests run `setup.sh` for
-  real against a `systemctl` shim; reverting to the bare `cp` fails three of
-  them. Closes `docs/FOLLOWUPS.md` item 4.
+The repository ships no `AGENTS.md`, `CLAUDE.md`, `.cursorrules` or any
+sibling. Installing a plugin clones the repository into
+`~/.config/omarchy/plugins/<id>/`, so such a file would be discovered and
+applied by coding agents working there — an instruction channel the user
+never opted into, independent of what it says. The contributor guide is
+`CONTRIBUTING.md`, and `tests/python/test_installable_tree.py` asserts the
+old names cannot return, asking `git ls-files` because that is exactly what
+a clone delivers.
