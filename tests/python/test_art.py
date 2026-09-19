@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 import unittest.mock
 
 sys.path.insert(0, os.path.abspath(
@@ -303,6 +304,41 @@ class TestCache(ArtServerTestCase):
         art._prune(cache._dir, keep=keep)
         remaining = os.listdir(cache._dir)
         self.assertIn("keepme.jpg", remaining)
+        self.assertLessEqual(len(remaining), art.MAX_CACHED)
+
+    def test_a_file_that_vanishes_mid_prune_is_skipped_not_raised(self):
+        """Two fetches finishing together: one unlinks what the other listed.
+
+        `_prune` guarded `listdir` and `unlink` but not the `getmtime` in the
+        sort key between them, so a file removed in that window raised
+        FileNotFoundError out of a function documented best-effort -- from
+        `_fetch_and_prune`, a thread target, so it surfaced as an unhandled
+        traceback and left the cache over its cap.
+        """
+        cache = self._cache()
+        cache._dir = self.tmp.name
+        os.makedirs(cache._dir, exist_ok=True)
+        for i in range(art.MAX_CACHED + 5):
+            with open(os.path.join(cache._dir, "old%d.jpg" % i), "wb") as handle:
+                handle.write(b"x")
+            stamp = time.time() - (art.MAX_CACHED + 5 - i)
+            os.utime(os.path.join(cache._dir, "old%d.jpg" % i), (stamp, stamp))
+        keep = os.path.join(cache._dir, "keepme.jpg")
+        with open(keep, "wb") as handle:
+            handle.write(b"x")
+
+        real_listdir = os.listdir
+
+        def listdir_with_a_ghost(path):
+            # Present at listdir time, gone by the time the sort stats it.
+            return real_listdir(path) + ["vanished.jpg"]
+
+        with patch.object(art.os, "listdir", listdir_with_a_ghost):
+            art._prune(cache._dir, keep=keep)   # must not raise
+
+        remaining = real_listdir(cache._dir)
+        self.assertIn("keepme.jpg", remaining)
+        # The ghost must not have aborted the prune partway through.
         self.assertLessEqual(len(remaining), art.MAX_CACHED)
 
 

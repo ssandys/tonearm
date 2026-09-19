@@ -326,12 +326,29 @@ def _prune(directory: str, keep: str, max_files: int = MAX_CACHED) -> None:
     except OSError:
         return
     keep_name = os.path.basename(keep)
-    candidates = [n for n in names if n != keep_name and not n.endswith(".tmp")]
-    over = len(candidates) - (max_files - 1)
+    # Stat every candidate BEFORE deciding anything, and tolerate a missing
+    # one. A name listed a moment ago can already be gone: two fetches
+    # finishing together means one prunes what the other listed. The stat
+    # used to sit unguarded in the sort key, so that window raised
+    # FileNotFoundError out of a function documented best-effort -- and out
+    # of `_fetch_and_prune`, a thread target, which made it an unhandled
+    # traceback and left the cache over its cap. A file that vanished needs
+    # no deleting, which is the outcome wanted anyway.
+    dated = []
+    for name in names:
+        if name == keep_name or name.endswith(".tmp"):
+            continue
+        try:
+            dated.append((os.path.getmtime(os.path.join(directory, name)), name))
+        except OSError:
+            continue
+    over = len(dated) - (max_files - 1)
     if over <= 0:
         return
-    candidates.sort(key=lambda n: os.path.getmtime(os.path.join(directory, n)))
-    for name in candidates[:over]:
+    # (mtime, name): ties break by name, so the choice is deterministic
+    # rather than dependent on directory order.
+    dated.sort()
+    for _, name in dated[:over]:
         try:
             os.unlink(os.path.join(directory, name))
         except OSError:
