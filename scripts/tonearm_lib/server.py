@@ -271,9 +271,19 @@ class Server:
         if cmd == "status":
             try:
                 conn.sendall((json.dumps(self._session.snapshot()) + "\n").encode())
-            except OSError:
-                pass
-            conn.close()
+            except Exception:
+                # Not only OSError. json.dumps raises TypeError on a value it
+                # cannot encode, and snapshot() raises on its own for a status
+                # outside VALID_STATUS; both used to escape this guard and skip
+                # the close below, so the handler thread died with the
+                # descriptor still open and the client waiting on a reply that
+                # never came. _subscribe has caught the same case since it was
+                # written -- this is that decision applied to the branch that
+                # did not get it.
+                LOG.warning("status reply failed", exc_info=True)
+            finally:
+                # In a finally so no later branch can be added that skips it.
+                conn.close()
             return
 
         if cmd == "browse":

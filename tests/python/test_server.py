@@ -484,3 +484,80 @@ class TestServerFailureIsVisible(unittest.TestCase):
             thread.join(5)
             self.assertFalse(thread.is_alive())
             self.assertEqual(called, [])
+
+
+class TestStatusSurvivesAnUnserializableSnapshot(unittest.TestCase):
+    """A snapshot that will not serialize must not leak the connection.
+
+    The `status` branch guarded only OSError, but `json.dumps` raises
+    TypeError and `snapshot()` can raise on its own (`state.build` rejects a
+    status outside VALID_STATUS). Either escaped the guard and skipped the
+    `conn.close()` on the next line, so the handler thread died holding an
+    open descriptor. `_subscribe` already handled exactly this case, with a
+    comment saying so -- the decision was made once and applied in only one
+    of the two places that needed it.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        os.environ["XDG_RUNTIME_DIR"] = self.tmp.name
+        self.session = FakeSession()
+        self.srv = server.Server(self.session)
+        self.thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
+        self.thread.start()
+        for _ in range(100):
+            if os.path.exists(server.socket_path()):
+                break
+            time.sleep(0.01)
+        self.addCleanup(self.srv.shutdown)
+
+    def _connect(self):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(3)
+        sock.connect(server.socket_path())
+        return sock
+
+    def test_the_connection_is_closed_rather_than_left_open(self):
+        class Unserializable:
+            pass
+
+        self.session.snapshot = lambda: {"v": 1, "status": "ok",
+                                         "zone": Unserializable()}
+        sock = self._connect()
+        sock.sendall(b'{"cmd":"status"}\n')
+        # A leaked descriptor shows up here as a read that never completes:
+        # the peer is gone but nothing closed the socket, so recv blocks
+        # until the test's own timeout rather than returning EOF.
+        self.assertEqual(sock.makefile("r").readline(), "",
+                         "expected EOF from a closed connection")
+        sock.close()
+
+    def test_a_snapshot_that_raises_is_also_survived(self):
+        def boom():
+            raise ValueError("status must be one of ...")
+
+        self.session.snapshot = boom
+        sock = self._connect()
+        sock.sendall(b'{"cmd":"status"}\n')
+        self.assertEqual(sock.makefile("r").readline(), "")
+        sock.close()
+
+    def test_the_daemon_still_serves_the_next_request(self):
+        # The thread dying is only half the cost: the server must remain
+        # usable afterwards.
+        class Unserializable:
+            pass
+
+        good = self.session.snapshot
+        self.session.snapshot = lambda: {"v": 1, "zone": Unserializable()}
+        first = self._connect()
+        first.sendall(b'{"cmd":"status"}\n')
+        first.makefile("r").readline()
+        first.close()
+
+        self.session.snapshot = good
+        second = self._connect()
+        second.sendall(b'{"cmd":"status"}\n')
+        self.assertEqual(json.loads(second.makefile("r").readline())["status"], "ok")
+        second.close()
