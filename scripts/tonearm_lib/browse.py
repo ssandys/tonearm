@@ -22,7 +22,15 @@ import logging
 import re
 import threading
 
+from . import state
+
 LOG = logging.getLogger("tonearmd.browse")
+
+# Row text is Core-supplied and rendered inside omarchy-shell, the shared
+# process. PAGE bounds how MANY rows a level returns; this bounds how long
+# one row's text can be. Shared with state.py so there is one answer to
+# "how long may Core text be", not two that can drift.
+MAX_TEXT = state.MAX_TEXT
 
 # Roon embeds links in subtitles as [[id|Display Text]]. Measured on yavin:
 # album subtitles arrive as "[[827514|Oingo Boingo]]". Rendered raw, the
@@ -31,10 +39,14 @@ _LINK = re.compile(r"\[\[\d+\|([^\]]*)\]\]")
 
 
 def strip_markup(text) -> str:
-    """Display-ready subtitle. Never None -- spec 5.3."""
+    """Display-ready subtitle. Never None -- spec 5.3.
+
+    Clipped AFTER substitution, so a truncated subtitle can never end
+    mid-link with `[[` still on screen.
+    """
     if not text:
         return ""
-    return _LINK.sub(r"\1", str(text))
+    return _LINK.sub(r"\1", str(text))[:MAX_TEXT]
 
 
 def capabilities_from_hint(item: dict) -> tuple[bool, bool]:
@@ -66,7 +78,7 @@ def row_from_item(item: dict) -> dict:
     """
     can_descend, can_play = capabilities_from_hint(item)
     return {
-        "title": str(item.get("title") or ""),
+        "title": str(item.get("title") or "")[:MAX_TEXT],
         "subtitle": strip_markup(item.get("subtitle")),
         "image_key": item.get("image_key"),
         "can_descend": can_descend,

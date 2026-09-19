@@ -11,6 +11,29 @@ SCHEMA_VERSION = 1
 VALID_STATUS = ("connecting", "unpaired", "unreachable",
                 "no_network", "ok")
 
+# Every other bound in this daemon constrains the socket CLIENT (the request
+# line, the session key, the search term, the zone id) or art and config on
+# disk. Nothing constrained the Core -- yet its zone names and track metadata
+# are rendered by Panel.qml inside omarchy-shell, the shared always-loaded
+# process, and published onto the session bus by mpris.py. CONTRIBUTING.md
+# states the rule and it was applied in one direction only.
+#
+# Clipped, not refused: these are labels, and a truncated title beats no
+# title. That is deliberately the opposite of MAX_SOOD_FIELD, which DROPS an
+# oversized field because that one feeds identity matching rather than a
+# label. Generous enough that no real title or room name reaches it.
+MAX_TEXT = 512
+
+# The full listing is sent on every push by design (see build). Bounding its
+# length keeps that decision from being unbounded work per push.
+MAX_ZONES = 64
+
+
+def _clip(value) -> str:
+    """Core-supplied text, bounded, never None."""
+    text = str(value or "")
+    return text[:MAX_TEXT]
+
 
 def _volume_of(roon_zone: dict) -> dict | None:
     outputs = roon_zone.get("outputs") or []
@@ -43,9 +66,9 @@ def _now_playing_of(roon_zone: dict) -> dict | None:
         return None
     lines = np.get("three_line") or {}
     return {
-        "title": lines.get("line1", ""),
-        "artist": lines.get("line2", ""),
-        "album": lines.get("line3", ""),
+        "title": _clip(lines.get("line1", "")),
+        "artist": _clip(lines.get("line2", "")),
+        "album": _clip(lines.get("line3", "")),
         "image_key": np.get("image_key", ""),
         # Nullable placeholder: this module does no I/O (see the module
         # docstring), so it cannot know whether a local cached copy exists.
@@ -86,7 +109,7 @@ def normalize_zone(roon_zone: dict | None) -> dict | None:
     np = roon_zone.get("now_playing") or {}
     return {
         "id": roon_zone.get("zone_id", ""),
-        "name": roon_zone.get("display_name", ""),
+        "name": _clip(roon_zone.get("display_name", "")),
         "state": roon_zone.get("state", "stopped"),
         "pinned": False,          # the daemon overwrites this; see zones.py
         "volume": _volume_of(roon_zone),
@@ -105,7 +128,7 @@ def build(status: str, core: dict | None, zone: dict | None,
         trimmed_core = {
             "host": core.get("host", ""),
             "http_port": core.get("http_port", 9330),
-            "name": core.get("name", ""),
+            "name": _clip(core.get("name", "")),
         }
     return {
         "v": SCHEMA_VERSION,
@@ -115,8 +138,8 @@ def build(status: str, core: dict | None, zone: dict | None,
         # Sent in full on every push. It is small, and always sending it removes
         # a class of staleness bug rather than trading it for bytes.
         "zones": [
-            {"id": z.get("id", ""), "name": z.get("name", ""),
+            {"id": z.get("id", ""), "name": _clip(z.get("name", "")),
              "state": z.get("state", "stopped")}
-            for z in zones
+            for z in zones[:MAX_ZONES]
         ],
     }

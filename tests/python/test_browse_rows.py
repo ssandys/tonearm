@@ -102,3 +102,30 @@ class TestNormalizeRows(unittest.TestCase):
             {"title": "B", "item_key": "1:1", "hint": "list"},
         ])
         self.assertEqual([r["title"] for r in rows], ["A", "B"])
+
+
+class TestRowTextIsBounded(unittest.TestCase):
+    """Browse rows are Core text rendered in the shared shell process.
+
+    Same reasoning as state.MAX_TEXT: PAGE already bounds how MANY rows a
+    level returns, but nothing bounded how long one row's text could be.
+    """
+
+    def test_a_long_title_is_clipped(self):
+        row = browse.row_from_item({"title": "t" * 5000, "hint": "list"})
+        self.assertEqual(len(row["title"]), browse.MAX_TEXT)
+
+    def test_a_long_subtitle_is_clipped_after_markup_is_stripped(self):
+        # Clipping must not leave a half-stripped link on screen, so it
+        # happens after strip_markup, not before.
+        raw = "[[827514|" + "n" * 5000 + "]]"
+        row = browse.row_from_item({"title": "x", "subtitle": raw, "hint": "list"})
+        self.assertEqual(len(row["subtitle"]), browse.MAX_TEXT)
+        self.assertNotIn("[[", row["subtitle"])
+
+    def test_ordinary_rows_are_untouched(self):
+        row = browse.row_from_item({"title": "Dark Side of the Moon",
+                                    "subtitle": "[[827514|Pink Floyd]]",
+                                    "hint": "list"})
+        self.assertEqual(row["title"], "Dark Side of the Moon")
+        self.assertEqual(row["subtitle"], "Pink Floyd")

@@ -190,3 +190,59 @@ class TestSeekPosition(unittest.TestCase):
         # The widget divides by length and formats this; None would render
         # "NaN" and poison the seek fill's width binding.
         self.assertEqual(state.normalize_zone(self._zone())["position"], 0)
+
+
+class TestCoreSuppliedTextIsBounded(unittest.TestCase):
+    """Strings from the Core reach a process shared with every other widget.
+
+    Every bound in the daemon constrained the socket client -- request line,
+    session key, search term, zone id -- or art and config on disk. Nothing
+    constrained the Core, whose zone names and track metadata are rendered by
+    Panel.qml inside omarchy-shell and published onto the session bus by
+    mpris.py. CONTRIBUTING.md states the rule ("anything unbounded it
+    consumes ... can stall or exhaust the whole shell") and it was applied in
+    one direction only.
+
+    Clipped rather than refused: these are display strings, and showing a
+    truncated title is better than showing none. That is the opposite of the
+    MAX_SOOD_FIELD decision, deliberately -- an oversized SOOD field is
+    dropped because it feeds identity matching, not a label.
+    """
+
+    def _zone(self, **over):
+        base = {"zone_id": "z1", "display_name": "Kitchen", "state": "playing"}
+        base.update(over)
+        return base
+
+    def test_a_zone_name_is_clipped(self):
+        z = state.normalize_zone(self._zone(display_name="n" * 5000))
+        self.assertEqual(len(z["name"]), state.MAX_TEXT)
+
+    def test_track_metadata_is_clipped(self):
+        z = state.normalize_zone(self._zone(now_playing={
+            "three_line": {"line1": "t" * 5000,
+                           "line2": "a" * 5000,
+                           "line3": "b" * 5000}}))
+        np = z["now_playing"]
+        for field in ("title", "artist", "album"):
+            self.assertEqual(len(np[field]), state.MAX_TEXT, field)
+
+    def test_an_ordinary_title_is_untouched(self):
+        z = state.normalize_zone(self._zone(now_playing={
+            "three_line": {"line1": "Speak to Me"}}))
+        self.assertEqual(z["now_playing"]["title"], "Speak to Me")
+
+    def test_the_core_name_is_clipped(self):
+        built = state.build("ok", {"host": "h", "name": "y" * 5000}, None, [])
+        self.assertEqual(len(built["core"]["name"]), state.MAX_TEXT)
+
+    def test_the_zone_list_is_capped(self):
+        many = [{"id": "z%d" % i, "name": "n", "state": "stopped"}
+                for i in range(state.MAX_ZONES + 50)]
+        built = state.build("ok", None, None, many)
+        self.assertEqual(len(built["zones"]), state.MAX_ZONES)
+
+    def test_names_in_the_zone_list_are_clipped_too(self):
+        built = state.build("ok", None, None,
+                            [{"id": "z1", "name": "n" * 5000, "state": "stopped"}])
+        self.assertEqual(len(built["zones"][0]["name"]), state.MAX_TEXT)
