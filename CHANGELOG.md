@@ -4,6 +4,61 @@ Notable changes to tonearm. Versions follow [semantic versioning](https://semver
 while the major version is 0, the minor version carries changes that would
 otherwise be breaking.
 
+## Unreleased
+
+### Fixed
+
+- **A network fault no longer masquerades as a dead Core**
+  ([#2](https://github.com/ssandys/tonearm/issues/2)). "Roon Core unreachable"
+  was shown whenever a connection failed, including when the Core was healthy
+  and this machine simply had no path to it — a VPN capturing the local subnet,
+  a link up but not routing. Observed on 2026-09-07: five hours pointing at the
+  wrong end of the problem while the Core sat 1.9ms away. When a connection
+  fails, tonearm now probes the default gateway (read from the main routing
+  table, so it is found even while policy routing diverts traffic) and reports
+  the new status `no_network` — "No route to your network" — when the gateway
+  itself does not answer. A refused connection counts as reachable, since it
+  proves a host answered; an inconclusive probe keeps the old wording rather
+  than guess.
+
+- **A Core that changes IP address no longer strands the daemon**
+  ([#1](https://github.com/ssandys/tonearm/issues/1)). Discovery used to run
+  only when no address was stored, so a new DHCP lease left tonearm retrying a
+  dead address forever — recoverable only by editing `config.json` by hand.
+  When the Core is unreachable, tonearm now asks the network where it went and
+  moves only to a Core it can identify as the one it was paired with: matched
+  on the SOOD `unique_id`, now persisted in `config.json`, falling back to the
+  Core's name for configs written before this release. A Core answering at the
+  address already stored is not a move, so one that is merely rebooting still
+  recovers through roonapi with no restart, and an ambiguous or unmatched
+  answer is refused rather than adopted.
+
+### Security
+
+- **The relocation check never sweeps the LAN.** `sood.discover()` falls back
+  to probing every host on the /24 when multicast goes unanswered — 254 TCP
+  connects on a typical network. That is a fair price once, on first run, with
+  someone waiting for it; it is not something to repeat. Because the daemon
+  retries by exiting and letting systemd restart it, a Core left switched off
+  would otherwise have produced a full-subnet scan roughly every 40 seconds for
+  as long as it stayed off. The relocation check is multicast-only.
+- **An address is written to disk only once a Core has answered on it.**
+  Discovery is unauthenticated UDP. A stale or forged reply can no longer
+  overwrite an address that works: a candidate is held in memory, and persisted
+  only after a successful connection. The connection watcher persists nothing
+  at all.
+- **Fields from a SOOD response are bounded** (`MAX_SOOD_FIELD`). The wire
+  format allows 64KB per value; a Core's name reaches the bar and MPRIS, and is
+  persisted. Oversized values are dropped rather than truncated, and the rest of
+  the response still parses.
+
+**Trust model, stated plainly:** SOOD is unauthenticated, and a Core broadcasts
+its `unique_id` in the clear, so identity matching cannot authenticate a reply —
+an attacker already on your LAN can forge one. What it prevents is *accidental*
+capture: a second Core in the house, a neighbour's on a shared network, one that
+answers while yours is down. This is the same trust assumption Roon's own
+discovery makes, and it is why nothing is persisted until a Core answers.
+
 ## 0.10.1 — 2026-09-14
 
 ### Security
@@ -22,6 +77,8 @@ otherwise be breaking.
   asking `git ls-files` because that is exactly what a clone delivers. An
   untracked file in a local worktree is unaffected; nothing about how the
   repository is developed needs to change.
+||||||| 36b4fa4
+
 
 ## 0.10.0 — 2026-09-02
 

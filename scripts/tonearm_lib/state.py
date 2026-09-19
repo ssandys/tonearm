@@ -8,7 +8,8 @@ iterated without restarting the service.
 from __future__ import annotations
 
 SCHEMA_VERSION = 1
-VALID_STATUS = ("connecting", "unpaired", "unreachable", "ok")
+VALID_STATUS = ("connecting", "unpaired", "unreachable",
+                "no_network", "ok")
 
 
 def _volume_of(roon_zone: dict) -> dict | None:

@@ -118,6 +118,24 @@ test("unpaired is a warning, unreachable is an error", () => {
   assert.strictEqual(M.barState({ status: "unreachable", zone: null }, 1, 1).glyph, M.GLYPH_FAULT)
 })
 
+test("a network fault is an error, and names the network rather than the Core", () => {
+  // The whole point of the status: a Core that is switched off and a machine
+  // that cannot route to the LAN look identical from the bar, and only one of
+  // them is fixed by going and looking at the Core.
+  const state = { status: "no_network", core: CORE, zone: null }
+  assert.strictEqual(M.barState(state, 1, 1).severity, "error")
+  assert.strictEqual(M.barState(state, 1, 1).glyph, M.GLYPH_FAULT)
+  assert.strictEqual(M.tooltipText(state), "No route to your network")
+  assert.notStrictEqual(M.tooltipText(state), "Roon Core unreachable")
+})
+
+test("an unknown status is still an error, not silently healthy", () => {
+  // Adding no_network must not have turned the severity table into
+  // something that trusts whatever the daemon sends.
+  assert.strictEqual(M.barState({ status: "no_networ", zone: null }, 1, 1).severity, "error")
+  assert.strictEqual(M.barState({ status: "constructor", zone: null }, 1, 1).severity, "error")
+})
+
 test("a null state -- the relay has not spoken yet -- is an error", () => {
   assert.strictEqual(M.barState(null, 1, 1).severity, "error")
 })
