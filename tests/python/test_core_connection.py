@@ -17,6 +17,7 @@ underneath.
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "scripts")))
@@ -48,7 +49,28 @@ def session(api, status="ok"):
     return s, published
 
 
+def _assume_lan_is_fine(testcase):
+    """Pin the gateway probe so these tests do not depend on the host network.
+
+    `_unreachable_status()` probes the default gateway to tell "the Core is
+    off" apart from "this machine has no route". That probe is real network
+    I/O, so any test reaching it inherits the runner's network: a gateway
+    that answers gives `unreachable`, one that does not gives `no_network`.
+    CI proved it -- eleven tests that pass on a home LAN failed on a runner
+    whose gateway does not answer tcp/80.
+
+    These tests are about the Core being unreachable, so they say so: the
+    LAN is fine, and the fault is the Core's.
+    """
+    patcher = patch.object(core.net, "lan_reachable", lambda: True)
+    patcher.start()
+    testcase.addCleanup(patcher.stop)
+
+
 class TestDetectsTheDrop(unittest.TestCase):
+    def setUp(self):
+        _assume_lan_is_fine(self)
+
     def test_a_sustained_drop_becomes_unreachable(self):
         api = FakeApi()
         s, published = session(api)
@@ -84,6 +106,9 @@ class TestDetectsTheDrop(unittest.TestCase):
 
 
 class TestRecovery(unittest.TestCase):
+    def setUp(self):
+        _assume_lan_is_fine(self)
+
     def test_coming_back_returns_to_ok(self):
         api = FakeApi(connected=False)
         s, published = session(api)
@@ -119,6 +144,9 @@ class TestRecovery(unittest.TestCase):
 
 
 class TestOnlyTransitionsPublish(unittest.TestCase):
+    def setUp(self):
+        _assume_lan_is_fine(self)
+
     def test_staying_down_publishes_once(self):
         api = FakeApi(connected=False)
         s, published = session(api)
@@ -137,6 +165,9 @@ class TestOnlyTransitionsPublish(unittest.TestCase):
 
 
 class TestSnapshotStopsClaimingAZone(unittest.TestCase):
+    def setUp(self):
+        _assume_lan_is_fine(self)
+
     def test_an_unreachable_snapshot_carries_no_zone(self):
         # Otherwise the popup renders the stale track in its card while the
         # header directly above says "Roon Core unreachable" -- two halves of

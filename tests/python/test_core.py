@@ -26,6 +26,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest.mock import patch
 import unittest.mock
 
 sys.path.insert(0, os.path.abspath(
@@ -177,6 +178,24 @@ class TestRawZones(unittest.TestCase):
     # however it arises, is retried and never escapes.
 
 
+def _assume_lan_is_fine(testcase):
+    """Pin the gateway probe so these tests do not depend on the host network.
+
+    `_unreachable_status()` probes the default gateway to tell "the Core is
+    off" apart from "this machine has no route". That probe is real network
+    I/O, so any test reaching it inherits the runner's network: a gateway
+    that answers gives `unreachable`, one that does not gives `no_network`.
+    CI proved it -- eleven tests that pass on a home LAN failed on a runner
+    whose gateway does not answer tcp/80.
+
+    These tests are about the Core being unreachable, so they say so: the
+    LAN is fine, and the fault is the Core's.
+    """
+    patcher = patch.object(core.net, "lan_reachable", lambda: True)
+    patcher.start()
+    testcase.addCleanup(patcher.stop)
+
+
 class TestStartRetriesByExiting(unittest.TestCase):
     """`start()` used to return permanently on a failed connection --
     Critical 1 of the final review. It now publishes the honest terminal
@@ -189,6 +208,7 @@ class TestStartRetriesByExiting(unittest.TestCase):
     """
 
     def setUp(self):
+        _assume_lan_is_fine(self)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self._prev_config_home = os.environ.get("XDG_CONFIG_HOME")

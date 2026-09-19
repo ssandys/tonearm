@@ -21,6 +21,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest.mock import patch
 import unittest.mock
 
 sys.path.insert(0, os.path.abspath(
@@ -132,8 +133,30 @@ class _ConfigIsolated(unittest.TestCase):
         config.reset_paths()
 
 
+def _assume_lan_is_fine(testcase):
+    """Pin the gateway probe so these tests do not depend on the host network.
+
+    `_unreachable_status()` probes the default gateway to tell "the Core is
+    off" apart from "this machine has no route". That probe is real network
+    I/O, so any test reaching it inherits the runner's network: a gateway
+    that answers gives `unreachable`, one that does not gives `no_network`.
+    CI proved it -- eleven tests that pass on a home LAN failed on a runner
+    whose gateway does not answer tcp/80.
+
+    These tests are about the Core being unreachable, so they say so: the
+    LAN is fine, and the fault is the Core's.
+    """
+    patcher = patch.object(core.net, "lan_reachable", lambda: True)
+    patcher.start()
+    testcase.addCleanup(patcher.stop)
+
+
 class TestStartFallsBackToDiscovery(_ConfigIsolated):
     """The startup half: a stored address that no longer answers."""
+    def setUp(self):
+        super().setUp()          # keeps config.py pointed at the scratch dir
+        _assume_lan_is_fine(self)
+
 
     def test_a_stale_address_is_replaced_and_the_connect_retried(self):
         published = []
@@ -233,6 +256,9 @@ class TestTheWatcherRelocates(_ConfigIsolated):
     evidence that the Core is somewhere else, which is the one thing roonapi's
     reconnect loop can never recover from.
     """
+    def setUp(self):
+        super().setUp()          # keeps config.py pointed at the scratch dir
+        _assume_lan_is_fine(self)
 
     def _down_session(self):
         restarts = []
