@@ -15,6 +15,7 @@ subscriber's own per-socket lock instead, so one slow peer stalls only itself.
 from __future__ import annotations
 
 import json
+import select
 import logging
 import os
 import socket
@@ -90,6 +91,38 @@ class _Subscriber:
                 return True
             except OSError:
                 return False
+
+    def is_dead(self) -> bool:
+        """True when this subscriber's peer has closed.
+
+        A unix stream socket whose peer is gone becomes readable at EOF, so
+        liveness needs no traffic, no timer on the client and no protocol
+        support. MSG_PEEK leaves anything real in the buffer: a subscriber
+        that happens to have sent bytes is chatty, not dead, and a later
+        reader must still find them.
+
+        Errs towards alive. A false positive drops a working widget; a false
+        negative costs one slot until the next sweep.
+        """
+        try:
+            readable, _, _ = select.select([self.sock], [], [], 0)
+            if not readable:
+                return False
+            return self.sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b""
+        except (BlockingIOError, InterruptedError):
+            return False
+        except (OSError, ValueError):
+            # A descriptor that is closed or invalid answers neither way, and
+            # is not one to keep. ValueError is the already-closed case:
+            # select() rejects a socket whose fileno() is -1.
+            return True
+        except Exception:
+            # Anything else means the question could not be asked, not that
+            # the answer was "dead". Erring the other way here would drop a
+            # working subscriber, which is strictly worse than holding a slot
+            # until the next sweep.
+            LOG.warning("could not assess subscriber liveness", exc_info=True)
+            return False
 
     def close(self) -> None:
         try:
@@ -373,6 +406,11 @@ class Server:
         lock only, and lands after the snapshot. Nothing waits on the global
         lock for longer than a list append.
         """
+        # Reclaim slots held by peers that have gone before deciding this
+        # connection cannot have one. Without it the cap counts corpses, and
+        # sixteen widget restarts lock the seventeenth out permanently.
+        self.reap_dead_subscribers()
+
         sub = _Subscriber(conn)
         # Claimed before the subscriber is visible, so a broadcast cannot
         # overtake the snapshot below.
@@ -406,6 +444,31 @@ class Server:
             pass
         conn.close()
 
+    def reap_dead_subscribers(self) -> int:
+        """Drop subscribers whose peer has closed; return how many went.
+
+        MAX_SUBSCRIBERS bounds the list, but until this existed a subscriber
+        was only removed when a write to it failed -- and writes only happen
+        on state changes. With nothing playing there are no writes, so every
+        widget restart leaked a slot and sixteen of them locked the real
+        widget out while the daemon still reported healthy. Measured on a
+        live install: 856 refusals over four days, every slot an orphan.
+
+        The liveness checks run OUTSIDE the lock, like every other piece of
+        I/O here: the lock is taken twice, briefly, to copy and to remove.
+        """
+        with self._lock:
+            current = list(self._subscribers)
+        dead = [sub for sub in current if sub.is_dead()]
+        if not dead:
+            return 0
+        with self._lock:
+            self._subscribers = [s for s in self._subscribers if s not in dead]
+        for sub in dead:
+            sub.close()
+        LOG.info("reaped %d subscriber(s) whose peer had closed", len(dead))
+        return len(dead)
+
     def _drop(self, sub: "_Subscriber") -> None:
         with self._lock:
             self._subscribers = [s for s in self._subscribers if s is not sub]
@@ -420,6 +483,12 @@ class Server:
         up. Each write is deadlined by SEND_TIMEOUT and serialized by that
         subscriber's own lock, so a stalled peer costs only itself.
         """
+        # Sweep here too, so the list stays clean during normal operation
+        # rather than only when someone new arrives. A closed peer is often
+        # noticed by the failing write below, but only if there IS a write:
+        # a paused zone can emit nothing for hours.
+        self.reap_dead_subscribers()
+
         blob = (json.dumps(payload) + "\n").encode()
         with self._lock:
             targets = list(self._subscribers)

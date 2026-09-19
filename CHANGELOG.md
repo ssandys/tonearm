@@ -4,6 +4,30 @@ Notable changes to tonearm. Versions follow [semantic versioning](https://semver
 while the major version is 0, the minor version carries changes that would
 otherwise be breaking.
 
+## 0.11.1 — 2026-09-19
+
+### Fixed
+
+- **Dead subscribers no longer lock the widget out**
+  ([#10](https://github.com/ssandys/tonearm/issues/10)). `MAX_SUBSCRIBERS`
+  bounded the subscriber list, but a subscriber was only removed when a write
+  to it failed — and writes only happen on state changes, so with nothing
+  playing a client that had gone was never noticed. Every widget restart left
+  a slot held by a closed peer; after sixteen, the daemon refused the real
+  widget and stayed that way. Found on a live install: 856 refusals over four
+  days, every slot `ESTAB` with `peer=*`, while `systemctl` reported the
+  service active and a direct `status` probe answered `ok` — so the only
+  symptom was the bar's fault glyph, which reads exactly like the daemon being
+  down.
+
+  Subscribers whose peer has closed are now reaped before a new subscribe is
+  refused, and again on every broadcast. Liveness is read from the socket
+  itself — a closed peer makes it readable at EOF — so it needs no traffic, no
+  client timer and no protocol change, and `MSG_PEEK` leaves a chatty
+  subscriber's bytes where a later reader will find them. The check errs
+  towards alive: dropping a working widget is worse than holding a slot until
+  the next sweep.
+
 ## 0.11.0 — 2026-09-19
 
 A review pass over the whole codebase, plus the two outages that prompted it.

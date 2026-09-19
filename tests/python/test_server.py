@@ -561,3 +561,87 @@ class TestStatusSurvivesAnUnserializableSnapshot(unittest.TestCase):
         second.sendall(b'{"cmd":"status"}\n')
         self.assertEqual(json.loads(second.makefile("r").readline())["status"], "ok")
         second.close()
+
+
+class TestDeadSubscribersAreReaped(unittest.TestCase):
+    """A subscriber whose peer has gone must not hold a slot forever.
+
+    MAX_SUBSCRIBERS bounds the list correctly, but nothing removed a
+    subscriber whose client had closed: a drop only happened when a write to
+    it failed, and writes only happen on state changes. With nothing playing
+    there are no writes, so dead connections accumulated -- one per widget
+    restart -- until all 16 slots were orphans and the live relay was
+    refused. Measured on a real install: 856 refusals over four days, every
+    slot ESTAB with peer=* and tonearmd the only holder, while the daemon
+    reported status ok the whole time.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        os.environ["XDG_RUNTIME_DIR"] = self.tmp.name
+        self.session = FakeSession()
+        self.srv = server.Server(self.session)
+        self.thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
+        self.thread.start()
+        for _ in range(100):
+            if os.path.exists(server.socket_path()):
+                break
+            time.sleep(0.01)
+        self.addCleanup(self.srv.shutdown)
+
+    def _subscribe(self):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(3)
+        sock.connect(server.socket_path())
+        sock.sendall(b'{"cmd":"subscribe"}\n')
+        sock.makefile("r").readline()          # the handshake snapshot
+        return sock
+
+    def _registered(self):
+        with self.srv._lock:
+            return len(self.srv._subscribers)
+
+    def test_a_closed_peer_frees_its_slot(self):
+        socks = [self._subscribe() for _ in range(3)]
+        self.assertEqual(self._registered(), 3)
+        for s in socks:
+            s.close()
+        self.srv.reap_dead_subscribers()
+        self.assertEqual(self._registered(), 0)
+
+    def test_a_live_subscriber_is_kept(self):
+        alive = self._subscribe()
+        self.addCleanup(alive.close)
+        dead = self._subscribe()
+        dead.close()
+        self.srv.reap_dead_subscribers()
+        self.assertEqual(self._registered(), 1)
+
+    def test_a_subscriber_that_sent_data_is_not_mistaken_for_dead(self):
+        # Readable does not mean closed. Peeking must not consume the bytes
+        # either, or a future reader would lose them.
+        chatty = self._subscribe()
+        self.addCleanup(chatty.close)
+        chatty.sendall(b'{"cmd":"noise"}\n')
+        time.sleep(0.1)
+        self.srv.reap_dead_subscribers()
+        self.assertEqual(self._registered(), 1)
+
+    def test_the_widget_is_not_locked_out_by_the_dead(self):
+        # The whole bug: fill every slot with orphans, then try to subscribe.
+        for _ in range(server.MAX_SUBSCRIBERS):
+            self._subscribe().close()
+        # _subscribe() only returns once the handshake snapshot has arrived,
+        # which a refused connection never sends -- so reaching here at all
+        # is the assertion that the reclaimed slot was usable.
+        live = self._subscribe()
+        self.addCleanup(live.close)
+        self.assertEqual(self._registered(), 1)
+
+    def test_live_subscribers_are_still_bounded(self):
+        # Reaping must not turn the cap into a suggestion.
+        socks = [self._subscribe() for _ in range(server.MAX_SUBSCRIBERS + 4)]
+        for s in socks:
+            self.addCleanup(s.close)
+        self.assertLessEqual(self._registered(), server.MAX_SUBSCRIBERS)
