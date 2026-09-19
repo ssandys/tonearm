@@ -126,3 +126,57 @@ class TestArbiter(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheArbiterDoesNotGrowForever(unittest.TestCase):
+    """Zone ids are wire data used as permanent dict keys.
+
+    `observe()` recorded every id it ever saw in `_started_at` and
+    `_last_state` and removed none, so both grew for the life of the
+    process. This is not only an abuse case: Roon mints a NEW zone id when
+    zones are grouped or ungrouped, so an ordinary household accumulates
+    entries just by grouping rooms. 0.10.0 bounded every other collection
+    keyed on wire data; this one was missed.
+    """
+
+    def test_ids_absent_from_the_listing_are_forgotten(self):
+        arb = zones.Arbiter()
+        for i in range(200):
+            # Each push is a different ephemeral zone, as a regroup produces.
+            arb.observe([{"id": "ephemeral-%d" % i, "state": "playing"}])
+        arb.observe([{"id": "kitchen", "state": "playing"}])
+        self.assertLessEqual(len(arb._started_at), 2)
+        self.assertLessEqual(len(arb._last_state), 2)
+
+    def test_the_zone_being_followed_survives_being_forgotten(self):
+        # select() falls back to _last_followed when nothing is active, so
+        # pruning must not evict the entry that fallback depends on.
+        arb = zones.Arbiter()
+        arb.observe([{"id": "kitchen", "state": "playing"}])
+        arb.observe([{"id": "kitchen", "state": "paused"}])
+        self.assertIn("kitchen", arb._last_state)
+        picked = arb.select([{"id": "kitchen", "state": "paused"}])
+        self.assertEqual(picked["id"], "kitchen")
+
+    def test_recency_still_ranks_correctly_after_pruning(self):
+        # The prune must not disturb the ordering it shares state with.
+        arb = zones.Arbiter()
+        arb.observe([{"id": "a", "state": "playing"},
+                     {"id": "b", "state": "stopped"}])
+        arb.observe([{"id": "a", "state": "playing"},
+                     {"id": "b", "state": "playing"}])
+        picked = arb.select([{"id": "a", "state": "playing"},
+                             {"id": "b", "state": "playing"}])
+        self.assertEqual(picked["id"], "b")   # b started more recently
+
+    def test_a_zone_that_leaves_and_returns_playing_counts_as_newly_started(self):
+        # Forgetting a departed zone means its return is a transition again,
+        # which is what actually happened from the listener's point of view.
+        arb = zones.Arbiter()
+        arb.observe([{"id": "old", "state": "playing"}])
+        arb.observe([{"id": "new", "state": "playing"}])          # old is gone
+        arb.observe([{"id": "new", "state": "playing"},
+                     {"id": "old", "state": "playing"}])          # old returns
+        picked = arb.select([{"id": "new", "state": "playing"},
+                             {"id": "old", "state": "playing"}])
+        self.assertEqual(picked["id"], "old")

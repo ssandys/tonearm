@@ -61,6 +61,24 @@ class Arbiter:
             self._last_followed = max(
                 active_ids, key=lambda zid: (self._started_at.get(zid, -1), zid))
 
+        # Forget ids that are not in this listing. Both dicts are keyed on
+        # zone ids straight off the wire and nothing ever removed one, so
+        # they grew for the life of the process -- and not only under abuse:
+        # Roon mints a NEW id whenever zones are grouped or ungrouped, so an
+        # ordinary household accumulates entries just by grouping rooms.
+        #
+        # Everything select() can still reach is kept: the ids in this
+        # listing, plus `_last_followed`, which select() falls back to when
+        # nothing is active. A zone that leaves and later returns playing is
+        # then a fresh transition, which is what it is from the listener's
+        # point of view -- previously it kept a stale counter and could
+        # outrank a zone that had genuinely just started.
+        live = {zone.get("id", "") for zone in zones}
+        if self._last_followed:
+            live.add(self._last_followed)
+        self._started_at = {k: v for k, v in self._started_at.items() if k in live}
+        self._last_state = {k: v for k, v in self._last_state.items() if k in live}
+
     def select(self, zones: list[dict]) -> dict | None:
         by_id = {z.get("id", ""): z for z in zones}
 
