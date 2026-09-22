@@ -6,6 +6,14 @@ BARE_VERBS = ("playpause", "play", "pause", "next", "previous",
               "mute", "unmute", "subscribe", "status")
 INT_VERBS = ("seek", "volume")
 
+# The browse session key this client claims when `--session` is not given.
+# NOT "widget": the key names a distinct browse cursor in the daemon, and
+# sending "widget" from here put every hand-typed `tonearmctl browse` on the
+# cursor the bar is rendering from -- a search in a terminal moved the popup.
+# server.py's own comment already said the real keys are "widget", "mcp" and
+# "cli"; this is the line that makes "cli" true.
+DEFAULT_SESSION = "cli"
+
 
 def to_request(argv: list[str]) -> dict:
     if not argv:
@@ -44,9 +52,9 @@ def to_request(argv: list[str]) -> dict:
         request = browse_request(argv)
         if request is None:
             raise ValueError(
-                "usage: tonearmctl browse search <term> | enter <i> <level_id>"
-                " | activate <i> <level_id> | play <i> <level_id>"
-                " | back | page <offset> | reset")
+                "usage: tonearmctl browse [--session <key>] search <term>"
+                " | enter <i> <level_id> | activate <i> <level_id>"
+                " | play <i> <level_id> | back | page <offset> | reset")
         return request
 
     raise ValueError("unknown verb %r" % verb)
@@ -67,9 +75,26 @@ def browse_request(argv):
     """
     if len(argv) < 2 or argv[0] != "browse":
         return None
-    op = argv[1]
-    base = {"cmd": "browse", "session": "widget", "op": op}
-    rest = argv[2:]
+
+    tokens = argv[1:]
+    session = DEFAULT_SESSION
+    # Consumed BEFORE the op, never after: `search` joins everything following
+    # its op with spaces, so a flag accepted on the tail would silently become
+    # part of the search term instead of the session key.
+    if tokens[0] == "--session":
+        # An empty key is refused rather than passed on. The daemon reads
+        # `payload.pop("session", None) or "widget"`, so "" there falls back to
+        # the WIDGET's cursor -- the exact collision this flag exists to stop.
+        if len(tokens) < 2 or not tokens[1]:
+            return None
+        session = tokens[1]
+        tokens = tokens[2:]
+        if not tokens:
+            return None
+
+    op = tokens[0]
+    base = {"cmd": "browse", "session": session, "op": op}
+    rest = tokens[1:]
     if op == "search":
         # Joined, so an unquoted multi-word term works from a shell.
         return dict(base, term=" ".join(rest))

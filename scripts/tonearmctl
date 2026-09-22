@@ -7,6 +7,11 @@ command and read exactly one reply line (Task 13's setup.sh --check uses
 Exit codes: 0 ok, 2 usage, 3 daemon not running, 4 daemon accepted but did not
 answer in time -- except `browse`, which exits 1 rather than 0 when the reply's
 `ok` is false.
+
+`browse` takes an optional `--session <key>` before its op, naming which of the
+daemon's browse cursors to drive; it defaults to "cli" so that browsing from a
+terminal does not move the bar widget's own cursor. The flag must precede the
+op because `search` joins everything after its op into the search term.
 """
 
 import json

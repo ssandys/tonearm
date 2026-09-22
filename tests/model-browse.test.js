@@ -127,3 +127,38 @@ test("activatePlayed is strict about the flag's type", () => {
   assert.strictEqual(M.activatePlayed({ ok: true, played: "true" }), false)
   assert.strictEqual(M.activatePlayed({ ok: true, played: 1 }), false)
 })
+
+// --- browseArgv ------------------------------------------------------------
+//
+// The widget must name its own browse session. `tonearmctl browse` now
+// defaults to the "cli" key, so a widget that sends no key at all would land
+// on the CLI's cursor rather than its own -- the same collision as before,
+// pointed the other way.
+
+test("browseArgv names the widget's own session key", () => {
+  assert.deepStrictEqual(
+    M.browseArgv(["back"]),
+    ["browse", "--session", "widget", "back"])
+})
+
+test("browseArgv puts the flag before the op, never after", () => {
+  // `search` joins everything after its op into the term, so a flag on the
+  // tail would be searched for instead of parsed.
+  const argv = M.browseArgv(["search", "oingo boingo"])
+  assert.strictEqual(argv.indexOf("--session") < argv.indexOf("search"), true)
+  assert.strictEqual(argv[argv.length - 1], "oingo boingo")
+})
+
+test("browseArgv stringifies its arguments", () => {
+  // BrowsePane already sends strings, but index/level_id are numbers at their
+  // source and Process.command rejects a non-string entry.
+  assert.deepStrictEqual(
+    M.browseArgv(["enter", 2, 7]),
+    ["browse", "--session", "widget", "enter", "2", "7"])
+})
+
+test("browseArgv tolerates no arguments", () => {
+  assert.deepStrictEqual(
+    M.browseArgv([]),
+    ["browse", "--session", "widget"])
+})

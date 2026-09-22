@@ -149,8 +149,10 @@ Item {
   // onExited. Callers rely on that guarantee to clear their `busy` flag; a
   // path that can skip the callback freezes the pane silently.
   function browse(args, callback) {
-    var argv = [root.ctlPath, "browse"]
-    for (var i = 0; i < args.length; i++) argv.push(String(args[i]))
+    // Model.browseArgv, not a literal "browse" here: it carries the widget's
+    // own --session key, which tonearmctl no longer supplies by default. A
+    // bare "browse" would now land on the CLI's cursor.
+    var argv = [root.ctlPath].concat(Model.browseArgv(args))
     var proc = rpcComponent.createObject(root, {
       command: argv,
       callback: callback

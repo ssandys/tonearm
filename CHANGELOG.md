@@ -4,6 +4,38 @@ Notable changes to tonearm. Versions follow [semantic versioning](https://semver
 while the major version is 0, the minor version carries changes that would
 otherwise be breaking.
 
+## 0.11.2 — 2026-09-22
+
+### Fixed
+
+- **`tonearmctl browse` no longer drives the bar's cursor.** The daemon keeps
+  one Roon browse cursor per session key, and that isolation is real and
+  tested — but `cli.py` hard-coded `"session": "widget"` for every caller, so
+  the key never distinguished anyone. A `tonearmctl browse search` typed in a
+  terminal moved the popup's own cursor: the pane's next keystroke addressed
+  rows it was no longer showing, and `server.py`'s comment claiming the real
+  keys are `widget`, `mcp` and `cli` described an intent the code had never
+  implemented.
+
+  `browse` now takes an optional `--session <key>` and defaults to `cli`. The
+  flag must precede the op, because `search` joins everything after its op
+  into the search term — on the tail it would be searched for rather than
+  parsed. An empty key is refused at the edge rather than forwarded, since the
+  daemon reads `payload.pop("session", None) or "widget"` and an empty string
+  there lands back on the widget's cursor, which is the collision being
+  closed. The widget names itself explicitly through the new
+  `Model.browseArgv`, so it keeps the `widget` key rather than inheriting a
+  default.
+
+  No protocol change: the wire field, its bound and the daemon's per-key
+  isolation are all untouched. Verified against a live daemon — the same
+  `browse reset` returned `level_id: 1` on the new `cli` cursor and
+  `level_id: 8` on the `widget` cursor the bar had been driving.
+
+  This does not by itself fix the multi-monitor case, where every bar surface
+  still sends `widget` and shares one cursor between them; `level_id` already
+  makes that fail safe rather than act on the wrong row.
+
 ## 0.11.1 — 2026-09-19
 
 ### Fixed

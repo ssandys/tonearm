@@ -564,6 +564,28 @@ function moveCursor(current, delta, count) {
   return next
 }
 
+// The session key names a browse cursor in the daemon, one per key, and the
+// widget must claim its own: `tonearmctl browse` defaults to "cli" now, so a
+// widget that sent no key would navigate the CLI's cursor instead of its own.
+//
+// The flag goes ahead of the op because `search` joins every argument after
+// its op into the search term -- on the tail, "--session" would be searched
+// for rather than parsed (cli.py's browse_request consumes it before the op
+// for the same reason).
+//
+// Here rather than in Service.qml because it is decidable and therefore
+// testable under node; Service.qml stays as small as the unverifiable surface
+// allows. Note this is the argv TAIL -- Service.qml prepends ctlPath, which
+// is the one part that cannot be known here.
+var BROWSE_SESSION = "widget"
+
+function browseArgv(args) {
+  var argv = ["browse", "--session", BROWSE_SESSION]
+  var list = args || []
+  for (var i = 0; i < list.length; i++) argv.push(String(list[i]))
+  return argv
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     normalizeHex: normalizeHex,
@@ -597,6 +619,7 @@ if (typeof module !== "undefined") {
     artUrl: artUrl,
     imageUrl: imageUrl,
     rowArtUrl: rowArtUrl,
-    moveCursor: moveCursor
+    moveCursor: moveCursor,
+    browseArgv: browseArgv
   }
 }
