@@ -260,6 +260,21 @@ class TestStartRetriesByExiting(unittest.TestCase):
         self.assertEqual(session.status, "ok")
         self.assertEqual(published[-1]["status"], "ok")
 
+    def test_a_bootstrapped_core_skips_initial_discovery(self):
+        config.bootstrap_core("192.168.50.44", 19331, 19151)
+        session = core.RoonSession(lambda _payload: None)
+        fake_api = types.SimpleNamespace(
+            token=None, zones={}, register_state_callback=lambda cb: None)
+
+        with unittest.mock.patch.object(core.sood, "discover") as discover, \
+             unittest.mock.patch.object(core.RoonSession, "_connect",
+                                        return_value=fake_api) as connect:
+            session.start()
+
+        discover.assert_not_called()
+        connect.assert_called_once_with(None)
+        self.assertEqual(session._candidate_ports(), [19331, 19151])
+
 
 if __name__ == "__main__":
     unittest.main()

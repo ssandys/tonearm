@@ -16,11 +16,14 @@ token lives here, which is why this file is stricter than its size suggests.
 from __future__ import annotations
 
 import errno
+import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 import stat
+import sys
 
 LOG = logging.getLogger("tonearmd.config")
 
@@ -50,6 +53,9 @@ DEFAULTS = {
     "unique_id": None,
     "pinned_zone_id": None,
 }
+
+_HOST_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
+_PORT = re.compile(r"[0-9]+")
 
 
 def reset_paths() -> None:
@@ -189,6 +195,88 @@ def save(cfg: dict) -> None:
     _write_private(CONFIG_NAME, json.dumps(merged, indent=2) + "\n")
 
 
+def _validated_host(value) -> str:
+    """Return an IP literal or DNS hostname suitable for a direct Core.
+
+    This validates syntax only. Resolving the name here would make setup's
+    result depend on DNS and would still not prove that a Roon Core owns the
+    answer; the daemon's bounded connection attempt is that check.
+    """
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError("Core host must be a non-empty IP address or hostname")
+    if len(value) > 253:
+        raise ValueError("Core host is too long")
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        address = None
+    if address is not None:
+        if address.version == 4:
+            return value
+        # Core and art URLs currently interpolate host:port without IPv6
+        # brackets. Accepting a literal here would save a config the runtime
+        # cannot use.
+        raise ValueError("IPv6 Core literals are not supported")
+    candidate = value[:-1] if value.endswith(".") else value
+    labels = candidate.split(".")
+    if not candidate or any(_HOST_LABEL.fullmatch(label) is None
+                            for label in labels):
+        raise ValueError("invalid Core host %r" % value)
+    return value
+
+
+def _validated_port(name: str, value) -> int:
+    if isinstance(value, bool):
+        raise ValueError("%s must be an integer from 1 to 65535" % name)
+    if isinstance(value, str):
+        if _PORT.fullmatch(value) is None:
+            raise ValueError("%s must be an integer from 1 to 65535" % name)
+        port = int(value)
+    elif isinstance(value, int):
+        port = value
+    else:
+        raise ValueError("%s must be an integer from 1 to 65535" % name)
+    if not 1 <= port <= 65535:
+        raise ValueError("%s must be an integer from 1 to 65535" % name)
+    return port
+
+
+def bootstrap_core(host, http_port=9330, tcp_port=9150) -> None:
+    """Persist an explicit first-run Core through the guarded config writer.
+
+    A repeat for the same host may correct its advertised ports and preserves
+    everything unrelated: identity, pin and the separately stored token. Core
+    switching is deliberately refused because deciding whether a pairing token
+    belongs to the replacement is a different operation from bootstrapping a
+    machine where discovery is unreliable.
+    """
+    checked_host = _validated_host(host)
+    checked_http = _validated_port("HTTP port", http_port)
+    checked_tcp = _validated_port("TCP port", tcp_port)
+    cfg = load()
+    configured = cfg.get("host")
+    if configured and configured != checked_host:
+        raise ValueError(
+            "a different Core is already configured at %s" % configured)
+    cfg.update({"host": checked_host, "http_port": checked_http,
+                "tcp_port": checked_tcp})
+    save(cfg)
+
+
+def _main(argv: list[str]) -> int:
+    """Private adapter used by setup.sh; setup.sh is the public interface."""
+    if len(argv) != 4 or argv[0] != "bootstrap-core":
+        print("usage: python -m tonearm_lib.config "
+              "bootstrap-core HOST HTTP_PORT TCP_PORT", file=sys.stderr)
+        return 2
+    try:
+        bootstrap_core(argv[1], argv[2], argv[3])
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    return 0
+
+
 def load_token() -> str | None:
     raw = _read_private(TOKEN_NAME, MAX_TOKEN_BYTES)
     if raw is None:
@@ -198,3 +286,7 @@ def load_token() -> str | None:
 
 def save_token(token: str) -> None:
     _write_private(TOKEN_NAME, token)
+
+
+if __name__ == "__main__":
+    sys.exit(_main(sys.argv[1:]))

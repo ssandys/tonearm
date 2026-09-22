@@ -11,6 +11,7 @@ These run setup.sh for real, with a `systemctl` shim first on PATH so nothing
 touches the live user session.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -20,7 +21,7 @@ import unittest
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-SYSTEMCTL_SHIM = "#!/bin/sh\nexit 0\n"
+SYSTEMCTL_SHIM = "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_LOG\"\nexit 0\n"
 
 
 def _deps_present():
@@ -50,6 +51,9 @@ class SetupTestCase(unittest.TestCase):
         shutil.copy(os.path.join(REPO, "setup.sh"), self.plugin)
         shutil.copytree(os.path.join(REPO, "systemd"),
                         os.path.join(self.plugin, "systemd"))
+        os.makedirs(os.path.join(self.plugin, "scripts"))
+        shutil.copytree(os.path.join(REPO, "scripts", "tonearm_lib"),
+                        os.path.join(self.plugin, "scripts", "tonearm_lib"))
 
         self.unit_dir = os.path.join(self.home, ".config", "systemd", "user")
         self.target = os.path.join(self.unit_dir, "tonearmd.service")
@@ -61,13 +65,31 @@ class SetupTestCase(unittest.TestCase):
             handle.write(SYSTEMCTL_SHIM)
         os.chmod(shim, 0o755)
         self.shim_dir = shim_dir
+        self.systemctl_log = os.path.join(self.home, "systemctl.log")
 
-    def run_setup(self):
+    def run_setup(self, *args):
         env = dict(os.environ)
         env["HOME"] = self.home
+        # config.py honours XDG_CONFIG_HOME before HOME. A developer session
+        # may export it, but this real-setup fixture must never read or write
+        # the developer's live Tonearm config.
+        env.pop("XDG_CONFIG_HOME", None)
         env["PATH"] = self.shim_dir + os.pathsep + env["PATH"]
-        return subprocess.run([os.path.join(self.plugin, "setup.sh")],
+        env["SYSTEMCTL_LOG"] = self.systemctl_log
+        return subprocess.run([os.path.join(self.plugin, "setup.sh"), *args],
                               env=env, capture_output=True, text=True, timeout=60)
+
+    def systemctl_calls(self):
+        if not os.path.exists(self.systemctl_log):
+            return []
+        with open(self.systemctl_log) as handle:
+            return handle.read().splitlines()
+
+    def config_path(self):
+        return os.path.join(self.home, ".config", "tonearm", "config.json")
+
+    def token_path(self):
+        return os.path.join(self.home, ".config", "tonearm", "token")
 
     def temp_leftovers(self):
         if not os.path.isdir(self.unit_dir):
@@ -91,6 +113,96 @@ class TestCleanInstall(SetupTestCase):
         self.assertEqual(self.run_setup().returncode, 0)
         second = self.run_setup()
         self.assertEqual(second.returncode, 0, second.stderr)
+
+
+class TestExplicitCoreBootstrap(SetupTestCase):
+    def load_config(self):
+        with open(self.config_path()) as handle:
+            return json.load(handle)
+
+    def test_explicit_core_uses_the_advertised_default_ports(self):
+        result = self.run_setup("--core", "192.168.50.44")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cfg = self.load_config()
+        self.assertEqual(cfg["host"], "192.168.50.44")
+        self.assertEqual(cfg["http_port"], 9330)
+        self.assertEqual(cfg["tcp_port"], 9150)
+
+    def test_explicit_core_accepts_custom_ports(self):
+        result = self.run_setup("--core", "roon-core.home",
+                                "--http-port", "19331",
+                                "--tcp-port", "19151")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cfg = self.load_config()
+        # Deliberately unlike either default: ignoring an option cannot pass.
+        self.assertEqual(cfg["http_port"], 19331)
+        self.assertEqual(cfg["tcp_port"], 19151)
+
+    def test_invalid_input_does_not_install_or_start_the_service(self):
+        cases = [
+            ("--core", ""),
+            ("--core", "http://192.168.50.44"),
+            ("--core", "192.168.50.44", "--http-port", "0"),
+            ("--core", "192.168.50.44", "--tcp-port", "65536"),
+            ("--core", "192.168.50.44", "--tcp-port", "not-a-port"),
+        ]
+        for args in cases:
+            with self.subTest(args=args):
+                result = self.run_setup(*args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(os.path.exists(self.target))
+                self.assertFalse(os.path.exists(self.config_path()))
+                self.assertEqual(self.systemctl_calls(), [])
+
+    def test_ports_without_a_core_are_rejected_before_install(self):
+        result = self.run_setup("--http-port", "19331")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(os.path.exists(self.target))
+        self.assertEqual(self.systemctl_calls(), [])
+
+    def test_repeated_bootstrap_preserves_token_pin_and_identity(self):
+        state_dir = os.path.dirname(self.config_path())
+        os.makedirs(state_dir)
+        with open(self.config_path(), "w") as handle:
+            json.dump({"host": "192.168.50.44", "http_port": 9330,
+                       "tcp_port": 9150, "name": "yavin",
+                       "unique_id": "uid-yavin", "pinned_zone_id": "zone-7"},
+                      handle)
+        with open(self.token_path(), "w") as handle:
+            handle.write("pairing-token")
+        os.chmod(self.token_path(), 0o600)
+
+        first = self.run_setup("--core", "192.168.50.44",
+                               "--http-port", "19331")
+        second = self.run_setup("--core", "192.168.50.44",
+                                "--http-port", "19331")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        cfg = self.load_config()
+        self.assertEqual(cfg["pinned_zone_id"], "zone-7")
+        self.assertEqual(cfg["name"], "yavin")
+        self.assertEqual(cfg["unique_id"], "uid-yavin")
+        with open(self.token_path()) as handle:
+            self.assertEqual(handle.read(), "pairing-token")
+        self.assertEqual(os.stat(self.token_path()).st_mode & 0o077, 0)
+        self.assertEqual(os.stat(self.config_path()).st_mode & 0o077, 0)
+        self.assertEqual(os.stat(state_dir).st_mode & 0o077, 0)
+
+    def test_a_different_configured_core_is_refused(self):
+        state_dir = os.path.dirname(self.config_path())
+        os.makedirs(state_dir)
+        original = {"host": "192.168.50.44", "http_port": 9330,
+                    "tcp_port": 9150, "name": "yavin",
+                    "unique_id": "uid-yavin", "pinned_zone_id": "zone-7"}
+        with open(self.config_path(), "w") as handle:
+            json.dump(original, handle)
+
+        result = self.run_setup("--core", "192.168.50.99")
+        self.assertNotEqual(result.returncode, 0)
+        with open(self.config_path()) as handle:
+            self.assertEqual(json.load(handle), original)
+        self.assertFalse(os.path.exists(self.target))
+        self.assertEqual(self.systemctl_calls(), [])
 
 
 class TestRefusesToWriteThroughAPlant(SetupTestCase):
