@@ -1,0 +1,14 @@
+# Declares Service as a QML singleton: ONE instance for the whole shell engine,
+# not one per importing component.
+#
+# The bar builds a widget per bar surface, and a bar surface exists per
+# monitor. Everything instantiated inside the widget therefore existed once per
+# monitor -- including `tonearmctl subscribe`, so a two-monitor setup held two
+# persistent subscriptions to tonearmd and a three-monitor setup held three.
+#
+# NOT the same thing as `.pragma library`, which is its opposite: a .js file
+# without that pragma gets one instance PER importing component, which is why
+# Model.js passes shared tables per call instead of holding them. A QML
+# singleton gets one instance for the engine. Do not "fix" this file by
+# reasoning from that one.
+singleton Service 1.0 Service.qml

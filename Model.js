@@ -564,9 +564,10 @@ function moveCursor(current, delta, count) {
   return next
 }
 
-// The session key names a browse cursor in the daemon, one per key, and the
-// widget must claim its own: `tonearmctl browse` defaults to "cli" now, so a
-// widget that sent no key would navigate the CLI's cursor instead of its own.
+// The session key names a browse cursor in the daemon, one per key, and each
+// bar SURFACE must claim its own -- see browseSession above. `tonearmctl
+// browse` defaults to "cli", so a widget that sent no key at all would
+// navigate the CLI's cursor rather than any of its own.
 //
 // The flag goes ahead of the op because `search` joins every argument after
 // its op into the search term -- on the tail, "--session" would be searched
@@ -577,10 +578,43 @@ function moveCursor(current, delta, count) {
 // testable under node; Service.qml stays as small as the unverifiable surface
 // allows. Note this is the argv TAIL -- Service.qml prepends ctlPath, which
 // is the one part that cannot be known here.
+// The browse session key for a surface with no screen name yet. Also the key
+// the plugin used for every surface at once, which is the defect this pair of
+// functions closes.
 var BROWSE_SESSION = "widget"
 
-function browseArgv(args) {
-  var argv = ["browse", "--session", BROWSE_SESSION]
+// server.py refuses a session key longer than this (MAX_SESSION_KEY), and a
+// refusal surfaces in the pane as an error the user cannot act on.
+var MAX_SESSION_KEY = 64
+
+// The bar builds one widget per monitor, so a per-surface browse cursor needs
+// a per-surface name. The screen name is it: stable across a hot reload (a
+// counter would not be), bounded by the number of monitors, and legible in a
+// daemon log.
+//
+// An unresolved screen falls back to the shared key rather than to something
+// invented per call: the old behaviour for one surface, where a fresh key each
+// time would churn through the daemon's eight LRU browse slots and evict the
+// mcp and cli sessions along with it.
+function browseSession(screenName) {
+  var raw = String(screenName === null || screenName === undefined ? "" : screenName)
+  // The compositor names the screen, and the result becomes a dictionary key
+  // in another process -- core.py calls the session key a wire field and caps
+  // what a client may allocate with it. Keeping the accepted shape decided
+  // here means the daemon is never the first thing to see a surprise.
+  var safe = raw.replace(/[^A-Za-z0-9._-]/g, "")
+  if (safe.length === 0) return BROWSE_SESSION
+  var key = BROWSE_SESSION + "-" + safe
+  return key.length > MAX_SESSION_KEY ? key.substring(0, MAX_SESSION_KEY) : key
+}
+
+function browseArgv(session, args) {
+  // Never an empty key: cli.py REFUSES `--session ""` rather than forwarding
+  // it, so an empty one here exits 2 with usage, the reply parses as null, and
+  // the pane reports an error the user cannot act on. The shared key is the
+  // old behaviour and merely shares a cursor.
+  var key = String(session || "") || BROWSE_SESSION
+  var argv = ["browse", "--session", key]
   var list = args || []
   for (var i = 0; i < list.length; i++) argv.push(String(list[i]))
   return argv
@@ -620,6 +654,7 @@ if (typeof module !== "undefined") {
     imageUrl: imageUrl,
     rowArtUrl: rowArtUrl,
     moveCursor: moveCursor,
-    browseArgv: browseArgv
+    browseArgv: browseArgv,
+    browseSession: browseSession
   }
 }

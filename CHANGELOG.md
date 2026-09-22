@@ -4,6 +4,51 @@ Notable changes to tonearm. Versions follow [semantic versioning](https://semver
 while the major version is 0, the minor version carries changes that would
 otherwise be breaking.
 
+## 0.11.3 — 2026-09-22
+
+### Fixed
+
+- **One subscription per shell, not one per monitor.** The bar instantiates a
+  widget per bar surface and a surface exists per monitor, so everything
+  inside the widget existed once per monitor — including the long-lived
+  `tonearmctl subscribe`. A two-monitor desk held two persistent subscriptions
+  to `tonearmd`, a three-monitor desk three, each one a Python process and a
+  slot against `MAX_SUBSCRIBERS`. It is invisible on the single-monitor
+  machine plugins get developed on, which is why it lasted.
+
+  `Service.qml` is now a QML singleton (`qmldir`), refcounted by
+  `attach()`/`detach()` so the relay runs only while a widget is alive to read
+  it. `consumers` is clamped at zero rather than trusted to balance, because
+  `Component.onDestruction` is not a guarantee — the same class of problem as
+  a `Process` that never emits `exited()` on a failed spawn. The reconnect
+  path is guarded on the same count: without that, detaching the last widget
+  set `running = false`, which lands in `onRunningChanged`, which restarts the
+  backoff — and the relay would respawn forever with nobody reading it.
+
+  Measured on a live shell with a second surface (`hyprctl output create
+  headless`), old and new running side by side as separate plugin ids: two
+  surfaces gave the old copy two `tonearmctl subscribe` processes and the new
+  one exactly one. Removing a surface left the relay up; disabling the last
+  widget stopped it and it stayed stopped past the 30s backoff cap; two
+  consecutive redeploys re-attached at zero rather than climbing.
+
+- **A browse cursor per bar surface.** The singleton shares the relay, which
+  is right — every monitor must agree about what is playing — but a browse
+  cursor is not feed data, and all surfaces were still driving the daemon's
+  one `widget` key. Navigating on one monitor re-rendered the pane on
+  another; `level_id` made that fail safe rather than play the wrong album,
+  so it surfaced as a pane that inexplicably snapped back.
+
+  Each surface now derives its own key from its screen name
+  (`widget-DP-7`), which is stable across a hot reload where a counter would
+  not be, and bounded by the number of monitors. A surface created after
+  startup briefly has no window to read a screen name from; it falls back to
+  the shared key and the binding corrects itself once the window resolves —
+  measured at about two seconds, long before a popup can be opened. The
+  pane's own rows, cursor and path were never moved into the singleton: they
+  are per-surface UI state, and sharing them would mean typing on one monitor
+  changing what someone is reading on another.
+
 ## 0.11.2 — 2026-09-22
 
 ### Fixed

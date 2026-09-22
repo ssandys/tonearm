@@ -1,3 +1,4 @@
+pragma Singleton
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -10,12 +11,39 @@ import "Model.js" as Model
 // in Model.js so it can be tested under node; this file exists to be as
 // small as the unverifiable surface allows.
 //
-// Panel.qml (Task 15) binds to this and renders; it holds no display state
+// Panel.qml binds to this and renders; it holds no display state
 // of its own -- same split as headway/colophon/galley's own Service.qml.
+//
+// SINGLETON (see qmldir). The bar instantiates a widget per bar surface and a
+// surface exists per monitor, so this object used to exist once per monitor:
+// N `tonearmctl subscribe` processes, N backoff timers, N subscribers the
+// daemon fanned out to. One instance now serves every surface, refcounted by
+// attach()/detach() so the relay runs only while a widget is alive to read it.
+//
+// What is shared here is FEED DATA -- the daemon's state, which every surface
+// must agree about. Per-surface UI state (the browse pane's rows and cursor,
+// the popup's open flag, the seek clock) stays in the widget: moving it here
+// would make typing on one monitor change what someone is reading on another.
+//
+// One shared service also means one shared failure: a wedged relay now costs
+// every monitor rather than one. That is the trade being made deliberately,
+// and it is why the failure paths below resolve rather than strand.
 Item {
   id: root
 
-  property string ctlPath: ""
+  // Resolved eagerly rather than in Component.onCompleted. A singleton is
+  // created on first ACCESS, which is attach(), so a handler-assigned path
+  // would depend on completion running before the call that triggered it --
+  // and an empty ctlPath spawns nothing, which presents as a relay that
+  // silently never connects.
+  readonly property string ctlPath: root.pathFromUrl(Qt.resolvedUrl("scripts/tonearmctl"))
+
+  // Live widgets. The relay runs only while this is above zero: a removed
+  // surface that left the subscription up would hold a daemon slot and a
+  // process for the life of the shell.
+  property int consumers: 0
+  readonly property bool shouldRun: root.consumers > 0
+
   // Last payload from the daemon, or null when the relay has never spoken
   // (startup, or tonearmd down).
   property var state: null
@@ -27,6 +55,31 @@ Item {
   // Backoff step, reset to 0 on every successfully parsed line so a long
   // healthy connection does not leave the NEXT reconnect waiting 30s.
   property int _attempt: 0
+
+  // Clamped at zero on purpose. A dev-mode hot reload recreates widgets, and
+  // if this object outlives them then attach() runs again with no matching
+  // detach() -- or detach() runs for a widget that was already gone. An
+  // unclamped counter drifts below zero and shouldRun latches false, which
+  // presents as a bar that never reconnects until the shell restarts.
+  function attach() { root.consumers = root.consumers + 1 }
+  function detach() { root.consumers = Math.max(0, root.consumers - 1) }
+
+  // The relay's running state is assigned, never bound: `running:` as a
+  // binding would be destroyed the first time the backoff timer assigned to
+  // it, and the reconnect path does exactly that.
+  onShouldRunChanged: {
+    if (root.shouldRun) {
+      // A surface arriving after a spell with none should not inherit the
+      // previous run's backoff step and sit out up to 30s before its first
+      // connection attempt.
+      root._attempt = 0
+      backoff.stop()
+      relay.running = true
+    } else {
+      backoff.stop()
+      relay.running = false
+    }
+  }
 
   Process {
     id: relay
@@ -63,6 +116,11 @@ Item {
         // though every current reader of receivedAt is gated behind a
         // non-null zone.
         root.receivedAt = 0
+        // Only reconnect while a surface is watching. Without this, detaching
+        // the last widget sets running=false, which lands HERE, which restarts
+        // the backoff -- and the relay respawns forever with nobody reading
+        // it. The stop-path would quietly undo itself.
+        if (!root.shouldRun) return
         backoff.interval = Model.nextRetryDelay(root._attempt)
         root._attempt = root._attempt + 1
         backoff.restart()
@@ -148,11 +206,13 @@ Item {
   // spawn -- because the Process above drains on onRunningChanged rather than
   // onExited. Callers rely on that guarantee to clear their `busy` flag; a
   // path that can skip the callback freezes the pane silently.
-  function browse(args, callback) {
-    // Model.browseArgv, not a literal "browse" here: it carries the widget's
-    // own --session key, which tonearmctl no longer supplies by default. A
-    // bare "browse" would now land on the CLI's cursor.
-    var argv = [root.ctlPath].concat(Model.browseArgv(args))
+  //
+  // `session` is the CALLER's browse key, not this object's: the relay is
+  // shared across surfaces but a browse cursor must not be, or navigating on
+  // one monitor moves the rows another monitor is showing. Panel.qml derives
+  // it per surface from the screen name.
+  function browse(session, args, callback) {
+    var argv = [root.ctlPath].concat(Model.browseArgv(session, args))
     var proc = rpcComponent.createObject(root, {
       command: argv,
       callback: callback
@@ -178,12 +238,5 @@ Item {
     var value = String(url || "")
     if (value.indexOf("file://") === 0) return decodeURIComponent(value.substring(7))
     return value
-  }
-
-  Component.onCompleted: {
-    // Exactly one onCompleted handler: QML rejects a duplicate and the whole
-    // component fails to instantiate with nothing in the journal.
-    root.ctlPath = root.pathFromUrl(Qt.resolvedUrl("scripts/tonearmctl"))
-    relay.running = true
   }
 }
