@@ -26,8 +26,11 @@ const REPO = path.join(__dirname, "..")
 
 // A scratch HOME plus a PATH directory of shims. `pingSucceedsAfter` is which
 // `shell ping` call first answers, so a test can make the shell come back
-// late, or never at all.
-function scratch(pingSucceedsAfter) {
+// late, or never at all. `restartExit` is what `omarchy restart shell` exits
+// with -- NOT always 0: the real one exits 1 when it loses its own race, and a
+// shim that only ever succeeds exercises the happy path of the very command
+// whose unhappy path this guard exists for.
+function scratch(pingSucceedsAfter, restartExit = 0) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tonearm-dev-"))
   const bin = path.join(dir, "bin")
   fs.mkdirSync(bin)
@@ -37,7 +40,15 @@ function scratch(pingSucceedsAfter) {
   fs.writeFileSync(counter, "0")
 
   fs.writeFileSync(path.join(bin, "omarchy"),
-    `#!/bin/bash\necho "omarchy $*" >> ${JSON.stringify(log)}\nexit 0\n`,
+    `#!/bin/bash\n` +
+    `echo "omarchy $*" >> ${JSON.stringify(log)}\n` +
+    // Word for word what omarchy-restart-shell:92 prints before exiting 1.
+    `if [[ "$1 $2" == "restart shell" ]]; then\n` +
+    `  if (( ${restartExit} != 0 )); then\n` +
+    `    echo "Omarchy shell did not become ready after restart." >&2\n` +
+    `  fi\n` +
+    `  exit ${restartExit}\n` +
+    `fi\nexit 0\n`,
     { mode: 0o755 })
 
   // `shell ping` is the only call with behaviour: it fails until the nth ask,
@@ -121,4 +132,30 @@ test("down guards its restart too", () => {
   const r = runDev(s, "down")
   assert.notEqual(r.code, 0, "a dead shell must not exit 0 from down either: " + r.out)
   assert.equal(s.restarts(), 2, "same one-retry budget as up")
+})
+
+test("a failing restart does not abort the guard that exists for it", () => {
+  // `omarchy restart shell` exits 1 when it loses its own race, printing
+  // "Omarchy shell did not become ready after restart". Under `set -e` that
+  // aborted restart_shell at its FIRST line -- before the wait and the retry
+  // written for exactly this case -- so bin/dev exited carrying omarchy's
+  // message and none of its own, having never once asked whether a shell was
+  // there. Here one is, so the answer was available for the asking.
+  const s = scratch(1, 1)
+  const r = runDev(s, "up")
+  assert.equal(r.code, 0, "a shell that IS answering must not be reported as failure: " + r.out)
+  assert.match(s.calls(), /omarchy-shell shell ping/, "it has to ask before concluding")
+  assert.equal(s.restarts(), 1, "no retry needed when the shell is up")
+})
+
+test("a failing restart still retries when nothing answers", () => {
+  // The exit code is not the question; whether a shell answers afterwards is.
+  // So a failing restart must reach the same retry-then-fail path as a silent
+  // one, rather than short-circuiting it.
+  const s = scratch(9999, 1)
+  const r = runDev(s, "up")
+  assert.notEqual(r.code, 0, "a dead shell must still fail")
+  assert.match(r.out, /omarchy restart shell/,
+    "the error must name the command that recovers it, not just relay omarchy's")
+  assert.equal(s.restarts(), 2, "the retry must happen despite the non-zero exit")
 })

@@ -317,11 +317,23 @@ wait_for_shell() {
 # a trailing `&&` list that evaluates false is a failing command, which would
 # kill the script silently -- the same shape as the `(( iter++ ))` trap.
 restart_shell() {
-  run omarchy restart shell
+  # `|| true` on both, because the restart command can exit non-zero when it
+  # loses its own race -- it prints "Omarchy shell did not become ready after
+  # restart" (omarchy-restart-shell:92) and gives up. Under `set -e` that
+  # aborted this function at the FIRST line, BEFORE the wait and retry that
+  # exist for exactly that case, so the guard never ran: bin/dev exited
+  # carrying omarchy's message and none of its own, having never once asked
+  # whether a shell was there. Measured both ways -- with a dead shell the
+  # reviving retry was skipped, and with a HEALTHY one bin/dev still reported
+  # failure without looking.
+  #
+  # Its exit code is not the question. Whether a shell is answering afterwards
+  # is, which is what wait_for_shell asks.
+  run omarchy restart shell || true
   if (( DRY_RUN )); then return 0; fi
   if wait_for_shell; then return 0; fi
   echo "dev: the shell did not come back; restarting it again" >&2
-  run omarchy restart shell
+  run omarchy restart shell || true
   wait_for_shell ||
     fail "the shell is not answering after two restarts -- run: omarchy restart shell"
 }
