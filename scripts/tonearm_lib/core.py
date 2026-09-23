@@ -246,6 +246,69 @@ def _unreachable_status() -> str:
     return "no_network" if net.lan_reachable() is False else "unreachable"
 
 
+def _relocation_candidates(cfg: dict, cores: list[dict]) -> tuple[list[dict], str]:
+    """Discovered Cores that could be ours, and what was used to identify them.
+
+    Shared by the decision (`_relocated_core`) and the explanation
+    (`_relocation_refusal`) so there is exactly one matching rule. Two copies
+    would drift, and an explanation that contradicts the decision it is
+    explaining is worse than no explanation at all.
+    """
+    unique_id = cfg.get("unique_id")
+    name = cfg.get("name")
+    if unique_id:
+        return [c for c in cores if c.get("unique_id") == unique_id], "unique_id"
+    if name and name != cfg.get("host"):
+        return [c for c in cores if c.get("name") == name], "name"
+    return list(cores), "sole-Core-on-the-LAN rule"
+
+
+def _describe_cores(cores: list[dict]) -> str:
+    """Cores as a reader needs them: the name to recognise, the address to try."""
+    return ", ".join("%s at %s" % (c.get("name") or "?", c.get("host"))
+                     for c in cores)
+
+
+def _relocation_note(cfg: dict, cores: list[dict]) -> str | None:
+    """What this relocation attempt is worth saying, or None to stay quiet.
+
+    The daemon could see a Core on the LAN, decline to adopt it, and say
+    nothing -- leaving "your Core is switched off" and "your Core is right
+    there and I will not touch it" identical in the journal, when they are
+    opposite problems with opposite remedies (#15). Nothing here softens the
+    refusal itself, which is correct; this only makes it audible.
+
+    Empty `cores` is reported, not passed over. The first version of this
+    stayed silent on the grounds that nothing discovered means the Core is
+    off and roonapi already says so -- and that premise was measured false on
+    the network this was written for: multicast SOOD never arrives over its
+    Wi-Fi, so discovery comes back empty while the Core is up and answering a
+    unicast probe. That silence is exactly what left the original incident
+    with no signal anywhere. The note names both readings because this cannot
+    distinguish them, and naming only the likelier one misdirects the reader
+    half the time.
+
+    Silent in two cases, both on purpose:
+
+      * exactly one candidate that IS a move -- `_find_relocated` logs that
+        itself, and reporting it twice reads as two separate events.
+      * exactly one candidate already at the configured address -- a Core
+        rebooting rather than moving, which needs no comment.
+    """
+    if not cores:
+        return ("discovery found no Cores on the LAN: the Core is switched "
+                "off, or its SOOD replies are not reaching this host")
+    matches, by = _relocation_candidates(cfg, cores)
+    if len(matches) == 1:
+        return None
+    if not matches:
+        return ("discovery found %s, but none matched the stored %s; "
+                "not relocating" % (_describe_cores(cores), by))
+    return ("discovery found %d Cores matching the stored %s (%s); "
+            "refusing to choose between them"
+            % (len(matches), by, _describe_cores(matches)))
+
+
 def _relocated_core(cfg: dict, cores: list[dict]) -> dict | None:
     """Which discovered Core, if any, is ours at a NEW address? None if none is.
 
@@ -278,14 +341,7 @@ def _relocated_core(cfg: dict, cores: list[dict]) -> dict | None:
     An answer at the address already in config is not a relocation: that is a
     Core rebooting, and roonapi's reconnect handles it without a restart.
     """
-    unique_id = cfg.get("unique_id")
-    name = cfg.get("name")
-    if unique_id:
-        matches = [c for c in cores if c.get("unique_id") == unique_id]
-    elif name and name != cfg.get("host"):
-        matches = [c for c in cores if c.get("name") == name]
-    else:
-        matches = list(cores)
+    matches, _by = _relocation_candidates(cfg, cores)
     if len(matches) != 1:
         return None
     found = matches[0]
@@ -319,6 +375,9 @@ class RoonSession:
         # reported once this reaches DOWN_SAMPLES, so a socket that closes and
         # reopens between two polls never reaches the bar.
         self._down_samples = 0
+        # Last relocation refusal reported, so the watcher does not repeat it
+        # on every poll. None means "nothing currently being refused".
+        self._last_refusal: str | None = None
         # Set by `_apply`, cleared by `_save_cfg`: an address taken in memory
         # that no Core has answered on yet.
         self._cfg_dirty = False
@@ -505,7 +564,20 @@ class RoonSession:
         if found is not None:
             LOG.warning("Core %s is answering at %s, not %s",
                         found.get("name"), found["host"], cfg.get("host"))
-        return found
+            # Cleared so a refusal AFTER a successful move is reported afresh
+            # rather than suppressed as a repeat of one from before it.
+            self._last_refusal = None
+            return found
+        # Logged on CHANGE, not per call. This runs on every restart and on
+        # every watcher poll, so an unconditional warning would repeat for the
+        # whole length of an outage -- which is how a message that matters gets
+        # tuned out. The conclusion is what is worth an entry; a conclusion
+        # that has not changed is not news.
+        note = _relocation_note(cfg, cores)
+        if note is not None and note != self._last_refusal:
+            LOG.warning("%s", note)
+        self._last_refusal = note
+        return None
 
     def _watch_connection(self) -> None:
         """Timing only; every decision lives in `_check_connection`.

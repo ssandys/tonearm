@@ -356,3 +356,119 @@ class TestTheWatcherRelocates(_ConfigIsolated):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExplainingARefusal(unittest.TestCase):
+    """`_relocation_refusal` says why `_relocated_core` declined, for the log.
+
+    The refusal itself is correct and this does not soften it (#15). What it
+    fixes is that the daemon could see a Core on the LAN, decline to adopt it,
+    and say nothing -- leaving "your Core is switched off" and "your Core is
+    right there and I will not touch it" looking identical in the journal,
+    when they are opposite problems with opposite fixes.
+
+    Pure and separate from `_relocated_core` on purpose: the decision's
+    contract and its tests above stay untouched.
+    """
+
+    def test_a_stored_id_matching_nothing_names_what_was_seen(self):
+        # The live case that prompted this: config carried "uid-yavin", which
+        # is not a Roon id at all, so no real Core could ever match it.
+        cfg = a_config(unique_id="uid-yavin")
+        note = core._relocation_note(cfg, [a_core(unique_id="96e11146-4bec")])
+        self.assertIsNotNone(note)
+        # It must name the Core that WAS found -- the address is the thing the
+        # reader needs, and the whole complaint is that it went unsaid.
+        self.assertIn("192.168.50.119", note)
+        self.assertIn("yavin", note)
+
+    def test_it_says_the_identity_is_what_did_not_match(self):
+        cfg = a_config(unique_id="uid-yavin")
+        note = core._relocation_note(cfg, [a_core(unique_id="96e11146-4bec")])
+        self.assertIn("unique_id", note)
+
+    def test_several_candidates_are_reported_as_ambiguous_not_as_absent(self):
+        # Refusing because two Cores matched is a different fault from
+        # refusing because none did, and the remedy differs.
+        cfg = a_config(unique_id=None, name="yavin")
+        note = core._relocation_note(
+            cfg, [a_core(host="192.168.50.118"), a_core(host="192.168.50.120")])
+        self.assertIsNotNone(note)
+        self.assertIn("2", note)
+
+    def test_nothing_discovered_is_reported_rather_than_assumed_to_mean_off(self):
+        # This assertion was the other way round until it was measured. The
+        # reasoning for silence was "nothing discovered means the Core is off,
+        # which roonapi already reports" -- and on a live network that premise
+        # is false: multicast SOOD never reaches this host over Wi-Fi, so
+        # discovery returns nothing while the Core is up and answering a
+        # unicast probe at a known address. Silence here is what left the
+        # original incident with no signal at all.
+        note = core._relocation_note(a_config(), [])
+        self.assertIsNotNone(note)
+        # Both readings have to be offered, because this cannot tell them
+        # apart -- and naming only the likelier one sends the reader the wrong
+        # way half the time.
+        self.assertIn("no Cores", note)
+
+    def test_a_core_already_at_the_configured_address_is_silent(self):
+        # Not a relocation at all -- a Core rebooting, which roonapi's
+        # reconnect handles. Nothing to report.
+        cfg = a_config(host="192.168.50.119", unique_id="uid-yavin")
+        self.assertIsNone(core._relocation_note(cfg, [a_core()]))
+
+    def test_a_successful_relocation_is_not_a_refusal(self):
+        # _find_relocated already logs that case itself; this must not
+        # double-report it.
+        cfg = a_config(unique_id="uid-yavin")
+        self.assertIsNone(core._relocation_note(cfg, [a_core()]))
+
+
+class TestRefusalsAreLoggedWithoutFloodingTheJournal(_ConfigIsolated):
+    """`_find_relocated` runs on every restart and on every watcher poll.
+
+    So a refusal that logged unconditionally would repeat for the whole length
+    of an outage -- which is how a message that matters gets tuned out. It
+    reports a conclusion when the conclusion CHANGES.
+    """
+
+    def _session_seeing(self, cores):
+        session = core.RoonSession(lambda _payload: None)
+        session._cfg = a_config(unique_id="uid-yavin")
+        return session, unittest.mock.patch.object(
+            core.sood, "discover", return_value=cores)
+
+    def test_a_refusal_is_logged_once_not_once_per_poll(self):
+        session, discovery = self._session_seeing(
+            [a_core(unique_id="96e11146-4bec")])
+        with discovery, self.assertLogs(core.LOG, level="WARNING") as logged:
+            self.assertIsNone(session._find_relocated())
+            self.assertIsNone(session._find_relocated())
+            self.assertIsNone(session._find_relocated())
+        self.assertEqual(len(logged.output), 1, logged.output)
+        self.assertIn("192.168.50.119", logged.output[0])
+
+    def test_a_changed_conclusion_is_reported_again(self):
+        # The Core that could not be adopted has been replaced by a different
+        # one at a different address. Same refusal, different facts -- and the
+        # reader needs the new ones.
+        session, discovery = self._session_seeing(
+            [a_core(unique_id="96e11146-4bec")])
+        with discovery, self.assertLogs(core.LOG, level="WARNING"):
+            session._find_relocated()
+        with unittest.mock.patch.object(
+                core.sood, "discover",
+                return_value=[a_core(host="192.168.50.121",
+                                     unique_id="96e11146-4bec")]), \
+             self.assertLogs(core.LOG, level="WARNING") as logged:
+            session._find_relocated()
+        self.assertEqual(len(logged.output), 1)
+        self.assertIn("192.168.50.121", logged.output[0])
+
+    def test_nothing_discovered_is_logged_once_not_for_the_whole_outage(self):
+        # A Core switched off overnight is thousands of polls. One line.
+        session, discovery = self._session_seeing([])
+        with discovery, self.assertLogs(core.LOG, level="WARNING") as logged:
+            for _ in range(5):
+                self.assertIsNone(session._find_relocated())
+        self.assertEqual(len(logged.output), 1, logged.output)
