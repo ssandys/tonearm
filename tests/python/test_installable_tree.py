@@ -64,3 +64,46 @@ class TestNoAgentInstructionsAreShipped(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheSingletonSurvivesInstallation(unittest.TestCase):
+    """`qmldir` is what makes Service a singleton, and it fails silently.
+
+    Without it, `import "."` resolves nothing, `Service` is an unknown type,
+    and every binding that reads it raises a ReferenceError inside a property
+    binding -- which qmllint does not catch and which presents as a widget
+    that renders nothing, with nothing in the journal. The file is three lines
+    of declaration guarding a behaviour nothing else asserts, so what gets
+    pinned here is that it ARRIVES: tracked for a clone, and not excluded from
+    the dev deploy.
+    """
+
+    def qmldir_lines(self):
+        with open(os.path.join(REPO, "qmldir")) as handle:
+            return [line.strip() for line in handle
+                    if line.strip() and not line.startswith("#")]
+
+    def test_the_qmldir_is_tracked_so_a_clone_gets_it(self):
+        # `omarchy plugin add` clones; an untracked qmldir reaches nobody.
+        self.assertIn("qmldir", tracked_files())
+
+    def test_every_type_the_qmldir_declares_exists_and_is_tracked(self):
+        # Renaming Service.qml without touching qmldir is the same silent
+        # failure as shipping no qmldir at all.
+        declarations = [l for l in self.qmldir_lines() if l.startswith("singleton ")]
+        self.assertTrue(declarations, "qmldir declares no singleton")
+        tracked = set(tracked_files())
+        for line in declarations:
+            target = line.split()[-1]
+            self.assertTrue(os.path.isfile(os.path.join(REPO, target)),
+                            "qmldir names %s, which does not exist" % target)
+            self.assertIn(target, tracked)
+
+    def test_the_dev_deploy_does_not_exclude_the_qmldir(self):
+        # bin/dev rsyncs with a blocklist. A future --exclude that catches
+        # this file would leave the deployed plugin importing a type that is
+        # not there, while the repo copy kept working.
+        with open(os.path.join(REPO, "bin", "dev")) as handle:
+            deploy = handle.read()
+        self.assertNotIn("--exclude 'qmldir'", deploy)
+        self.assertNotIn('--exclude "qmldir"', deploy)

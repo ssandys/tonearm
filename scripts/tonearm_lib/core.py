@@ -70,7 +70,12 @@ APPINFO = {
 
 # Concurrent browse sessions kept in memory. The key is a wire field, so this
 # is a ceiling on what a client can make the daemon hold, not a tuning knob:
-# the widget uses one, tonearmd-mcp uses one, and `tonearm browse` uses one.
+# the widget uses one PER BAR SURFACE (one per monitor -- a browse cursor
+# shared between two monitors means navigating on one re-renders the other),
+# tonearmd-mcp uses one, and `tonearmctl browse` uses one. Eight therefore
+# covers a six-monitor desk alongside both other consumers; past that the LRU
+# eviction below is the answer rather than a larger number, since an evicted
+# consumer rebuilds from root on its next request.
 MAX_BROWSE_SESSIONS = 8
 
 # Longest zone id accepted from a client. Roon's are UUID-shaped, around 36

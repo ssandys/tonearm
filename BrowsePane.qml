@@ -19,6 +19,12 @@ Item {
   id: root
 
   property var service: null
+
+  // Which of the daemon's browse cursors this pane drives. Panel.qml derives
+  // it per bar surface, because `service` is now a singleton shared by every
+  // surface while the rows, cursor and path below are emphatically not: two
+  // panes on one key means navigating on one monitor re-renders the other.
+  property string session: ""
   property var state: null
   property int artPx: Style.space(30)
   property string fontFamily: ""
@@ -182,7 +188,7 @@ Item {
   function _send(args, after) {
     if (!root.service || root.busy) return false
     root.busy = true
-    root.service.browse(args, function (reply) {
+    root.service.browse(root.session, args, function (reply) {
       root._apply(reply)
       if (after) after(reply)
     })

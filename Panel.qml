@@ -3,6 +3,10 @@ import Quickshell
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
+// Resolves the qmldir beside this file, which declares Service as a singleton.
+// Without it `Service` is an unknown type: a ReferenceError inside a binding,
+// invisible to qmllint, presenting as a widget that renders nothing.
+import "."
 
 // Root is Ui/Panel.qml's `Panel`, NOT `PanelBase` (does not exist here) and
 // NOT `BarWidget` (no open/close/toggle lifecycle). See CONTRIBUTING.md's "Verified
@@ -40,8 +44,8 @@ Panel {
   // shadows that inherited property; QML rejects a duplicate property name
   // on a derived type at compile time, so the whole file would fail to
   // load. `display` is Model.barState's result instead.
-  readonly property var st: service.state
-  readonly property var display: Model.barState(root.st, service.receivedAt, clock.now)
+  readonly property var st: Service.state
+  readonly property var display: Model.barState(root.st, Service.receivedAt, clock.now)
 
   // -- popup-only derived state --------------------------------------------
   // root.display.playing, not a fresh `root.zone.state === "playing"` check:
@@ -53,7 +57,7 @@ Panel {
   readonly property var np: root.zone ? root.zone.now_playing : null
   readonly property bool playing: root.display.playing
   readonly property real length: root.hasZone ? (root.zone.length || 0) : 0
-  readonly property real pos: Model.position(root.zone, service.receivedAt, clock.now)
+  readonly property real pos: Model.position(root.zone, Service.receivedAt, clock.now)
   readonly property real progress: root.length > 0 ? root.pos / root.length : 0
   // A fixed- or incremental-volume output reports no volume object at all;
   // null here (not a zeroed-out slider) is what tells the volume row to hide.
@@ -116,9 +120,29 @@ Panel {
   // when it is empty.
   readonly property color trackEmpty: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.12)
 
-  Service {
-    id: service
+  // -- per-surface identity ------------------------------------------------
+  // The relay is shared across bar surfaces; a browse cursor must NOT be, or
+  // navigating on one monitor moves the rows another monitor is showing. The
+  // screen name is this surface's identity.
+  //
+  // QsWindow.window is how the shell itself reaches a widget's window
+  // (Bar.qml's targetWindow(), called on exactly this object). It is a
+  // binding, not a one-shot read, because the window is not guaranteed to
+  // have resolved by the time this component completes; Model.browseSession
+  // falls back to the shared key until it does, which is merely the old
+  // behaviour rather than a broken request.
+  readonly property string surfaceScreen: {
+    var w = root.QsWindow ? root.QsWindow.window : null
+    return w && w.screen ? String(w.screen.name || "") : ""
   }
+  readonly property string browseSession: Model.browseSession(root.surfaceScreen)
+
+  // The refcount the singleton's relay runs on. Component.onDestruction is
+  // not a guarantee -- it is the same class of problem as a Process that
+  // never emits exited() on a failed spawn -- so `consumers` is clamped at
+  // zero on the other side rather than trusted to balance.
+  Component.onCompleted: Service.attach()
+  Component.onDestruction: Service.detach()
 
   // One ticking source for the whole widget. A binding that needs "now"
   // reads clock.now rather than calling Date.now() directly, which would
@@ -208,7 +232,7 @@ Panel {
     // transport action worth having without a popup (Task 16 adds the
     // popup content; this file only owns the bar button).
     onPressed: function (which) {
-      if (which === Qt.MiddleButton) { service.send("playpause"); return }
+      if (which === Qt.MiddleButton) { Service.send("playpause"); return }
       root.toggle()
     }
   }
@@ -490,7 +514,7 @@ Panel {
                     // several-second offset that only shows up as "clicking near
                     // the beginning doesn't go to the beginning."
                     var frac = Math.max(0, Math.min(1, (mouse.x - Style.space(8)) / seekTrack.width))
-                    service.send("seek", Math.floor(frac * root.length))
+                    Service.send("seek", Math.floor(frac * root.length))
                   }
                 }
               }
@@ -545,7 +569,7 @@ Panel {
                     MouseArea {
                       anchors.fill: parent
                       anchors.margins: -Style.space(6)
-                      onClicked: service.send("previous")
+                      onClicked: Service.send("previous")
                     }
                   }
 
@@ -568,7 +592,7 @@ Panel {
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.title
                     }
-                    MouseArea { anchors.fill: parent; onClicked: service.send("playpause") }
+                    MouseArea { anchors.fill: parent; onClicked: Service.send("playpause") }
                   }
 
                   Text {
@@ -580,7 +604,7 @@ Panel {
                     MouseArea {
                       anchors.fill: parent
                       anchors.margins: -Style.space(6)
-                      onClicked: service.send("next")
+                      onClicked: Service.send("next")
                     }
                   }
                 }
@@ -626,7 +650,7 @@ Panel {
             MouseArea {
               anchors.fill: parent
               anchors.margins: -Style.space(4)
-              onClicked: service.send(root.volume && root.volume.muted ? "unmute" : "mute")
+              onClicked: Service.send(root.volume && root.volume.muted ? "unmute" : "mute")
             }
           }
 
@@ -660,7 +684,7 @@ Panel {
                 // negative margin puts Style.space(8) before volTrack's left
                 // edge.
                 var frac = Math.max(0, Math.min(1, (mouse.x - Style.space(8)) / volTrack.width))
-                service.send("volume", Model.volumeFromFraction(root.volume, frac))
+                Service.send("volume", Model.volumeFromFraction(root.volume, frac))
               }
             }
           }
@@ -777,8 +801,8 @@ Panel {
                   var pinnedHere = Model.isZonePinned(root.zone, zoneRow.modelData.id)
                   // Clicking the already-pinned zone unpins it, so auto-follow
                   // is reachable without a second control.
-                  if (pinnedHere) service.send("zone", "unpin")
-                  else service.send("zone", "pin", zoneRow.modelData.id)
+                  if (pinnedHere) Service.send("zone", "unpin")
+                  else Service.send("zone", "pin", zoneRow.modelData.id)
                 }
               }
 
@@ -817,7 +841,7 @@ Panel {
                   // The popup deliberately stays open: the daemon repins to
                   // the destination, so the card above redraws as the new
                   // zone. That redraw is the confirmation the action worked.
-                  onClicked: service.send("transfer", zoneRow.modelData.id)
+                  onClicked: Service.send("transfer", zoneRow.modelData.id)
                 }
               }
             }
@@ -835,7 +859,8 @@ Panel {
         BrowsePane {
           id: browsePane
           width: parent.width
-          service: service
+          service: Service
+          session: root.browseSession
           state: root.st
           fontFamily: root.fontFamily
           // Where the search field returns active focus. Without it the
