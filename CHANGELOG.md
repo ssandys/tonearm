@@ -4,6 +4,35 @@ Notable changes to tonearm. Versions follow [semantic versioning](https://semver
 while the major version is 0, the minor version carries changes that would
 otherwise be breaking.
 
+## 0.11.4 — 2026-09-23
+
+No runtime change: the plugin behaves identically to 0.11.3. Released so the
+verified marketplace snapshot sits on a tag, since `omarchy plugin add` clones
+every tracked file and `bin/` is among them.
+
+### Fixed
+
+- **`bin/dev`'s shell guard no longer aborts when the restart command reports
+  failure** ([#14](https://github.com/ssandys/tonearm/issues/14)).
+  `omarchy restart shell` exits non-zero when it loses its own race — it prints
+  "Omarchy shell did not become ready after restart" and gives up. Under
+  `set -e` that aborted `restart_shell` at its first line, before the wait and
+  the retry written for exactly that case, so the guard added in 0.11.3 never
+  ran: `bin/dev` exited carrying omarchy's message and none of its own, having
+  never once asked whether a shell was there.
+
+  Measured both ways. With a dead shell the reviving retry was skipped, which
+  is the failure the guard exists to prevent occurring through the guard. With
+  a *healthy* shell `bin/dev` still exited 1 without ever pinging — a false
+  negative on a desktop with nothing wrong with it, and the sharper argument
+  for the fix: the exit code is not the question, whether a shell answers
+  afterwards is.
+
+  The guard shipped in 0.11.3 was ported from headway `dab5a13`, which carried
+  this hole; headway fixed it the same day in `640605d`. The tests missed it
+  because their `omarchy` shim could only exit 0 — the happy path of the very
+  command whose unhappy path the function exists for.
+
 ## 0.11.3 — 2026-09-22
 
 ### Fixed
