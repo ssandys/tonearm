@@ -1,6 +1,9 @@
 [Unit]
 Description=tonearm — Roon bridge for the Omarchy shell bar
 After=graphical-session.target
+# If the plugin directory was removed before the user unit, skip startup
+# instead of repeatedly failing at EXEC (203) under Restart=on-failure.
+ConditionPathExists=%h/.config/omarchy/plugins/ssandys.tonearm/scripts/tonearmd
 # Retry forever. The daemon's only retry mechanism is exiting non-zero and
 # letting Restart=on-failure below bring it back, so systemd's default start
 # limit (5 starts / 10s) is the thing that would cap it -- and hitting that cap

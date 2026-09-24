@@ -7,6 +7,40 @@ readonly source_unit="$plugin_root/systemd/tonearmd.service"
 readonly unit_dir="$HOME/.config/systemd/user"
 readonly target_unit="$unit_dir/tonearmd.service"
 
+# Uninstall needs only systemctl, not the daemon's Python dependencies. Check
+# ownership before stopping anything: a same-named but unrelated unit is not
+# ours to disable or remove. Leave pairing/configuration state in place.
+if [[ ${1:-} == --uninstall ]]; then
+  if (($# != 1)); then
+    printf 'Usage: %s --uninstall\n' "$0" >&2
+    exit 2
+  fi
+  if [[ $(realpath -m "$plugin_root") != $(realpath -m "$installed_root") ]]; then
+    printf 'Run setup from the installed plugin: %s/setup.sh\n' "$installed_root" >&2
+    exit 1
+  fi
+  if [[ -L "$unit_dir" || -L "$target_unit" ]]; then
+    printf 'Refusing to uninstall: service directory or unit is a symlink.\n' >&2
+    exit 1
+  fi
+  if [[ -e "$target_unit" ]]; then
+    if [[ ! -f "$target_unit" ]]; then
+      printf 'Refusing to uninstall: %s is not a regular file.\n' "$target_unit" >&2
+      exit 1
+    fi
+    if ! grep -Fxq 'ExecStart=%h/.config/omarchy/plugins/ssandys.tonearm/scripts/tonearmd' -- "$target_unit"; then
+      printf 'Refusing to uninstall an unrelated service file: %s\n' "$target_unit" >&2
+      exit 1
+    fi
+    command -v systemctl >/dev/null 2>&1 || { echo 'systemctl is required' >&2; exit 1; }
+    systemctl --user disable --now tonearmd.service
+    rm -- "$target_unit"
+    systemctl --user daemon-reload
+  fi
+  printf 'tonearmd removed; pairing and configuration were preserved.\n'
+  exit 0
+fi
+
 missing=()
 for command in systemctl; do
   command -v "$command" >/dev/null 2>&1 || missing+=("$command")
