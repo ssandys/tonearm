@@ -26,6 +26,10 @@ existing descriptor-relative atomic writer. It preserves the pairing token,
 pin and learned Core identity. Repeating bootstrap for the same host is safe,
 including a correction to its ports. A different already-configured host is
 refused because Core switching and token ownership need a separate design.
+Consequently, `--core` cannot repair a configured Core that moved to a new
+address, and it deliberately preserves a stale or incorrect `unique_id`. Those
+cases require the separate re-pair/reset path; users should not edit the private
+config to force bootstrap past either guard.
 
 ## Runtime behavior
 
@@ -35,5 +39,6 @@ pairing and persistence keep their existing behavior.
 
 ## Non-goals
 
-This change does not alter discovery, retry cadence, service restart policy,
-uninstall, firewall/routes, Roon Bridge, zone selection or playback.
+This change does not alter discovery, retry cadence, relocation/re-pair
+behavior, service restart policy, uninstall, firewall/routes, Roon Bridge, zone
+selection or playback.

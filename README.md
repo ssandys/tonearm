@@ -59,7 +59,10 @@ configuration required.
    `--tcp-port PORT`. Re-running this for the same Core is safe and preserves
    pairing and the pinned zone. It deliberately refuses to replace a different
    configured Core; switching Cores also has pairing implications and is not
-   part of first-run bootstrap.
+   part of first-run bootstrap. This also means `--core` is not a recovery path
+   for a Core that moved to a new address: it refuses the replacement host and
+   preserves any stored Core identity. Use the re-pair/reset path for a moved
+   Core or incorrect identity rather than editing Tonearm's private config.
 
 4. Open **Roon Remote → Settings → Extensions** and enable **tonearm**.
    `tonearmd` registers itself with your Roon Core as soon as it starts, but
