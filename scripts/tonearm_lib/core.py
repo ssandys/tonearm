@@ -264,7 +264,7 @@ SWEEP_EAGER_WINDOWS = 4
 SWEEP_BACKOFF_WINDOWS = 8
 
 
-def _unreachable_status() -> str:
+def _unreachable_status(host=None) -> str:
     """Name the fault behind a connect that never answered.
 
     The Core not answering and this machine having no path to the LAN are
@@ -273,7 +273,12 @@ def _unreachable_status() -> str:
     telling someone their network is down when it is not would be a worse
     error than the one this fixes.
     """
-    return "no_network" if net.lan_reachable() is False else "unreachable"
+    if host:
+        fault = net.routed_off_lan(host, net.source_address_for(host),
+                                   net.local_networks())
+        if fault is True:
+            return "no_network"
+    return "unreachable"
 
 
 def _should_sweep(window: int) -> bool:
@@ -540,7 +545,7 @@ class RoonSession:
 
         self._down_samples += 1
         if self._status == "ok" and self._down_samples >= DOWN_SAMPLES:
-            self._status = _unreachable_status()
+            self._status = _unreachable_status(self._cfg.get('host'))
             LOG.warning("Roon connection lost after %d polls: %s",
                         self._down_samples, self._status)
             self._publish()
@@ -551,7 +556,7 @@ class RoonSession:
         # comes back with the Core still switched off must stop claiming
         # there is no route to it. Only re-checked on this slow cadence --
         # it is a blocking probe, and the poll loop runs every 2s.
-        fault = _unreachable_status()
+        fault = _unreachable_status(self._cfg.get('host'))
         if fault != self._status:
             LOG.info("fault changed: %s -> %s", self._status, fault)
             self._status = fault
@@ -696,7 +701,7 @@ class RoonSession:
         if not self._cfg.get("host"):
             cores = sood.discover()
             if not cores:
-                self._status = _unreachable_status()
+                self._status = _unreachable_status(self._cfg.get('host'))
                 self._publish()
                 sys.exit(1)
             core = cores[0]
@@ -723,7 +728,7 @@ class RoonSession:
                 self._apply(found)
                 self._api = self._connect(token)
         if self._api is None:
-            self._status = _unreachable_status()
+            self._status = _unreachable_status(self._cfg.get('host'))
             self._publish()
             sys.exit(1)
 

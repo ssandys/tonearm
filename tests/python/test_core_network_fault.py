@@ -40,8 +40,18 @@ def session(status="ok"):
 
 
 def lan(verdict):
-    """Pin what the local-network probe concludes."""
-    return patch.object(core.net, "lan_reachable", lambda: verdict)
+    """Pin what the local-network check concludes.
+
+    `verdict` keeps the meaning it has always had here -- True is a healthy
+    LAN -- while the mechanism under it changed in #11. It used to be "did the
+    default gateway answer TCP", which plenty of healthy gateways do not; it
+    is now "is Core traffic leaving by an interface that cannot reach the
+    Core's own subnet". Note the sense inverts: a healthy LAN is now `False`
+    from routed_off_lan, because that function reports a FAULT.
+    """
+    fault = {True: False, False: True, None: None}[verdict]
+    return patch.object(core.net, "routed_off_lan",
+                        lambda *_args, **_kw: fault)
 
 
 def drop(s):
@@ -84,12 +94,12 @@ class TestTheWatcherNamesTheRightFault(unittest.TestCase):
         # poll would put a network round trip in the daemon's hot path.
         calls = []
 
-        def probe():
+        def probe(*_args, **_kw):
             calls.append(1)
-            return False
+            return True          # a fault, i.e. the old probe's False
 
         s, _ = session()
-        with patch.object(core.net, "lan_reachable", probe):
+        with patch.object(core.net, "routed_off_lan", probe):
             drop(s)
             for _ in range(5):
                 s._check_connection()
@@ -196,3 +206,52 @@ class TestStartNamesTheRightFault(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheFaultIsOnlyNamedWhenItIsKnown(unittest.TestCase):
+    """#11: the old discriminator blamed the network on healthy networks.
+
+    It asked whether the default gateway answered TCP, and plenty of healthy
+    gateways do not. CI is the proof: after the `no_network` status landed,
+    eleven pre-existing tests failed on a GitHub runner with
+
+        AssertionError: 'no_network' != 'unreachable'
+
+    because that runner's gateway ignores tcp/80. Its network was perfect.
+
+    These drive the real decision rather than pinning its verdict, patching
+    only the two facts it reads.
+    """
+
+    def _status(self, host, source, nets):
+        with patch.object(core.net, "source_address_for", lambda _h: source), \
+             patch.object(core.net, "local_networks", lambda: nets):
+            return core._unreachable_status(host)
+
+    def test_a_core_on_no_local_subnet_is_not_a_network_fault(self):
+        # The CI shape: a runner on 10.1.0.0/16 asked about a Core that is not
+        # on any subnet it holds. Nothing can be concluded, so nothing is
+        # claimed -- which is the whole of this fix.
+        self.assertEqual(
+            self._status("192.168.50.118", "10.1.0.4", ["10.1.0.0/16"]),
+            "unreachable")
+
+    def test_a_tunnel_swallowing_the_cores_subnet_is_a_network_fault(self):
+        # Measured 2026-09-07: an exit node captured 192.168.50.0/24 for five
+        # hours while the Core sat 1.9ms away, and the daemon blamed the Core
+        # the entire time. This is the condition that should be named.
+        self.assertEqual(
+            self._status("192.168.50.118", "100.94.206.126",
+                         ["192.168.50.0/24", "100.64.0.0/10"]),
+            "no_network")
+
+    def test_a_healthy_lan_blames_the_core(self):
+        self.assertEqual(
+            self._status("192.168.50.118", "192.168.50.23", ["192.168.50.0/24"]),
+            "unreachable")
+
+    def test_no_configured_host_cannot_accuse_the_network(self):
+        # start() reaches here with no host at all when discovery found
+        # nothing. There is no address to reason about.
+        self.assertEqual(self._status(None, None, ["192.168.50.0/24"]),
+                         "unreachable")

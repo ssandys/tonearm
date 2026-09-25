@@ -191,7 +191,10 @@ def _assume_lan_is_fine(testcase):
     These tests are about the Core being unreachable, so they say so: the
     LAN is fine, and the fault is the Core's.
     """
-    patcher = patch.object(core.net, "lan_reachable", lambda: True)
+    # #11 replaced the gateway probe with a routing check; `routed_off_lan`
+    # reports a FAULT, so "the LAN is fine" is False here rather than True.
+    patcher = patch.object(core.net, "routed_off_lan",
+                           lambda *_args, **_kw: False)
     patcher.start()
     testcase.addCleanup(patcher.stop)
 
