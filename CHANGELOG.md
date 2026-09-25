@@ -4,6 +4,59 @@ Notable changes to tonearm. Versions follow [semantic versioning](https://semver
 while the major version is 0, the minor version carries changes that would
 otherwise be breaking.
 
+## 0.11.5 — 2026-09-24
+
+Relocation, which could not work at all on some networks and said nothing
+about it either way. Both fixes came out of one live outage: a Core that had
+moved to a new DHCP address while the daemon sat on the old one reporting
+`unreachable`.
+
+### Fixed
+
+- **Relocation can fall back to the LAN sweep when multicast is silent**
+  ([#17](https://github.com/ssandys/tonearm/issues/17)). Discovery during an
+  outage was multicast-only, on the premise that a Core which has moved is up
+  and answering SOOD anyway. Measured on a real network, that premise is
+  false — multicast answered 0 of 7 attempts, including four 12-second
+  windows, while the `/24` sweep found the Core 3 times in 6 and a unicast
+  probe to a known address answered 4 in 10. The Core speaks SOOD perfectly
+  well; its multicast replies never arrive over that Wi-Fi, which is ordinary
+  consumer-AP behaviour. On such a LAN relocation could never work, whatever
+  was in the config.
+
+  Windows may now sweep, bounded in time: the first four regardless — about
+  94% cumulative at the measured hit rate, inside eight minutes, which is
+  what beats a coin flip — then every eighth, so a Core returning at a new
+  address overnight is still found. Space was already bounded, since only
+  private `/24`s are ever scanned.
+
+  Deliberately not gated on the Core's last-known subnet. That was the first
+  design and it could lock itself out: a router swap puts everything on a new
+  `/24`, the stored address is then in no local subnet, so no sweep is
+  permitted, so the stored address is never refreshed, and the gate never
+  reopens.
+
+- **The daemon says why it did not adopt a Core it could see**
+  ([#15](https://github.com/ssandys/tonearm/issues/15)). "Your Core is
+  switched off" and "your Core is right there and I will not touch it" were
+  identical in the journal — opposite problems with opposite remedies.
+  Nothing about the refusal itself changed: a stored `unique_id` must still
+  match exactly, and adopting an unmatched Core is the accidental capture
+  that rule prevents.
+
+  Reported once per outage rather than per poll, and each distinct conclusion
+  once, so a discovery that flaps between finding the Core and finding
+  nothing does not flap the journal with it.
+
+### Known limits
+
+A Core that moves to a *different* subnet is still not found, and a second
+Core in another network environment is refused rather than adopted — the
+identity check is right to refuse it, and there is nowhere to keep a second
+Core's token or pin. Tracked as
+[#16](https://github.com/ssandys/tonearm/issues/16) and
+[#19](https://github.com/ssandys/tonearm/issues/19).
+
 ## 0.11.4 — 2026-09-23
 
 No runtime change: the plugin behaves identically to 0.11.3. Released so the
