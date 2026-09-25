@@ -7,6 +7,56 @@ readonly source_unit="$plugin_root/systemd/tonearmd.service"
 readonly unit_dir="$HOME/.config/systemd/user"
 readonly target_unit="$unit_dir/tonearmd.service"
 
+usage() {
+  printf 'Usage: %s [--core HOST [--http-port PORT] [--tcp-port PORT]] | --check\n' \
+    "$0" >&2
+}
+
+check_only=false
+core_set=false
+core_host=""
+http_port=9330
+tcp_port=9150
+http_port_set=false
+tcp_port_set=false
+
+if (($# == 1)) && [[ $1 == --check ]]; then
+  check_only=true
+  shift
+else
+  while (($# > 0)); do
+    case "$1" in
+      --core)
+        if $core_set || (($# < 2)); then usage; exit 2; fi
+        core_host=$2
+        core_set=true
+        shift 2
+        ;;
+      --http-port)
+        if $http_port_set || (($# < 2)); then usage; exit 2; fi
+        http_port=$2
+        http_port_set=true
+        shift 2
+        ;;
+      --tcp-port)
+        if $tcp_port_set || (($# < 2)); then usage; exit 2; fi
+        tcp_port=$2
+        tcp_port_set=true
+        shift 2
+        ;;
+      *)
+        usage
+        exit 2
+        ;;
+    esac
+  done
+  if ! $core_set && { $http_port_set || $tcp_port_set; }; then
+    printf '%s\n' '--http-port and --tcp-port require --core.' >&2
+    usage
+    exit 2
+  fi
+fi
+
 missing=()
 for command in systemctl; do
   command -v "$command" >/dev/null 2>&1 || missing+=("$command")
@@ -22,7 +72,7 @@ if ((${#missing[@]} > 0)); then
   exit 1
 fi
 
-if [[ ${1:-} == --check ]]; then
+if $check_only; then
   systemctl --user is-active --quiet tonearmd.service \
     || { echo 'tonearmd.service is not running' >&2; exit 1; }
   "$plugin_root/scripts/tonearmctl" status >/dev/null 2>&1 \
@@ -42,16 +92,6 @@ if [[ $(realpath -m "$plugin_root") != $(realpath -m "$installed_root") ]]; then
 fi
 
 mkdir -p "$unit_dir"
-
-# The daemon's state directory (Core address, pairing token, pinned zone).
-# Created HERE rather than by the daemon because the unit runs with
-# ProtectSystem=strict and ProtectHome=read-only: $HOME is read-only inside
-# the sandbox, and systemd refuses to start a unit whose ReadWritePaths names
-# a path that does not exist -- failing at step NAMESPACE before the process
-# runs at all. chmod as well as mkdir, since mkdir -p leaves an existing
-# directory's mode alone and this one holds the token.
-mkdir -p "$HOME/.config/tonearm"
-chmod 700 "$HOME/.config/tonearm"
 
 # `cp` FOLLOWS a symlink at its destination, so a link planted at the unit path
 # would redirect this write to whatever it names. Refuse rather than write.
@@ -76,6 +116,26 @@ if [[ -f "$target_unit" ]] && ! grep -q 'tonearmd' -- "$target_unit"; then
   printf 'Refusing to overwrite an unrelated service file: %s\n' "$target_unit" >&2
   exit 1
 fi
+
+# An explicit first-run Core bypasses unreliable SOOD discovery. Validation and
+# persistence stay in config.py so this shell script never hand-writes JSON and
+# the same descriptor-relative, atomic, mode-0600 path protects every config
+# write. Run it before touching the unit so bad input cannot enable a service.
+if $core_set; then
+  PYTHONPATH="$plugin_root/scripts" /usr/bin/python -m tonearm_lib.config \
+    bootstrap-core "$core_host" "$http_port" "$tcp_port"
+fi
+
+# The daemon's state directory (Core address, pairing token, pinned zone).
+# Created HERE rather than by the daemon because the unit runs with
+# ProtectSystem=strict and ProtectHome=read-only: $HOME is read-only inside
+# the sandbox, and systemd refuses to start a unit whose ReadWritePaths names
+# a path that does not exist -- failing at step NAMESPACE before the process
+# runs at all. chmod as well as mkdir, since mkdir -p leaves an existing
+# directory's mode alone and this one holds the token. bootstrap-core creates
+# and tightens it first when used; these operations remain idempotent.
+mkdir -p "$HOME/.config/tonearm"
+chmod 700 "$HOME/.config/tonearm"
 
 # Unpredictable name, created O_EXCL by mktemp, in the destination's own
 # directory so the rename is atomic. Nothing can be pre-planted at a name

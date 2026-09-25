@@ -39,6 +39,62 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(cfg["host"], "192.168.50.118")
         self.assertEqual(cfg["pinned_zone_id"], "z1")
 
+    def test_bootstrap_core_writes_validated_address_and_ports(self):
+        config.bootstrap_core("roon-core.home", "19331", "19151")
+        cfg = config.load()
+        self.assertEqual(cfg["host"], "roon-core.home")
+        self.assertEqual(cfg["http_port"], 19331)
+        self.assertEqual(cfg["tcp_port"], 19151)
+
+    def test_bootstrap_core_accepts_an_ipv4_literal(self):
+        config.bootstrap_core("192.168.50.44", 9330, 9150)
+        self.assertEqual(config.load()["host"], "192.168.50.44")
+
+    def test_bootstrap_core_rejects_invalid_host_and_ports_without_writing(self):
+        cases = [
+            ("", 9330, 9150),
+            ("http://192.168.50.44", 9330, 9150),
+            ("bad host", 9330, 9150),
+            ("fd00::44", 9330, 9150),
+            ("192.168.50.44", 0, 9150),
+            ("192.168.50.44", 9330, 65536),
+            ("192.168.50.44", 9330, "not-a-port"),
+        ]
+        for host, http_port, tcp_port in cases:
+            with self.subTest(host=host, http_port=http_port,
+                              tcp_port=tcp_port):
+                with self.assertRaises(ValueError):
+                    config.bootstrap_core(host, http_port, tcp_port)
+                self.assertFalse(os.path.exists(config.CONFIG_PATH))
+
+    def test_bootstrap_core_preserves_non_address_config_for_the_same_host(self):
+        original = {"host": "192.168.50.44", "http_port": 9330,
+                    "tcp_port": 9150, "name": "yavin",
+                    "unique_id": "uid-yavin", "pinned_zone_id": "zone-7"}
+        config.save(original)
+        config.save_token("pairing-token")
+
+        config.bootstrap_core("192.168.50.44", 19331, 19151)
+
+        cfg = config.load()
+        self.assertEqual(cfg["http_port"], 19331)
+        self.assertEqual(cfg["tcp_port"], 19151)
+        self.assertEqual(cfg["name"], "yavin")
+        self.assertEqual(cfg["unique_id"], "uid-yavin")
+        self.assertEqual(cfg["pinned_zone_id"], "zone-7")
+        self.assertEqual(config.load_token(), "pairing-token")
+
+    def test_bootstrap_core_refuses_to_replace_an_existing_host(self):
+        original = {"host": "192.168.50.44", "http_port": 9330,
+                    "tcp_port": 9150, "name": "yavin",
+                    "unique_id": "uid-yavin", "pinned_zone_id": "zone-7"}
+        config.save(original)
+
+        with self.assertRaises(ValueError):
+            config.bootstrap_core("192.168.50.99", 9330, 9150)
+
+        self.assertEqual(config.load(), original)
+
     def test_the_cores_identity_round_trips(self):
         # `save`/`load` filter against DEFAULTS, so a field missing from that
         # whitelist is dropped in silence. `unique_id` is what lets a Core that

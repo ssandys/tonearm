@@ -46,6 +46,24 @@ configuration required.
    your Roon Core, as a systemd user service (`tonearmd.service`). It starts
    automatically on every login from then on.
 
+   If automatic discovery cannot see a Core that you know is reachable, supply
+   it explicitly on the first setup:
+
+   ```bash
+   ~/.config/omarchy/plugins/ssandys.tonearm/setup.sh --core 192.168.50.44
+   ```
+
+   Tonearm uses Roon's advertised HTTP/MOO port `9330` and TCP port `9150` by
+   default. `HOST` can be an IPv4 address or DNS hostname. A Core advertising
+   different ports can be bootstrapped with `--http-port PORT` and
+   `--tcp-port PORT`. Re-running this for the same Core is safe and preserves
+   pairing and the pinned zone. It deliberately refuses to replace a different
+   configured Core; switching Cores also has pairing implications and is not
+   part of first-run bootstrap. This also means `--core` is not a recovery path
+   for a Core that moved to a new address: it refuses the replacement host and
+   preserves any stored Core identity. Use the re-pair/reset path for a moved
+   Core or incorrect identity rather than editing Tonearm's private config.
+
 4. Open **Roon Remote → Settings → Extensions** and enable **tonearm**.
    `tonearmd` registers itself with your Roon Core as soon as it starts, but
    Roon will not talk to it until you approve it here — this is a one-time
@@ -83,6 +101,10 @@ filtering multicast is enough). So on **first run only**, if no Core is already
 configured, tonearm scans your local subnet: it opens a TCP connection to one
 port — 9330, Roon's HTTP/MOO port — on each address in the `/24`, and sends a
 SOOD query to whatever answers.
+
+Supplying `setup.sh --core HOST` writes that explicit address through the same
+private config path and skips this initial discovery. It does not change later
+connection or relocation behavior.
 
 Constraints on that scan:
 
