@@ -233,6 +233,36 @@ DOWN_SAMPLES = 2
 RELOCATE_AFTER = 120.0
 RELOCATE_SAMPLES = int(RELOCATE_AFTER / POLL_INTERVAL)
 
+# Relocation windows that may fall back to the /24 sweep before backing off,
+# and how often to retry after that.
+#
+# Multicast SOOD never arrives on some networks -- measured 0/7 on the LAN this
+# was written for, including four 12s windows, while the sweep found the Core
+# 3/6 (#17). Without a sweep, relocation cannot work there at all.
+#
+# The sweep is 254 connects and ~8s, and relocation retries every
+# RELOCATE_AFTER for as long as an outage lasts, so sweeping every window would
+# hunt a switched-off Core all day. The first few sweep regardless, because at
+# roughly 50% a single sweep is a coin flip on whether the bar ever heals; 4
+# windows is ~94% cumulative inside about eight minutes. After that, every
+# eighth window (~16 minutes) still catches a Core that returns at a new
+# address overnight.
+#
+# NOT gated on the Core's last-known subnet, which was the first design and
+# could lock itself out: a router swap puts everything on a new /24, the
+# stored address is then in no local subnet, no sweep is permitted, the stored
+# address is never refreshed, and the gate never reopens -- the same shape as
+# a stale unique_id disabling relocation for good. _local_networks() already
+# bounds this in space by scanning private /24s only; these bound it in time.
+# Distinct relocation conclusions remembered per outage, so the same one is
+# not reported twice while discovery flaps. A ceiling rather than a tuning
+# knob: the entries are derived from what discovery returns, which a changing
+# LAN can vary without limit.
+MAX_REPORTED_NOTES = 32
+
+SWEEP_EAGER_WINDOWS = 4
+SWEEP_BACKOFF_WINDOWS = 8
+
 
 def _unreachable_status() -> str:
     """Name the fault behind a connect that never answered.
@@ -244,6 +274,22 @@ def _unreachable_status() -> str:
     error than the one this fixes.
     """
     return "no_network" if net.lan_reachable() is False else "unreachable"
+
+
+def _should_sweep(window: int) -> bool:
+    """May this relocation window pay for the /24 sweep?
+
+    `window` counts consecutive relocation attempts that did not RESOLVE --
+    not ones where discovery came back empty. The difference matters: a config
+    carrying an identity no Core can match makes every sweep succeed at
+    discovery and every adoption fail, so counting empty results would reset
+    forever and sweep every window against a fault no sweep can fix.
+    """
+    if window < 1:
+        return False
+    if window <= SWEEP_EAGER_WINDOWS:
+        return True
+    return (window - SWEEP_EAGER_WINDOWS) % SWEEP_BACKOFF_WINDOWS == 0
 
 
 def _relocation_candidates(cfg: dict, cores: list[dict]) -> tuple[list[dict], str]:
@@ -375,9 +421,20 @@ class RoonSession:
         # reported once this reaches DOWN_SAMPLES, so a socket that closes and
         # reopens between two polls never reaches the bar.
         self._down_samples = 0
-        # Last relocation refusal reported, so the watcher does not repeat it
-        # on every poll. None means "nothing currently being refused".
-        self._last_refusal: str | None = None
+        # Relocation conclusions already reported during the current outage.
+        # A set rather than "the last one": #17's sweep is about 50% reliable
+        # on some networks, so consecutive windows alternate between finding
+        # the Core and finding nothing, and comparing against only the last
+        # note logged every flip -- the repetition #15 set out to avoid,
+        # reintroduced. Each distinct conclusion is worth saying once.
+        #
+        # Bounded like every other resource here: an outage lasting days on a
+        # changing LAN could otherwise accumulate one entry per address seen.
+        # Clearing costs at most one repeated line.
+        self._reported_notes: set[str] = set()
+        # Consecutive relocation windows that did not resolve, which is what
+        # the sweep backoff is measured in.
+        self._unresolved_windows = 0
         # Set by `_apply`, cleared by `_save_cfg`: an address taken in memory
         # that no Core has answered on yet.
         self._cfg_dirty = False
@@ -550,8 +607,11 @@ class RoonSession:
 
         Reads nothing and writes nothing beyond the log: the callers decide.
         """
+        # scan=True means "multicast, and sweep only if it is silent" -- the
+        # sweep is never paid when multicast answers.
+        window = self._unresolved_windows + 1
         try:
-            cores = sood.discover(scan=False)
+            cores = sood.discover(scan=_should_sweep(window))
         except Exception:
             # Best effort, and broad on purpose. On the watcher thread an
             # escape would kill the poll loop; in `start()` it would turn a
@@ -566,7 +626,8 @@ class RoonSession:
                         found.get("name"), found["host"], cfg.get("host"))
             # Cleared so a refusal AFTER a successful move is reported afresh
             # rather than suppressed as a repeat of one from before it.
-            self._last_refusal = None
+            self._reported_notes.clear()
+            self._unresolved_windows = 0
             return found
         # Logged on CHANGE, not per call. This runs on every restart and on
         # every watcher poll, so an unconditional warning would repeat for the
@@ -574,9 +635,12 @@ class RoonSession:
         # tuned out. The conclusion is what is worth an entry; a conclusion
         # that has not changed is not news.
         note = _relocation_note(cfg, cores)
-        if note is not None and note != self._last_refusal:
+        if note is not None and note not in self._reported_notes:
             LOG.warning("%s", note)
-        self._last_refusal = note
+            if len(self._reported_notes) >= MAX_REPORTED_NOTES:
+                self._reported_notes.clear()
+            self._reported_notes.add(note)
+        self._unresolved_windows = window
         return None
 
     def _watch_connection(self) -> None:

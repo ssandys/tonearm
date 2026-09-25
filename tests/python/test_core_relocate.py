@@ -324,21 +324,32 @@ class TestTheWatcherRelocates(_ConfigIsolated):
         discover.assert_not_called()
         self.assertEqual(restarts, [])
 
-    def test_relocation_never_sweeps_the_lan(self):
+    def test_relocation_sweeps_the_lan_a_bounded_number_of_times(self):
         """The /24 sweep is 254 TCP connects (measured on a live LAN).
 
-        Paid once on first run, with a human waiting, it is reasonable. Here it
-        would fire on every restart for as long as a Core stayed switched off
-        -- unsolicited scanning of someone else's network, on a loop, and the
-        `MAX_SCAN_HOSTS` bound only limits one pass of it. A Core that MOVED is
-        up and answering SOOD; one that answers nothing is off.
+        This asserted `never` until #17. The reasoning was that a Core which
+        MOVED is up and answering SOOD anyway, so the sweep bought nothing a
+        loop of it could justify -- and that premise was measured false on a
+        real network: multicast answered 0/7 there, including four 12s
+        windows, while the sweep found the Core 3/6. Relocation simply cannot
+        work on such a LAN without sweeping.
+
+        What the original guard was really protecting is unchanged and still
+        asserted here: the sweep must be BOUNDED, not fired on every window
+        for as long as a Core stays switched off. `never` was one way to bound
+        it; a backoff is another, and it is the one that leaves relocation
+        working.
         """
         s, _restarts = self._down_session()
+        windows = 20
         with unittest.mock.patch.object(core.sood, "discover",
                                         return_value=[]) as discover:
-            for _ in range(core.RELOCATE_SAMPLES):
+            for _ in range(core.RELOCATE_SAMPLES * windows):
                 s._check_connection()
-        discover.assert_called_once_with(scan=False)
+        self.assertEqual(discover.call_count, windows)
+        swept = [c for c in discover.call_args_list if c.kwargs.get("scan")]
+        # Windows 1-4, then every eighth: 12 and 20. Emphatically not 20 of 20.
+        self.assertEqual(len(swept), 6, discover.call_args_list)
 
     def test_a_daemon_with_no_restart_hook_does_not_crash_the_watcher(self):
         # RoonSession is constructed without the hook in several tests and in
@@ -471,4 +482,162 @@ class TestRefusalsAreLoggedWithoutFloodingTheJournal(_ConfigIsolated):
         with discovery, self.assertLogs(core.LOG, level="WARNING") as logged:
             for _ in range(5):
                 self.assertIsNone(session._find_relocated())
+        self.assertEqual(len(logged.output), 1, logged.output)
+
+
+class TestWhenTheSweepIsWorthPaying(unittest.TestCase):
+    """`_should_sweep` decides which relocation windows may fall back to the /24.
+
+    Multicast never arrives on some networks -- measured 0/7 here, including
+    four 12s windows, while the sweep found the Core 3/6 and a unicast probe
+    to a known address answered 4/10 (#17). So relocation must be able to
+    sweep, or it cannot work at all there.
+
+    The sweep costs 254 connects and ~8s, and relocation is retried every
+    RELOCATE_AFTER for as long as an outage lasts, so sweeping every window
+    would hunt an absent Core all day. Early windows sweep anyway, because at
+    roughly 50% per attempt one sweep is a coin flip on whether the bar ever
+    heals; later ones back off.
+
+    Deliberately NOT gated on the Core's last-known subnet. That was the first
+    design and it could lock itself out: a router swap moves everything to a
+    new /24, the stored address is then in no local subnet, no sweep is
+    permitted, so the stored address is never refreshed and the gate never
+    reopens. Same shape as a stale unique_id disabling relocation for good.
+    Space is already bounded by _local_networks(), which scans private /24s
+    only; this bounds it in time instead.
+    """
+
+    def test_the_first_windows_always_sweep(self):
+        # ~94% cumulative at the measured hit rate, inside about 8 minutes.
+        for n in (1, 2, 3, 4):
+            self.assertTrue(core._should_sweep(n), "window %d" % n)
+
+    def test_it_then_backs_off_rather_than_hunting_all_day(self):
+        for n in range(5, 12):
+            self.assertFalse(core._should_sweep(n), "window %d" % n)
+
+    def test_it_keeps_trying_occasionally_so_a_late_return_is_found(self):
+        # A Core that comes back at a new address hours later -- an overnight
+        # router reboot -- must still be picked up without a restart.
+        self.assertTrue(core._should_sweep(12))
+        self.assertTrue(core._should_sweep(20))
+
+    def test_a_zero_or_negative_window_never_sweeps(self):
+        # Nothing asks at zero; a counter that drifts must not start sweeping.
+        self.assertFalse(core._should_sweep(0))
+        self.assertFalse(core._should_sweep(-1))
+
+
+class TestTheSweepFallbackInPractice(_ConfigIsolated):
+    """The wiring: which windows actually ask discovery to sweep."""
+
+    def _session(self):
+        session = core.RoonSession(lambda _payload: None)
+        session._cfg = a_config(unique_id="uid-yavin")
+        return session
+
+    def test_an_early_window_asks_discovery_to_sweep(self):
+        session = self._session()
+        with unittest.mock.patch.object(core.sood, "discover",
+                                        return_value=[]) as discover:
+            session._find_relocated()
+        self.assertIs(discover.call_args.kwargs.get("scan"), True)
+
+    def test_a_backed_off_window_stays_on_multicast_only(self):
+        session = self._session()
+        with unittest.mock.patch.object(core.sood, "discover",
+                                        return_value=[]) as discover:
+            for _ in range(6):
+                session._find_relocated()
+        self.assertIs(discover.call_args.kwargs.get("scan"), False)
+
+    def test_a_core_that_is_found_but_refused_still_backs_off(self):
+        # The live #15 config: a stored unique_id no Core can match, so every
+        # sweep SUCCEEDS at discovery and the adoption is then refused. Counting
+        # empty discoveries would reset here and sweep every window forever, on
+        # a fault no amount of sweeping can fix. What is counted is windows that
+        # did not RESOLVE, whatever the reason.
+        session = self._session()
+        with unittest.mock.patch.object(
+                core.sood, "discover",
+                return_value=[a_core(unique_id="someone-else")]) as discover:
+            for _ in range(6):
+                self.assertIsNone(session._find_relocated())
+        self.assertIs(discover.call_args.kwargs.get("scan"), False)
+
+    def test_a_successful_relocation_resets_the_backoff(self):
+        # An outage that ends and returns must get the aggressive windows
+        # again, not resume mid-backoff from the previous one.
+        session = self._session()
+        with unittest.mock.patch.object(core.sood, "discover",
+                                        return_value=[]):
+            for _ in range(6):
+                session._find_relocated()
+        with unittest.mock.patch.object(
+                core.sood, "discover",
+                return_value=[a_core(unique_id="uid-yavin")]) as discover:
+            session._find_relocated()
+        self.assertEqual(session._unresolved_windows, 0)
+        with unittest.mock.patch.object(core.sood, "discover",
+                                        return_value=[]) as discover:
+            session._find_relocated()
+        self.assertIs(discover.call_args.kwargs.get("scan"), True)
+
+
+class TestAFlappingDiscoveryDoesNotFlapTheJournal(_ConfigIsolated):
+    """#15 logs on change; #17 made the conclusion unstable.
+
+    The sweep is ~50% reliable on the network these were written for, so
+    consecutive windows alternate between "found the Core, refused it" and
+    "found nothing" -- and change-detection duly logged every flip, which is
+    the repetition #15 set out to avoid, reintroduced by the interaction.
+
+    Each distinct conclusion is worth saying once per outage. Saying it again
+    because the coin landed the other way is not news.
+    """
+
+    def _session(self):
+        s = core.RoonSession(lambda _p: None)
+        s._cfg = a_config(host="192.168.50.199", unique_id="uid-yavin")
+        return s
+
+    def test_alternating_results_report_each_conclusion_once(self):
+        session = self._session()
+        seen = [[a_core(unique_id="someone-else")], [], [a_core(unique_id="someone-else")],
+                [], [a_core(unique_id="someone-else")], []]
+        with unittest.mock.patch.object(core.sood, "discover", side_effect=seen), \
+             self.assertLogs(core.LOG, level="WARNING") as logged:
+            for _ in seen:
+                session._find_relocated()
+        # One line for "found something I cannot adopt", one for "found
+        # nothing" -- not six, and not four.
+        self.assertEqual(len(logged.output), 2, logged.output)
+
+    def test_a_genuinely_new_finding_is_still_reported(self):
+        # Suppressing repeats must not suppress news: a Core appearing at a
+        # different address is a fact the reader has not been given yet.
+        session = self._session()
+        seen = [[a_core(host="192.168.50.118", unique_id="someone-else")],
+                [a_core(host="192.168.50.118", unique_id="someone-else")],
+                [a_core(host="192.168.50.121", unique_id="someone-else")]]
+        with unittest.mock.patch.object(core.sood, "discover", side_effect=seen), \
+             self.assertLogs(core.LOG, level="WARNING") as logged:
+            for _ in seen:
+                session._find_relocated()
+        self.assertEqual(len(logged.output), 2, logged.output)
+        self.assertIn("192.168.50.121", logged.output[-1])
+
+    def test_a_resolved_outage_lets_the_next_one_speak_again(self):
+        session = self._session()
+        with unittest.mock.patch.object(core.sood, "discover", return_value=[]), \
+             self.assertLogs(core.LOG, level="WARNING"):
+            session._find_relocated()
+        with unittest.mock.patch.object(
+                core.sood, "discover",
+                return_value=[a_core(unique_id="uid-yavin")]):
+            self.assertIsNotNone(session._find_relocated())
+        with unittest.mock.patch.object(core.sood, "discover", return_value=[]), \
+             self.assertLogs(core.LOG, level="WARNING") as logged:
+            session._find_relocated()
         self.assertEqual(len(logged.output), 1, logged.output)
