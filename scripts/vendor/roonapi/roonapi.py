@@ -908,6 +908,19 @@ class RoonApi:  # pylint: disable=too-many-instance-attributes, too-many-lines
                         for output in zone["outputs"]:
                             filter_keys.append(output["output_id"])
                             filter_keys.append(output["display_name"])
+                # LOCAL PATCH (tonearm #13) -- see scripts/vendor/README.md.
+                # `zones` is the FULL subscription payload, which upstream
+                # handles in this same branch as the incremental events above:
+                # it updates or inserts every id it receives and never removes
+                # one that is absent. Right for an increment, wrong for a
+                # snapshot. A zone that disappeared while the socket was down
+                # therefore survived the reconnect and stayed in the bar's
+                # picker until the daemon was restarted, while Roon itself no
+                # longer listed it.
+                if state_key == "zones":
+                    for gone in [z for z in self._zones if z not in changed_ids]:
+                        del self._zones[gone]
+                        changed_ids.append(gone)
                 event = (
                     "zones_seek_changed"
                     if state_key == "zones_seek_changed"
@@ -923,14 +936,35 @@ class RoonApi:  # pylint: disable=too-many-instance-attributes, too-many-lines
                     changed_ids.append(output["output_id"])
                     filter_keys.append(output["display_name"])
                     filter_keys.append(output["zone_id"])
+                # LOCAL PATCH (tonearm #13): the same snapshot-versus-
+                # increment confusion, one branch down. Patched for symmetry:
+                # tonearm reads outputs nested inside zones rather than this
+                # dict, but half a corrected function is a trap for the next
+                # reader.
+                if state_key == "outputs":
+                    for gone in [o for o in self._outputs if o not in changed_ids]:
+                        del self._outputs[gone]
+                        changed_ids.append(gone)
                 event = "outputs_changed"
                 events.append((event, changed_ids, filter_keys))
             elif state_key == "zones_removed":
+                # LOCAL PATCH (tonearm #13): upstream deletes and appends no
+                # event, so no state callback fires and the removal reaches
+                # consumers only when some later, unrelated event happens to
+                # be published -- on an idle system, possibly never. It also
+                # used a bare `del`, which raises KeyError inside a websocket
+                # callback when a removal races a snapshot that already
+                # dropped the zone.
                 for item in state_values:
-                    del self._zones[item]
+                    self._zones.pop(item, None)
+                    changed_ids.append(item)
+                events.append(("zones_changed", changed_ids, filter_keys))
             elif state_key == "outputs_removed":
+                # LOCAL PATCH (tonearm #13): as above.
                 for item in state_values:
-                    del self._outputs[item]
+                    self._outputs.pop(item, None)
+                    changed_ids.append(item)
+                events.append(("outputs_changed", changed_ids, filter_keys))
             else:
                 LOGGER.warning("unknown state change: %s" % msg)
         for event, changed_ids, filter_keys in events:
