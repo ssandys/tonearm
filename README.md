@@ -216,21 +216,31 @@ answer, the Core is not the thing to go and look at.
 
 ## Removal
 
-Removing just the plugin folder is not enough on its own: the systemd user
-service keeps pointing at a path that no longer exists and retries on
-failure forever. Stop and remove the service first, then the plugin:
+Removing just the plugin folder leaves the user service behind. Remove the
+service first, then the plugin. The uninstall command checks that the unit
+belongs to tonearm and preserves your Core address, pairing token and pinned
+zone for a future reinstall:
 
 ```bash
-# 1. Stop and remove the systemd user service
-systemctl --user disable --now tonearmd.service
-rm ~/.config/systemd/user/tonearmd.service
-systemctl --user daemon-reload
+# 1. Stop and remove the systemd user service (safe to repeat)
+~/.config/omarchy/plugins/ssandys.tonearm/setup.sh --uninstall
 
 # 2. Remove the plugin
 omarchy plugin remove ssandys.tonearm      # or ./bin/dev down for a dev deploy
 
 # 3. Optional: clear tonearm's own config, including the Roon pairing token
 rm -rf ~/.config/tonearm/
+```
+
+If the plugin folder was already removed, `setup.sh` is no longer available.
+Units installed with this version skip starting when the daemon path is
+missing; older units may still retry with `203/EXEC`. In either case, remove
+the leftover unit manually:
+
+```bash
+systemctl --user disable --now tonearmd.service
+rm ~/.config/systemd/user/tonearmd.service
+systemctl --user daemon-reload
 ```
 
 That last step is optional but worth knowing about: `~/.config/tonearm/`

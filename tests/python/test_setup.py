@@ -20,7 +20,9 @@ import unittest
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-SYSTEMCTL_SHIM = "#!/bin/sh\nexit 0\n"
+SYSTEMCTL_SHIM = ("#!/bin/sh\n"
+                  "printf '%s\\n' \"$*\" >> \"$SYSTEMCTL_LOG\"\n"
+                  "exit 0\n")
 
 
 def _deps_present():
@@ -61,13 +63,21 @@ class SetupTestCase(unittest.TestCase):
             handle.write(SYSTEMCTL_SHIM)
         os.chmod(shim, 0o755)
         self.shim_dir = shim_dir
+        self.systemctl_log = os.path.join(self.home, "systemctl.log")
 
-    def run_setup(self):
+    def run_setup(self, *args):
         env = dict(os.environ)
         env["HOME"] = self.home
         env["PATH"] = self.shim_dir + os.pathsep + env["PATH"]
-        return subprocess.run([os.path.join(self.plugin, "setup.sh")],
+        env["SYSTEMCTL_LOG"] = self.systemctl_log
+        return subprocess.run([os.path.join(self.plugin, "setup.sh"), *args],
                               env=env, capture_output=True, text=True, timeout=60)
+
+    def systemctl_calls(self):
+        if not os.path.exists(self.systemctl_log):
+            return []
+        with open(self.systemctl_log) as handle:
+            return handle.read().splitlines()
 
     def temp_leftovers(self):
         if not os.path.isdir(self.unit_dir):
@@ -91,6 +101,78 @@ class TestCleanInstall(SetupTestCase):
         self.assertEqual(self.run_setup().returncode, 0)
         second = self.run_setup()
         self.assertEqual(second.returncode, 0, second.stderr)
+
+
+class TestUninstall(SetupTestCase):
+    def test_removes_owned_unit_in_order_and_preserves_pairing(self):
+        self.assertEqual(self.run_setup().returncode, 0)
+        state_dir = os.path.join(self.home, ".config", "tonearm")
+        token = os.path.join(state_dir, "token")
+        with open(token, "w") as handle:
+            handle.write("pairing-token")
+        os.chmod(token, 0o600)
+        os.unlink(self.systemctl_log)
+
+        result = self.run_setup("--uninstall")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(os.path.lexists(self.target))
+        self.assertEqual(self.systemctl_calls(), [
+            "--user disable --now tonearmd.service", "--user daemon-reload"])
+        with open(token) as handle:
+            self.assertEqual(handle.read(), "pairing-token")
+        self.assertEqual(os.stat(state_dir).st_mode & 0o077, 0)
+
+    def test_uninstall_twice_is_idempotent(self):
+        self.assertEqual(self.run_setup().returncode, 0)
+        self.assertEqual(self.run_setup("--uninstall").returncode, 0)
+        os.unlink(self.systemctl_log)
+        second = self.run_setup("--uninstall")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self.systemctl_calls(), [])
+
+    def test_uninstall_without_a_unit_does_not_touch_systemd(self):
+        result = self.run_setup("--uninstall")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.systemctl_calls(), [])
+        self.assertFalse(os.path.exists(self.unit_dir))
+
+    def test_refuses_unowned_or_non_regular_unit_before_stopping_service(self):
+        for kind in ("symlink", "fifo", "directory", "unrelated"):
+            with self.subTest(kind=kind):
+                os.makedirs(self.unit_dir, exist_ok=True)
+                if kind == "symlink":
+                    victim = os.path.join(self.home, "victim")
+                    with open(victim, "w") as handle:
+                        handle.write("untouched")
+                    os.symlink(victim, self.target)
+                elif kind == "fifo":
+                    os.mkfifo(self.target)
+                elif kind == "directory":
+                    os.mkdir(self.target)
+                else:
+                    with open(self.target, "w") as handle:
+                        handle.write("[Service]\nExecStart=/usr/bin/other\n")
+
+                result = self.run_setup("--uninstall")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(os.path.lexists(self.target))
+                self.assertEqual(self.systemctl_calls(), [])
+                if kind == "symlink":
+                    with open(victim) as handle:
+                        self.assertEqual(handle.read(), "untouched")
+                    os.unlink(victim)
+                if kind == "directory":
+                    os.rmdir(self.target)
+                else:
+                    os.unlink(self.target)
+
+    def test_unit_skips_start_when_daemon_has_been_removed(self):
+        self.assertEqual(self.run_setup().returncode, 0)
+        with open(self.target) as handle:
+            unit = handle.read()
+        self.assertIn(
+            "ConditionPathExists=%h/.config/omarchy/plugins/"
+            "ssandys.tonearm/scripts/tonearmd", unit)
 
 
 class TestRefusesToWriteThroughAPlant(SetupTestCase):
