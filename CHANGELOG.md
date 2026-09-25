@@ -4,6 +4,36 @@ Notable changes to tonearm. Versions follow [semantic versioning](https://semver
 while the major version is 0, the minor version carries changes that would
 otherwise be breaking.
 
+## 0.11.7 — 2026-09-24
+
+### Fixed
+
+- **Zones the Core no longer lists are dropped on reconnect**
+  ([#13](https://github.com/ssandys/tonearm/issues/13)). A zone that
+  disappeared while the socket was down survived the reconnect: `tonearmctl
+  status` kept listing it and the picker kept offering it, until the daemon
+  was restarted — while Roon itself no longer showed it. Reported from a real
+  session, with an endpoint powered off while the laptop slept and still
+  reported as paused 23 seconds after reconnect.
+
+  The cause is in vendored roonapi, which handles the `zones` and `outputs`
+  subscription payloads in the same branch as the incremental `*_changed` and
+  `*_added` events: it updates or inserts every id it receives and never
+  removes one that is absent. Correct for an increment, wrong for a snapshot.
+  Snapshots now drop what they omit; increments still only merge.
+
+  Two further faults in the same handler, found while covering the first: a
+  removal received while connected fired no state callback at all, so it
+  reached consumers only when some later unrelated event happened to be
+  published; and the removal path used a bare `del`, which raises `KeyError`
+  inside a websocket callback when a removal races a snapshot that has already
+  dropped the entry.
+
+  These are local patches to a vendored library, so they are marked in the
+  source, described in `scripts/vendor/README.md` with instructions to
+  re-apply on a refresh and to re-check against upstream on a bump, and pinned
+  by tests — a refresh that drops them fails the suite rather than a user.
+
 ## 0.11.6 — 2026-09-24
 
 ### Fixed
