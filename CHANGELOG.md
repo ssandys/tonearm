@@ -4,6 +4,32 @@ Notable changes to tonearm. Versions follow [semantic versioning](https://semver
 while the major version is 0, the minor version carries changes that would
 otherwise be breaking.
 
+## 0.11.6 — 2026-09-24
+
+### Fixed
+
+- **The bar stops blaming your network when the fault cannot be established**
+  ([#11](https://github.com/ssandys/tonearm/issues/11)). "No route to your
+  network" was decided by opening TCP to the default gateway and calling the
+  network down if it did not answer. Plenty of healthy gateways do not answer
+  TCP, so on such a network switching the Core off produced a network fault —
+  the same wrong message the status was added to eliminate, merely inverted.
+  CI proved it unprompted: eleven tests failed on a GitHub runner whose
+  gateway ignores tcp/80 and whose network was perfect.
+
+  The daemon now asks the kernel which source address it would use to reach
+  the Core, which is a routing fact rather than a third party's manners, and
+  costs nothing on the wire. A network fault is reported **only when it can be
+  positively established** — the Core sits on a subnet this machine is
+  directly on, and the kernel is nonetheless leaving by a different one, which
+  is the tunnel-swallowing-the-LAN condition that prompted the status in the
+  first place. Anything less certain keeps the older wording, because telling
+  someone their network is down when it is not is the worse error.
+
+  In particular a Core reached through a router — another VLAN, a wired
+  segment — is no longer mistaken for a routing fault, and neither is a Core
+  reachable only by a host route.
+
 ## 0.11.5 — 2026-09-24
 
 Relocation, which could not work at all on some networks and said nothing
