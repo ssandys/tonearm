@@ -14,8 +14,9 @@ ACTIVE = ("playing", "loading")
 
 
 class Arbiter:
-    def __init__(self, pinned_id: str | None = None) -> None:
+    def __init__(self, pinned_id: str | None = None, *, strict_pins: bool = False) -> None:
         self.pinned_id = pinned_id
+        self.strict_pins = strict_pins
         self._counter = itertools.count()
         self._started_at: dict[str, int] = {}
         self._last_state: dict[str, str] = {}
@@ -95,6 +96,11 @@ class Arbiter:
 
         if self.pinned_id and self.pinned_id in by_id:
             return self._mark(by_id[self.pinned_id], pinned=True)
+
+        # Opt-in safety: a missing explicit choice must not become another room.
+        # Keep the pin so its return restores selection without issuing commands.
+        if self.pinned_id and self.strict_pins:
+            return None
 
         active = [z for z in zones if z.get("state") in ACTIVE]
         if active:

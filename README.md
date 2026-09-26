@@ -131,6 +131,24 @@ From a script: `tonearmctl transfer <zone_id>`.
 There's no keyboard shortcut for this yet — the zone rows aren't part of the
 popup's keyboard cursor, which currently only covers search results.
 
+## Strict pinning (optional)
+
+By default, if a pinned endpoint disappears, Tonearm falls back to another
+active zone. To keep controls from affecting another room, set the JSON boolean
+`"strict_pins": true` in Tonearm's private `~/.config/tonearm/config.json`,
+preserving the other fields. Restart the daemon for the setting to take effect.
+Do not share this directory: it contains pairing credentials.
+
+With strict pinning enabled, a missing pinned zone leaves no selected zone and
+its controls are refused. Other zones remain listed, and the saved pin is kept
+for the endpoint's return. Returning does not start playback or restore volume.
+Unpinning restores auto-follow. Omit the setting or set it to false to keep the
+existing fallback. There is no UI or CLI switch for this option.
+
+Remote commands are also refused while the Core is disconnected, regardless of
+this setting; cached zones are not usable playback targets. This policy does
+not lock a multi-step operation to one zone if the user changes selection.
+
 ## Library search
 
 The popup can search your whole Roon library — not just the current zone or

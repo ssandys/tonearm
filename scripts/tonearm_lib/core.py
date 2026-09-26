@@ -414,7 +414,9 @@ class RoonSession:
         self._on_restart_needed = on_restart_needed
         self._api: RoonApi | None = None
         self._cfg = config.load()
-        self._arbiter = zones.Arbiter(self._cfg.get("pinned_zone_id"))
+        self._arbiter = zones.Arbiter(
+            self._cfg.get("pinned_zone_id"),
+            strict_pins=self._cfg.get("strict_pins") is True)
         self._status = "connecting"
         self._lock = threading.Lock()
         # Separate from every other lock in this class. A browse round-trip is
@@ -902,6 +904,10 @@ class RoonSession:
         put a browse round-trip's worth of Roon latency behind the same lock
         every transport command uses (spec 7.5).
         """
+        # The vendor API retains cached zones while disconnected. Browse must
+        # not treat those as a usable playback target.
+        if self._status != "ok":
+            return None
         _, selected = self._zones()
         return selected["id"] if selected else None
 
@@ -990,7 +996,7 @@ class RoonSession:
             self._pin_locked(None if arg == "unpin" else arg)
             return
 
-        if not self._api:
+        if not self._api or self._status != "ok":
             LOG.warning("dropping %s: not connected", verb)
             return
         _, selected = self._zones()

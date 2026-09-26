@@ -32,6 +32,11 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(cfg["http_port"], 9330)
         self.assertIsNone(cfg["pinned_zone_id"])
 
+    def test_strict_pins_is_opt_in_and_persists(self):
+        self.assertFalse(config.load()["strict_pins"])
+        config.save({"strict_pins": True})
+        self.assertIs(config.load()["strict_pins"], True)
+
     def test_save_then_load_round_trips(self):
         config.save({"host": "192.168.50.118", "tcp_port": 9150,
                      "http_port": 9330, "name": "yavin", "pinned_zone_id": "z1"})

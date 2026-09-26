@@ -179,6 +179,7 @@ class BrowseSession:
         # _opts). A callable is also what makes this testable without a Core.
         self._zone_id_provider = zone_id_provider
         self._lock = threading.RLock()
+        self._play_in_progress = False
         self.level_id = 0
         self._path: list[str] = []
         self._rows: list[dict] = []
@@ -226,6 +227,10 @@ class BrowseSession:
         """
         opts = {"hierarchy": "browse", "multi_session_key": self._key}
         zone_id = self._zone_id()
+        # Recheck before each round-trip: an endpoint can vanish while an
+        # action is being resolved. Never send an untargeted playback step.
+        if self._play_in_progress and not zone_id:
+            raise BrowseError("no_zone", "no Roon zone is selected to play into")
         if zone_id:
             opts["zone_or_output_id"] = zone_id
         opts.update(extra)
@@ -456,6 +461,14 @@ class BrowseSession:
         return self.current()
 
     def play(self, index: int, level_id=None) -> dict:
+        with self._lock:
+            self._play_in_progress = True
+            try:
+                return self._play(index, level_id)
+            finally:
+                self._play_in_progress = False
+
+    def _play(self, index: int, level_id=None) -> dict:
         """Resolve the row's action list, invoke Play Now, return to the level.
 
         Resolution is LAZY (spec 4.3): precomputing which rows are playable
