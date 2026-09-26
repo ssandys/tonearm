@@ -32,7 +32,7 @@ CONFIG_PATH = ""
 TOKEN_PATH = ""
 
 # Ceilings on what the daemon will read back out of its own state directory.
-# Neither file is user-authored: config.json is five scalars this module
+# Neither file is user-authored: config.json is a small set of scalars this module
 # writes, and the token is a Roon pairing string. Anything past these is not
 # a tonearm file, and buffering it to find that out is the bug.
 MAX_CONFIG_BYTES = 64 * 1024
@@ -49,6 +49,8 @@ DEFAULTS = {
     # which is why name matching is still a fallback there.
     "unique_id": None,
     "pinned_zone_id": None,
+    # Preserve legacy missing-pin fallback unless explicitly opted into safety.
+    "strict_pins": False,
 }
 
 
