@@ -30,6 +30,15 @@ Marked in the source with `LOCAL PATCH (tonearm #<issue>)` and pinned by
 suite rather than failing a user. Each is worth re-checking against upstream
 on a bump: if 0.1.7 has fixed it, drop the divergence and the test with it.
 
+`roonapi/roonapi.py`, zone-list authority for selection identity: a successful
+`get_zones` response or a full `zones` subscription increments an instance-local
+generation, including an empty list. Incremental zone events and failed reads
+do not. The daemon uses this to distinguish a confirmed missing pin from the
+brief `ok`-before-zones interval after connect/reconnect. The patch does not
+change roonapi's public callback signature or zone dictionary; it only exposes
+the full-list boundary to the daemon. Keep this marker when refreshing the
+vendor; `test_vendor_patches.py` and `test_selection_identity.py` cover it.
+
 `roonapi/roonapi.py`, `_on_state_change` ([#13](https://github.com/ssandys/tonearm/issues/13)):
 
 - The `zones` and `outputs` subscription payloads are FULL snapshots, but

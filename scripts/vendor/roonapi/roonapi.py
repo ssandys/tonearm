@@ -921,6 +921,9 @@ class RoonApi:  # pylint: disable=too-many-instance-attributes, too-many-lines
                     for gone in [z for z in self._zones if z not in changed_ids]:
                         del self._zones[gone]
                         changed_ids.append(gone)
+                    # LOCAL PATCH (tonearm selection identity): a full zone
+                    # subscription, including an empty one, is authoritative.
+                    self._zone_list_generation = getattr(self, "_zone_list_generation", 0) + 1
                 event = (
                     "zones_seek_changed"
                     if state_key == "zones_seek_changed"
@@ -997,6 +1000,8 @@ class RoonApi:  # pylint: disable=too-many-instance-attributes, too-many-lines
         if data and "zones" in data:
             for zone in data["zones"]:
                 zones[zone["zone_id"]] = zone
+            # A successful initial list is authoritative even when empty.
+            self._zone_list_generation = getattr(self, "_zone_list_generation", 0) + 1
         return zones
 
     def _request(self, command, data=None):
