@@ -10,6 +10,7 @@ Each one names the upstream behaviour it corrects, so whoever refreshes can
 tell whether upstream has since fixed it and the divergence can be dropped.
 """
 
+import inspect
 import os
 import sys
 import unittest
@@ -119,3 +120,24 @@ class TestARemovalIsPublished(unittest.TestCase):
         a = api()
         a._on_state_change({"zones_removed": ["gone"]})
         self.assertEqual(a._zones, {})
+
+class TestNoSoodImplementation(unittest.TestCase):
+    """The SOOD discovery code (discovery.py, soodmessage.py, .soodmsg) was
+    removed: it was dead code replaced by tonearm_lib/sood.py, and had
+    unfixed bugs.  See tonearm#39."""
+
+    def test_sood_files_are_absent(self):
+        import roonapi, pathlib
+        pkg = pathlib.Path(inspect.getfile(roonapi)).parent
+        self.assertFalse((pkg / "discovery.py").exists())
+        self.assertFalse((pkg / "soodmessage.py").exists())
+        self.assertFalse((pkg / ".soodmsg").exists())
+
+    def test_roonapi_exposes_no_sood_symbols(self):
+        import roonapi
+        self.assertFalse(hasattr(roonapi, "RoonDiscovery"))
+
+
+
+if __name__ == "__main__":
+    unittest.main()

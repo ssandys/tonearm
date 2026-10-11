@@ -15,7 +15,7 @@ plus a QML bar-widget plugin (`Panel.qml`) fed by `Service.qml`.
 | `Service.qml` | I/O only: spawns `tonearmctl subscribe`, parses NDJSON, tracks `state`/`receivedAt`, reconnect backoff, fire-and-forget command sends. No display logic. | **The live shell only** |
 | `Panel.qml` | Rendering only: bar button, popup, seek bar, transport, volume, zone list. No tests by design — the unverifiable surface is kept as small as `Service.qml` allows and pushed no further. | **The live shell only** |
 | `scripts/tonearm_lib/*` | The daemon: Roon connection (`core.py`), zone arbitration (`zones.py`), MPRIS publication (`mpris.py`), album-art caching (`art.py`), unix-socket server (`server.py`), config/token persistence (`config.py`), discovery (`sood.py`), CLI parsing (`cli.py`) | `python -m unittest` (`./bin/test` runs it via `discover -s tests/python -t .`) |
-| `scripts/vendor/roonapi` | Vendored `roonapi` 0.1.6, Apache-2.0. **Do not modify.** `tests/python/test_vendor.py` guards its import surface across refreshes; see `scripts/vendor/README.md` for how to refresh it. | `test_vendor.py` only |
+| `scripts/vendor/roonapi` | Vendored `roonapi` 0.1.6, Apache-2.0. **Local patches only** (see `scripts/vendor/README.md` for the patch process). `tests/python/test_vendor_patches.py` guards the patches; `tests/python/test_vendor.py` guards the import surface across refreshes. | `test_vendor.py` + `test_vendor_patches.py` only |
 
 **Every decision worth testing lives in `Model.js` and `scripts/tonearm_lib`,**
 and both are reachable from a real test runner. `Service.qml` and `Panel.qml`

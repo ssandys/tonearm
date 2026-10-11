@@ -221,7 +221,7 @@ read of this exit code.
 ├── scripts/
 │   ├── tonearmd           the daemon        (#!/usr/bin/python)
 │   ├── tonearmctl         socket client
-│   └── vendor/roonapi/    5 files, Apache-2.0, LICENSE and NOTICE retained
+│   └── vendor/roonapi/    3 files (discovery.py, soodmessage.py, .soodmsg removed), Apache-2.0, LICENSE and NOTICE retained
 ├── systemd/tonearmd.service
 ├── setup.sh               dependency check, unit install, --check health mode
 ├── bin/{dev,dev-watch,test}

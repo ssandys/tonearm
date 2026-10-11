@@ -29,7 +29,7 @@ following, which are used as-is and keep their own licenses:
 
 ### Vendored: roonapi 0.1.6
 
-`scripts/vendor/roonapi/` is a vendored, unmodified copy of `roonapi` 0.1.6
+`scripts/vendor/roonapi/` is a vendored copy of `roonapi` 0.1.6 with local patches (see below)
 from https://github.com/pavoni/pyroon, licensed **Apache License 2.0**. Its
 own license text is retained in place at `scripts/vendor/roonapi/LICENSE` and
 must not be altered. See `scripts/vendor/README.md` for why it is vendored
