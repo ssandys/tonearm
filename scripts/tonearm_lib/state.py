@@ -170,8 +170,34 @@ def normalize_zone(roon_zone: dict | None) -> dict | None:
     }
 
 
+def selection(pinned_id, selected: dict | None, zones: list[dict],
+              authoritative: bool) -> dict:
+    """Selection identity independent of the legacy playable ``zone`` field.
+
+    Session startup discards malformed persisted pins. This helper still
+    refuses to publish an invalid identifier if called with one directly.
+    """
+    pinned = pinned_id is not None
+    valid_id = (pinned_id if isinstance(pinned_id, str) and
+                0 < len(pinned_id) <= MAX_ID else None)
+    if pinned:
+        if not authoritative:
+            return {"mode": "pinned", "zone_id": valid_id, "availability": "unknown"}
+        available = valid_id is not None and any(z.get("id") == valid_id for z in zones)
+        availability = ("available" if available else
+                        "missing" if valid_id is not None else "unknown")
+        return {"mode": "pinned", "zone_id": valid_id, "availability": availability}
+    chosen = selected.get("id") if selected else None
+    if not authoritative:
+        return {"mode": "auto", "zone_id": None, "availability": "unknown"}
+    if not isinstance(chosen, str) or len(chosen) > MAX_ID:
+        chosen = None
+    return {"mode": "auto", "zone_id": chosen,
+            "availability": "available" if chosen else "none"}
+
+
 def build(status: str, core: dict | None, zone: dict | None,
-          zones: list[dict]) -> dict:
+          zones: list[dict], selection: dict | None = None) -> dict:
     if status not in VALID_STATUS:
         raise ValueError("status must be one of %r, got %r" % (VALID_STATUS, status))
     trimmed_core = None
@@ -193,4 +219,7 @@ def build(status: str, core: dict | None, zone: dict | None,
              "state": _state_word(z.get("state", "stopped"))}
             for z in zones[:MAX_ZONES]
         ],
+        "selection": selection if selection is not None else {
+            "mode": "auto", "zone_id": None,
+            "availability": "unknown" if status != "ok" else "none"},
     }

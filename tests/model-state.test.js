@@ -167,6 +167,22 @@ test("tooltip explains each fault in words", () => {
     "Nothing playing · yavin")
 })
 
+test("missing pin copy differs from idle and Core failure, without selecting other rooms", () => {
+  const missing = { v: 1, status: "ok", core: CORE, zone: null,
+    zones: [{ id: "other", name: "Other", state: "playing" }],
+    selection: { mode: "pinned", zone_id: "pin", availability: "missing" } }
+  assert.strictEqual(M.tooltipText(missing), "Pinned output unavailable · yavin")
+  assert.strictEqual(M.headerStatus(missing), "Pinned output unavailable")
+  assert.strictEqual(M.barState(missing, 1, 1).playing, false)
+  assert.strictEqual(M.barState(missing, 1, 1).severity, "warn")
+  assert.strictEqual(M.barState(missing, 1, 1).glyph, M.GLYPH_FAULT)
+  assert.deepStrictEqual(M.zoneList(missing).map((z) => z.id), ["other"])
+  assert.strictEqual(M.tooltipText({ ...missing, selection: { mode: "pinned", zone_id: "pin", availability: "unknown" } }), "Nothing playing · yavin")
+  assert.strictEqual(M.tooltipText({ ...missing, status: "unreachable" }), "Roon Core unreachable")
+  assert.strictEqual(M.tooltipText({ v: 1, status: "ok", core: CORE, zone: null, zones: [] }), "Nothing playing · yavin")
+  assert.strictEqual(M.headerStatus({ ...missing, zone: { id: "other", state: "playing" } }), "yavin")
+})
+
 test("connecting is normal startup, not a failure -- never reads as unreachable", () => {
   // The daemon is actively reaching for the Core. This is the ordinary first
   // second or two of every boot, not a fault, and must say something distinct

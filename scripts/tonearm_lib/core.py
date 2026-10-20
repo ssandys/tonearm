@@ -196,6 +196,7 @@ def _seeded_api() -> RoonApi:
     api = RoonApi.__new__(RoonApi)
     api._zones = {}
     api._outputs = {}
+    api._zone_list_generation = 0
     return api
 
 
@@ -492,10 +493,18 @@ class RoonSession:
         self._on_restart_needed = on_restart_needed
         self._api: RoonApi | None = None
         self._cfg = config.load()
+        pinned_id = self._cfg.get("pinned_zone_id")
+        if not isinstance(pinned_id, str) or not 0 < len(pinned_id) <= MAX_ZONE_ID:
+            # Config is bounded on disk but hand-edited JSON can still carry
+            # a non-string/unhashable pin. Treat it as no explicit selection.
+            pinned_id = None
         self._arbiter = zones.Arbiter(
-            self._cfg.get("pinned_zone_id"),
+            pinned_id,
             strict_pins=self._cfg.get("strict_pins") is True)
         self._status = "connecting"
+        # A fresh full list is required before absence means "missing".
+        # Incremented by the vendored API only for get_zones/full zones.
+        self._required_zone_generation = 1
         self._lock = threading.Lock()
         # Separate from every other lock in this class. A browse round-trip is
         # far slower than a snapshot; sharing a lock with the publish path
@@ -537,9 +546,19 @@ class RoonSession:
         # header directly above reads "Roon Core unreachable". Two halves of
         # one popup contradicting each other is worse than an empty card.
         if self._status != "ok":
-            return state.build(self._status, core, None, [])
-        listing, selected = self._zones()
-        return state.build(self._status, core, selected, listing)
+            return state.build(self._status, core, None, [],
+                               selection=state.selection(self._arbiter.pinned_id,
+                                                         None, [], False))
+        # Old test doubles have no marker; real instances are seeded at zero.
+        generation = getattr(self._api, "_zone_list_generation", 1) if self._api else 0
+        authoritative = generation >= self._required_zone_generation
+        # roonapi can retain last session's map while its replacement socket
+        # is up but has not delivered the new full listing. Do not feed that
+        # map into the arbiter or publish it as a current playable zone.
+        listing, selected = self._zones() if authoritative else ([], None)
+        return state.build(self._status, core, selected, listing,
+                           selection=state.selection(self._arbiter.pinned_id,
+                                                     selected, listing, authoritative))
 
     def _zones(self):
         if not self._api:
@@ -622,6 +641,9 @@ class RoonSession:
 
         self._down_samples += 1
         if self._status == "ok" and self._down_samples >= DOWN_SAMPLES:
+            self._required_zone_generation = max(
+                self._required_zone_generation,
+                getattr(self._api, "_zone_list_generation", 1) + 1)
             self._status = _unreachable_status(self._cfg.get('host'))
             LOG.warning("Roon connection lost after %d polls: %s",
                         self._down_samples, self._status)
