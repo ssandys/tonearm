@@ -25,6 +25,16 @@ would otherwise bring them back.
 
 ## Local patches
 
+`roonapi.py`, search-input response budget: browse requests carrying nonempty
+string input wait up to10s for their single response instead of the ordinary2.5s.
+No request is resent; load, transport and input-free browse budgets are unchanged.
+`test_search_reply_budget.py` covers delayed completion, bounded timeout, cleanup
+and unchanged ordinary calls. A reported local search defect reproduced at about
+2.8s while Library navigation took0.27s and official Roon search succeeded. This
+patch addresses the demonstrated short-budget failure mechanism; whether it fixes
+that live defect remains pending controlled validation. It does not fix general
+socket replacement/request ownership or subscriber fanout issues.
+
 Marked in the source with `LOCAL PATCH (tonearm #<issue>)` and pinned by
 `tests/python/test_vendor_patches.py`, so a refresh that loses them fails the
 suite rather than failing a user. Each is worth re-checking against upstream
