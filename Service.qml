@@ -153,7 +153,36 @@ Item {
   // Variadic ahead of need: Task 16's `zone pin <id>` must reach tonearmctl
   // as two argv entries, not one joined string, so arg2 is accepted now
   // rather than widening this signature later.
+  property string playerError: ""
+  property string playerErrorZone: ""
+  property int playerSequence: 0
+  property string latestPlayerRequest: ""
+  onStateChanged: {
+    var zid = root.state && root.state.zone ? root.state.zone.id : ""
+    if (zid !== root.playerErrorZone) root.playerError = ""
+  }
+
   function send(verb, arg, arg2) {
+    if (Model.isPlayerVerb(verb)) {
+      var rid = "player-" + Date.now().toString(36) + "-" + (++root.playerSequence)
+      root.latestPlayerRequest = rid
+      var request = Model.playerRequest(root.state, verb, arg, rid)
+      root.playerError = ""
+      root.playerErrorZone = root.state && root.state.zone ? root.state.zone.id : ""
+      if (!request) { root.playerError = "Control unavailable for the selected output."; return }
+      var proc = rpcComponent.createObject(root, {
+        command: [root.ctlPath, "player", JSON.stringify(request)],
+        callback: function(reply) {
+          var zid = root.state && root.state.zone ? root.state.zone.id : ""
+          // Ignore late replies for an older click or a different room.
+          if (root.latestPlayerRequest !== rid || zid !== request.zone_id) return
+          root.playerError = Model.playerReplyText(request, reply)
+        }
+      })
+      if (!proc) { root.playerError = "Player result unknown; no retry was sent."; return }
+      proc.running = true
+      return
+    }
     var argv = [root.ctlPath, verb]
     if (arg !== undefined && arg !== null) argv.push(String(arg))
     if (arg2 !== undefined && arg2 !== null) argv.push(String(arg2))
@@ -172,13 +201,14 @@ Item {
       id: rpc
       property var callback: null
       property string buffer: ""
+      property int lineLimit: Model.MAX_LINE
 
       stdout: SplitParser {
         onRead: function (line) {
           // Same bound as the state relay: a browse reply carries Core-supplied
           // rows and is parsed in the same process.
-          if (!Model.acceptsLine(line)) {
-            console.warn("tonearm: refusing an oversized browse reply")
+          if (!Model.acceptsLine(line) || line.length > rpc.lineLimit) {
+            console.warn("tonearm: refusing an oversized RPC reply")
             return
           }
           if (rpc.buffer === "") rpc.buffer = line
@@ -213,6 +243,18 @@ Item {
         rpc.destroy()
       }
     }
+  }
+
+  // One cache-only queue read. Per-view single-flight and reply identity live
+  // in QueuePane; this generic process never starts a subscription or action.
+  function queue(request, callback) {
+    var proc = rpcComponent.createObject(root, {
+      command: [root.ctlPath, "queue", JSON.stringify(request)],
+      lineLimit: 65536,
+      callback: callback
+    })
+    if (proc === null) { if (callback) callback(null); return }
+    proc.running = true
   }
 
   // Fire a browse op and hand the parsed reply to `callback`. The callback is

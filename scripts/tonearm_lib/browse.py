@@ -23,6 +23,7 @@ import re
 import threading
 
 from . import state
+from .browse_play import SELECTED_ACTIONS
 
 LOG = logging.getLogger("tonearmd.browse")
 
@@ -83,6 +84,7 @@ def row_from_item(item: dict) -> dict:
         "image_key": item.get("image_key"),
         "can_descend": can_descend,
         "can_play": can_play,
+        "can_navigate": can_descend and not bool(item.get("input_prompt")),
     }
 
 
@@ -105,17 +107,15 @@ def normalize_rows(items) -> list:
 
 PAGE = 100
 
-# Roon's action title, measured on yavin (spec 2.4). Identical for albums and
-# tracks.
-#
-# There used to be four of these -- "Add Next", "Queue" and "Start Radio"
-# alongside this one -- reached through an `action` argument threaded from the
-# CLI through the wire protocol into play(). Queue was removed from the widget
-# because the popup has no way to SHOW a queue, which left all four as
-# protocol surface with no consumer and no path to one. Play Now is the only
-# action anything invokes, so the argument that selected between them is gone
-# too: the map, the unknown-action error, and a wire field.
-PLAY_NOW = "Play Now"
+# Measured Core menu titles (spec 2.4), identical for album and track action
+# lists. Legacy play() and activate() stay on Play Now. The selected-browse
+# contract adds Play Next and Add to Queue as tokens in SELECTED_ACTIONS,
+# mapped here to "Add Next" and "Queue". Callers cannot pass a Core title or
+# any other string: Start Radio stays unexposed, and a missing queue action
+# is no_action rather than a silent Play Now. One request still resolves one
+# row, so a whole album is the album row's own action, not a track loop.
+PLAY_NOW = SELECTED_ACTIONS["play_now"]
+_ACTION_TITLES = frozenset(SELECTED_ACTIONS.values())
 
 # How deep to hunt for an action list before giving up. Measured live
 # against a real Core (R12 fix round 3): a track is 1 descent from its row;
@@ -172,6 +172,10 @@ class BrowseSession:
     def __init__(self, api, key: str, zone_id_provider=None) -> None:
         self._api = api
         self._key = key
+        # Keys belong to the connection that loaded them, not just the SDK
+        # object (which replaces its socket in place on reconnect).
+        self._loaded_connection = getattr(api, "_roonsocket", None)
+        self._cursor_connection = self._loaded_connection
         # A CALLABLE, not a zone id, and deliberately so. The user can repin
         # between two browses (the popup has a zone switcher), and a value
         # captured at construction would send the next play to the room they
@@ -180,6 +184,9 @@ class BrowseSession:
         self._zone_id_provider = zone_id_provider
         self._lock = threading.RLock()
         self._play_in_progress = False
+        self._bound_play = None
+        self._prompt_keys = set()
+        self._terminal_keys = set()
         self.level_id = 0
         self._path: list[str] = []
         self._rows: list[dict] = []
@@ -197,8 +204,19 @@ class BrowseSession:
 
     # -- Roon plumbing -------------------------------------------------
 
+    def _check_play_connection(self):
+        if (self._bound_play is not None and
+                getattr(self._api, "_roonsocket", None) is not self._bound_play["connection"]):
+            raise BrowseError("core_changed", "Roon connection changed; no retry sent")
+
     def _zone_id(self):
         """The zone every browse call must target, read at CALL time."""
+        if self._bound_play is not None:
+            self._check_play_connection()
+            error = self._bound_play["validate"]()
+            if error:
+                raise BrowseError(error, "Selected output or Core changed; no retry sent")
+            return self._bound_play["zone_id"]
         if self._zone_id_provider is None:
             return None
         return self._zone_id_provider()
@@ -237,16 +255,34 @@ class BrowseSession:
         return opts
 
     def _browse(self, **extra):
-        result = self._api.browse_browse(self._opts(**extra))
+        opts = self._opts(**extra)
+        if (self._bound_play is not None
+                and extra.get("item_key") == self._bound_play.get("terminal_key")
+                and "item_key" in extra):
+            self._bound_play["attempted"] = True
+        result = self._api.browse_browse(opts)
+        # A reply from an SDK whose socket changed while waiting cannot
+        # establish this action's result. attempted was latched before entry.
+        self._check_play_connection()
         if result is None:
             raise BrowseError("roon_error", "Roon returned no response")
+        if self._bound_play is not None and (
+                not isinstance(result, dict) or "message" in result
+                or bool(result.get("input_prompt"))
+                or result.get("action") not in (None, "list", "none")):
+            raise BrowseError("action_response", "Unsupported action response; no retry sent")
         return result
 
     def _load(self, offset: int = 0):
-        result = self._api.browse_load(
-            self._opts(offset=offset, count=PAGE))
+        opts = self._opts(offset=offset, count=PAGE)
+        connection = getattr(self._api, "_roonsocket", None)
+        result = self._api.browse_load(opts)
+        self._check_play_connection()
         if result is None:
             raise BrowseError("roon_error", "Roon returned no response")
+        # Capture BEFORE I/O: a reconnect during navigation must not relabel
+        # an old reply's keys as belonging to the replacement connection.
+        self._loaded_connection = connection
         return result
 
     def _expect(self, delta: int):
@@ -335,10 +371,13 @@ class BrowseSession:
             i.get("item_key") for i in items
             if i.get("item_key") or (i.get("title") or "") != "No Results"
         ]
+        self._prompt_keys = {i.get("item_key") for i in items if i.get("input_prompt")}
+        self._terminal_keys = {i.get("item_key") for i in items if i.get("hint") == "action"}
         self._count = 0 if not self._rows else int(lst.get("count") or 0)
         self._offset = offset
         self._path = list(path)
         self._level = self._level_of(lst)
+        self._cursor_connection = self._loaded_connection
         self.level_id += 1
         return self.current()
 
@@ -353,6 +392,17 @@ class BrowseSession:
         }
 
     # -- Operations ----------------------------------------------------
+
+    def library(self) -> dict:
+        """Open Library without search/input/play actions on this session."""
+        with self._lock:
+            self._browse(pop_all=True)
+            root = self._load()
+            key = self._pick(root, lambda i: (i.get("title") or "").lower() == "library")
+            if key is None:
+                raise BrowseError("roon_error", "no Library in the browse root")
+            self._browse(item_key=key)
+            return self._adopt(self._load(), 0, ["Library"])
 
     def search(self, term: str) -> dict:
         """Walk root -> Library -> Search, submit `term`, adopt the results.
@@ -385,22 +435,7 @@ class BrowseSession:
                 return item["item_key"]
         return None
 
-    def _check(self, index: int, level_id) -> str:
-        """Validate an index/level_id pair and return the real item_key.
-
-        The level_id check comes FIRST and short-circuits before any Roon
-        call. spec 5.1.1: if the session moved between the widget rendering a
-        page and the user pressing a key, the index is still *valid* -- it just
-        addresses a different row. Acting on it would play the wrong album,
-        silently, in a way indistinguishable from a mis-click. That is the one
-        failure this design must not have.
-
-        spec 5.1.1 requires index-addressed ops to carry level_id -- so a
-        missing/None level_id is treated as stale, not as "unchecked", and a
-        level_id that fails to parse as an int is stale too, never a bare
-        ValueError. Both keep the same fail-safe response: the widget
-        re-renders and discards the keystroke without ever reaching Roon.
-        """
+    def _check_level(self, level_id):
         try:
             matches = level_id is not None and int(level_id) == self.level_id
         except (TypeError, ValueError):
@@ -413,6 +448,9 @@ class BrowseSession:
             raise BrowseError(
                 "stale", "the view is out of date; it has been refreshed",
                 self.current())
+
+    def _check(self, index, level_id):
+        self._check_level(level_id)
         if not isinstance(index, int) or index < 0 or index >= len(self._keys):
             raise BrowseError("bad_index", "no such row")
         key = self._keys[index]
@@ -420,9 +458,13 @@ class BrowseSession:
             raise BrowseError("bad_index", "that row cannot be opened")
         return key
 
-    def enter(self, index: int, level_id=None) -> dict:
+    def enter(self, index: int, level_id=None, navigation_only=False) -> dict:
         with self._lock:
+            if navigation_only and (type(index) is not int or type(level_id) is not int):
+                raise BrowseError("bad_index", "invalid navigation address")
             key = self._check(index, level_id)
+            if navigation_only and not self._rows[index].get("can_navigate"):
+                raise BrowseError("not_navigable", "This row requires search or playback, not navigation")
             title = self._rows[index]["title"]
             self._browse(item_key=key)
             # The new breadcrumb is a LOCAL until _adopt commits it. See
@@ -445,6 +487,29 @@ class BrowseSession:
             return self._adopt(self._load(int(offset)), int(offset),
                                self._path, self._expect(0))
 
+    def back_navigation(self, offset, level_id) -> dict:
+        """Return to a known parent page without losing its key window."""
+        with self._lock:
+            if type(level_id) is not int:
+                raise BrowseError("stale", "the view is out of date", self.current())
+            self._check_level(level_id)
+            if type(offset) is not int or offset < 0:
+                raise BrowseError("bad_index", "parent offset must be a non-negative integer")
+            if len(self._path) <= 1:
+                return self.current()
+            self._browse(pop_levels=1)
+            return self._adopt(self._load(offset), offset, self._path[:-1], self._expect(-1))
+
+    def page_navigation(self, offset, level_id) -> dict:
+        """Opt-in guarded read. Legacy page(offset) stays compatible."""
+        with self._lock:
+            if type(level_id) is not int:
+                raise BrowseError("stale", "the view is out of date", self.current())
+            self._check_level(level_id)
+            if type(offset) is not int or offset < 0:
+                raise BrowseError("bad_index", "page offset must be a non-negative integer")
+            return self._adopt(self._load(offset), offset, self._path, self._expect(0))
+
     def reset(self) -> dict:
         with self._lock:
             return self._reset_locked()
@@ -454,11 +519,74 @@ class BrowseSession:
         self._path = []
         self._rows = []
         self._keys = []
+        self._prompt_keys = set()
+        self._terminal_keys = set()
         self._count = 0
         self._offset = 0
         self._level = None
+        self._cursor_connection = None
+        self._loaded_connection = None
         self.level_id += 1
         return self.current()
+
+    def play_selected(self, index, level_id, zone_id, request_id, validate,
+                      action="play_now") -> dict:
+        """Opt-in target-bound Play Now, Play Next, or Add to Queue.
+
+        Never claims an audible or queue effect. `action` is one of
+        SELECTED_ACTIONS; the default keeps in-process Play Now callers
+        stable. The wire contract requires the token explicitly and does not
+        use this default. Caller supplies a short, read-only Core/selection
+        guard. The existing session lock serializes this operation; no global
+        lock spans SDK I/O. Legacy play/activate keep their historical
+        behavior and cannot select another action.
+        """
+        with self._lock:
+            bound = {"zone_id": zone_id, "validate": validate, "attempted": False,
+                     "connection": self._cursor_connection}
+            outcome, error = "refused", None
+            self._bound_play = bound
+            self._play_in_progress = True
+            try:
+                if (type(index) is not int or type(level_id) is not int
+                        or not isinstance(zone_id, str) or not 0 < len(zone_id) <= 128
+                        or not isinstance(request_id, str) or not 0 < len(request_id) <= 64
+                        or type(action) is not str or action not in SELECTED_ACTIONS):
+                    raise BrowseError("bad_request", "Invalid selected browse request")
+                key = self._check(index, level_id)
+                self._zone_id()  # guard BEFORE any SDK call
+                if key in self._prompt_keys:
+                    raise BrowseError("unsupported_prompt", "This action requires unsupported input")
+                if key in self._terminal_keys or not self._rows[index].get("can_play"):
+                    raise BrowseError("unsupported_action", "Direct action rows are not supported here")
+                self._play(index, level_id, SELECTED_ACTIONS[action])
+                outcome = "attempted"
+            except BrowseError as exc:
+                outcome = "unknown" if bound["attempted"] else "refused"
+                error = exc.token
+            except Exception:
+                outcome = "unknown" if bound["attempted"] else "refused"
+                error = "dispatch_failed"
+                LOG.warning("selected browse failed; no retry sent")
+            finally:
+                # Failed resolution/unsafe unwind must not leave local keys
+                # claiming a known remote cursor. A terminal action may move
+                # the Core cursor too: require a new read after any attempt.
+                # Do not repair via a replacement Core.
+                try:
+                    context_error = validate()
+                except Exception:
+                    context_error = "context_unknown"
+                if error or context_error or bound.get("cleanup_failed") or bound["attempted"]:
+                    self._reset_locked()
+                self._bound_play = None
+                self._play_in_progress = False
+            reply = self.current()
+            reply.update(request_id=request_id if isinstance(request_id, str) and len(request_id) <= 64 else None,
+                         zone_id=zone_id if isinstance(zone_id, str) and len(zone_id) <= 128 else None,
+                         action=action if type(action) is str and action in SELECTED_ACTIONS else None,
+                         outcome=outcome, error=error, ok=outcome == "attempted")
+            return reply
 
     def play(self, index: int, level_id=None) -> dict:
         with self._lock:
@@ -468,16 +596,19 @@ class BrowseSession:
             finally:
                 self._play_in_progress = False
 
-    def _play(self, index: int, level_id=None) -> dict:
-        """Resolve the row's action list, invoke Play Now, return to the level.
+    def _play(self, index: int, level_id=None, title: str = PLAY_NOW) -> dict:
+        """Resolve the row's action list, invoke `title`, return to the level.
 
         Resolution is LAZY (spec 4.3): precomputing which rows are playable
         would cost a descent per row per page. The cost is 2-3 extra
-        round-trips before audio starts, ~100-300ms.
+        round-trips before the action is sent, ~100-300ms. `title` must be
+        one measured allowlisted Core title. A missing title is no_action;
+        it is never replaced with Play Now.
         """
-        title = PLAY_NOW
         with self._lock:
             key = self._check(index, level_id)
+            if type(title) is not str or title not in _ACTION_TITLES:
+                raise BrowseError("bad_request", "Invalid selected browse action")
             # After the stale check, which is the fail-safe one and must keep
             # coming first, but before any Roon call. Without a zone, invoking
             # an action succeeds and plays into nothing (see _opts), so this
@@ -515,7 +646,9 @@ class BrowseSession:
                 self._unwind(depth)
             if not found:
                 raise BrowseError(
-                    "no_action", "nothing here can be played")
+                    "no_action",
+                    "nothing here can be played" if title == PLAY_NOW
+                    else "the requested queue action is not offered here")
             reply = self.current()
             # The widget closes the popup on a play but NOT on a descend
             # (spec 7.3). `activate` can do either, and the reply is a level
@@ -572,6 +705,10 @@ class BrowseSession:
             items = loaded.get("items") or []
             for item in items:
                 if item.get("title") == title and item.get("hint") == "action":
+                    if self._bound_play is not None:
+                        if item.get("input_prompt"):
+                            raise BrowseError("unsupported_prompt", "This action requires unsupported input")
+                        self._bound_play["terminal_key"] = item["item_key"]
                     self._browse(item_key=item["item_key"])
                     descents.append(item["item_key"])
                     return True
@@ -610,6 +747,9 @@ class BrowseSession:
                     nxt = keyed[0]["item_key"]
             if nxt is None:
                 return False
+            if self._bound_play is not None and any(
+                    i.get("item_key") == nxt and i.get("input_prompt") for i in items):
+                raise BrowseError("unsupported_prompt", "This action requires unsupported input")
             self._browse(item_key=nxt)
             descents.append(nxt)
         return False
@@ -626,4 +766,6 @@ class BrowseSession:
             self._browse(pop_levels=depth)
             self._load()
         except BrowseError:
+            if self._bound_play is not None:
+                self._bound_play["cleanup_failed"] = True
             LOG.warning("could not unwind %d level(s) after a play", depth)

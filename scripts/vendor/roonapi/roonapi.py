@@ -476,6 +476,17 @@ class RoonApi:  # pylint: disable=too-many-instance-attributes, too-many-lines
             opt_data = None
         self._roonsocket.subscribe(SERVICE_TRANSPORT, "queue", callback, opt_data)
 
+    # LOCAL PATCH (tonearm queue): opt-in, owned and bounded; legacy hook unchanged.
+    def subscribe_queue(self, callback, zone_id, max_item_count=100):
+        if (not callable(callback) or not isinstance(zone_id, str)
+                or not 0 < len(zone_id) <= 128 or type(max_item_count) is not int
+                or not 1 <= max_item_count <= 100):
+            raise ValueError("invalid bounded queue subscription")
+        sock = self._roonsocket
+        if sock is None or not sock.connected:
+            raise RuntimeError("queue socket unavailable")
+        return sock.subscribe_owned_queue(callback, zone_id, max_item_count)
+
     def browse_browse(self, opts):
         """
         Complex browse call on the roon api.
@@ -921,6 +932,9 @@ class RoonApi:  # pylint: disable=too-many-instance-attributes, too-many-lines
                     for gone in [z for z in self._zones if z not in changed_ids]:
                         del self._zones[gone]
                         changed_ids.append(gone)
+                    # LOCAL PATCH (tonearm selection identity): a full zone
+                    # subscription, including an empty one, is authoritative.
+                    self._zone_list_generation = getattr(self, "_zone_list_generation", 0) + 1
                 event = (
                     "zones_seek_changed"
                     if state_key == "zones_seek_changed"
@@ -997,6 +1011,8 @@ class RoonApi:  # pylint: disable=too-many-instance-attributes, too-many-lines
         if data and "zones" in data:
             for zone in data["zones"]:
                 zones[zone["zone_id"]] = zone
+            # A successful initial list is authoritative even when empty.
+            self._zone_list_generation = getattr(self, "_zone_list_generation", 0) + 1
         return zones
 
     def _request(self, command, data=None):
@@ -1014,7 +1030,15 @@ class RoonApi:  # pylint: disable=too-many-instance-attributes, too-many-lines
         LOGGER.debug("_request: sending")
         request_id = self._roonsocket.send_request(command, data)
         result = None
-        retries = 50
+        # LOCAL PATCH: search input can outlast the ordinary ~2.5s response
+        # budget even while Library navigation is fast. Wait up to 10s for
+        # this one request; never resend it. Other browse/transport calls keep
+        # their existing budget. This remains inside tonearmctl's 25s budget
+        # for the search walk (five ordinary calls plus one search input).
+        search_input = (command == SERVICE_BROWSE + '/browse'
+                        and isinstance(data, dict)
+                        and isinstance(data.get('input'), str) and bool(data['input']))
+        retries = 200 if search_input else 50
         while retries:
             result = self._roonsocket.results.get(request_id)
             LOGGER.debug(

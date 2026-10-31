@@ -25,10 +25,29 @@ would otherwise bring them back.
 
 ## Local patches
 
+`roonapi.py`, search-input response budget: browse requests carrying nonempty
+string input wait up to10s for their single response instead of the ordinary2.5s.
+No request is resent; load, transport and input-free browse budgets are unchanged.
+`test_search_reply_budget.py` covers delayed completion, bounded timeout, cleanup
+and unchanged ordinary calls. A reported local search defect reproduced at about
+2.8s while Library navigation took0.27s and official Roon search succeeded. This
+patch addresses the demonstrated short-budget failure mechanism; whether it fixes
+that live defect remains pending controlled validation. It does not fix general
+socket replacement/request ownership or subscriber fanout issues.
+
 Marked in the source with `LOCAL PATCH (tonearm #<issue>)` and pinned by
 `tests/python/test_vendor_patches.py`, so a refresh that loses them fails the
 suite rather than failing a user. Each is worth re-checking against upstream
 on a bump: if 0.1.7 has fixed it, drop the divergence and the test with it.
+
+`roonapi/roonapi.py`, zone-list authority for selection identity: a successful
+`get_zones` response or a full `zones` subscription increments an instance-local
+generation, including an empty list. Incremental zone events and failed reads
+do not. The daemon uses this to distinguish a confirmed missing pin from the
+brief `ok`-before-zones interval after connect/reconnect. The patch does not
+change roonapi's public callback signature or zone dictionary; it only exposes
+the full-list boundary to the daemon. Keep this marker when refreshing the
+vendor; `test_vendor_patches.py` and `test_selection_identity.py` cover it.
 
 `roonapi/roonapi.py`, `_on_state_change` ([#13](https://github.com/ssandys/tonearm/issues/13)):
 
@@ -58,3 +77,31 @@ on a bump: if 0.1.7 has fixed it, drop the divergence and the test with it.
   `SOOD\x02` datagram, and `_parse_property` misaligns on multi-byte UTF-8.
   `TestNoSoodImplementation` in `tests/python/test_vendor_patches.py` asserts
   they stay removed after a vendor refresh.
+
+### Bounded read-only queue subscription
+
+`roonapi.py` adds opt-in `subscribe_queue(callback, zone_id, max_item_count=100)`:
+explicit zone, strict integer count 1–100, response-name/body callback, captured
+socket and an exact-entry cancellation handle. Legacy `register_queue_callback`
+and `subscribe` retain body-only callbacks and None return values. The view
+consumes a bounded snapshot and insert/remove changes. Synthetic
+fixtures cover event handling; local testing has exercised the queue UI. Other
+servers/endpoints and subscription-error behavior still need wider testing.
+
+`roonapisocket.py` registers subscriptions before sending and allocates request
+IDs/subkeys under a short map lock, never held across send/callback I/O. Cancellation
+removes local routing before sending; old/repeated handles cannot remove a reused
+entry. Subscription/cancellation requests retain no ordinary result entry; unknown
+or late replies no longer populate `_results`. Disconnected legacy subscribe now
+registers nothing. Stop invalidates all bindings before best-effort cancellation,
+and closes even if cancellation fails. Queue parse errors omit raw message bodies.
+
+These correct the unsafe lifecycle behaviors characterized by
+`test_queue_feasibility.py`, which now records the corrected expectations.
+`test_queue_subscription.py` covers the new API and allocation/cleanup regression.
+This is limited overlap with upstream issue #30, not its complete fix: ordinary
+`RoonApi._request` still re-reads the API's current socket while waiting; legacy
+result/lifetime behavior is otherwise unchanged. Cancellation is local routing
+invalidation plus best-effort wire send, not a remote acknowledgement or callback
+join. One callback already admitted concurrently may run; the owner generation
+rejects stale state. No synchronous subscriber fanout fix (#38) is included.

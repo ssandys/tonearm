@@ -327,3 +327,23 @@ class TestEveryCoreSuppliedValueIsBounded(unittest.TestCase):
                             None, hostile)
         size = len(json.dumps(built))
         self.assertLess(size, 512 * 1024, "payload was %d bytes" % size)
+
+
+class TestQueueRemaining(unittest.TestCase):
+    def test_optional_whole_queue_seconds_follow_updated_zone(self):
+        raw = fixture('zone_playing.json')
+        for value in (3572, 3571, 4000, 0, 3723.5):
+            raw['queue_time_remaining'] = value
+            self.assertEqual(state.normalize_zone(raw)['queue_time_remaining'], value)
+        raw['state'] = 'paused'
+        self.assertEqual(state.normalize_zone(raw)['queue_time_remaining'], 3723.5)
+
+    def test_unknown_or_invalid_is_not_an_empty_queue(self):
+        raw = fixture('zone_playing.json')
+        raw.pop('queue_time_remaining', None)
+        self.assertIsNone(state.normalize_zone(raw)['queue_time_remaining'])
+        for value in (None, True, False, '3572', -1, float('nan'),
+                      float('inf'), float('-inf'), state.MAX_NUMBER + 1, {}, []):
+            with self.subTest(value=value):
+                raw['queue_time_remaining'] = value
+                self.assertIsNone(state.normalize_zone(raw)['queue_time_remaining'])

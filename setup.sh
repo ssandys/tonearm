@@ -160,9 +160,9 @@ fi
 
 # The daemon's state directory (Core address, pairing token, pinned zone).
 # Created HERE rather than by the daemon because the unit runs with
-# ProtectSystem=strict and ProtectHome=read-only: $HOME is read-only inside
-# the sandbox, and systemd refuses to start a unit whose ReadWritePaths names
-# a path that does not exist -- failing at step NAMESPACE before the process
+# ProtectSystem=strict and ProtectHome=tmpfs: the home is hidden inside
+# the sandbox, and systemd refuses a required BindPaths source
+# that does not exist -- failing at step NAMESPACE before the process
 # runs at all. chmod as well as mkdir, since mkdir -p leaves an existing
 # directory's mode alone and this one holds the token. bootstrap-core creates
 # and tightens it first when used; these operations remain idempotent.

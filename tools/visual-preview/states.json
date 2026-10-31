@@ -1,0 +1,413 @@
+{
+  "initial": null,
+  "connecting": {
+    "v": 1,
+    "status": "connecting",
+    "core": {
+      "name": "Preview Core"
+    },
+    "zone": null,
+    "zones": [],
+    "selection": {
+      "mode": "auto",
+      "zone_id": null,
+      "availability": "none"
+    }
+  },
+  "unpaired": {
+    "v": 1,
+    "status": "unpaired",
+    "core": {
+      "name": "Preview Core"
+    },
+    "zone": null,
+    "zones": [],
+    "selection": {
+      "mode": "auto",
+      "zone_id": null,
+      "availability": "none"
+    }
+  },
+  "disconnected": {
+    "v": 1,
+    "status": "unreachable",
+    "core": {
+      "name": "Preview Core"
+    },
+    "zone": null,
+    "zones": [],
+    "selection": {
+      "mode": "auto",
+      "zone_id": null,
+      "availability": "none"
+    }
+  },
+  "idle": {
+    "v": 1,
+    "status": "ok",
+    "core": {
+      "name": "Preview Core"
+    },
+    "zone": null,
+    "zones": [],
+    "selection": {
+      "mode": "auto",
+      "zone_id": null,
+      "availability": "none"
+    }
+  },
+  "unknown": {
+    "v": 1,
+    "status": "ok",
+    "core": {
+      "name": "Preview Core"
+    },
+    "zone": null,
+    "zones": [],
+    "selection": {
+      "mode": "pinned",
+      "zone_id": "missing-dac",
+      "availability": "unknown"
+    }
+  },
+  "missing": {
+    "v": 1,
+    "status": "ok",
+    "core": {
+      "name": "Preview Core"
+    },
+    "zone": null,
+    "zones": [
+      {
+        "id": "fixture-room",
+        "name": "Preview network room",
+        "state": "paused"
+      }
+    ],
+    "selection": {
+      "mode": "pinned",
+      "zone_id": "missing-dac",
+      "availability": "missing"
+    }
+  },
+  "playing": {
+    "v": 1,
+    "status": "ok",
+    "core": {
+      "name": "Preview Core"
+    },
+    "zone": {
+      "id": "fixture-dac",
+      "name": "Preview USB DAC",
+      "state": "playing",
+      "pinned": true,
+      "length": 240,
+      "now_playing": {
+        "title": "A synthetic track title",
+        "artist": "Preview Artist",
+        "album": "Preview Album"
+      },
+      "volume": {
+        "value": 25,
+        "min": 0,
+        "max": 100,
+        "muted": false
+      },
+      "position": 42,
+      "controls": {
+        "transport": true,
+        "seek": true,
+        "volume": true,
+        "volume_output_id": "fixture-output",
+        "mute_output_ids": [
+          "fixture-output"
+        ],
+        "muted": false
+      }
+    },
+    "zones": [
+      {
+        "id": "fixture-dac",
+        "name": "Preview USB DAC",
+        "state": "playing"
+      },
+      {
+        "id": "fixture-room",
+        "name": "Preview network room",
+        "state": "paused"
+      }
+    ],
+    "selection": {
+      "mode": "pinned",
+      "zone_id": "fixture-dac",
+      "availability": "available"
+    }
+  },
+  "paused": {
+    "v": 1,
+    "status": "ok",
+    "core": {
+      "name": "Preview Core"
+    },
+    "zone": {
+      "id": "fixture-dac",
+      "name": "Preview USB DAC",
+      "state": "paused",
+      "pinned": true,
+      "length": 240,
+      "now_playing": {
+        "title": "A synthetic track title",
+        "artist": "Preview Artist",
+        "album": "Preview Album"
+      },
+      "volume": {
+        "value": 25,
+        "min": 0,
+        "max": 100,
+        "muted": false
+      },
+      "position": 42,
+      "controls": {
+        "transport": true,
+        "seek": true,
+        "volume": true,
+        "volume_output_id": "fixture-output",
+        "mute_output_ids": [
+          "fixture-output"
+        ],
+        "muted": false
+      }
+    },
+    "zones": [
+      {
+        "id": "fixture-dac",
+        "name": "Preview USB DAC",
+        "state": "playing"
+      },
+      {
+        "id": "fixture-room",
+        "name": "Preview network room",
+        "state": "paused"
+      }
+    ],
+    "selection": {
+      "mode": "pinned",
+      "zone_id": "fixture-dac",
+      "availability": "available"
+    }
+  },
+  "fixed": {
+    "v": 1,
+    "status": "ok",
+    "core": {
+      "name": "Preview Core"
+    },
+    "zone": {
+      "id": "fixture-dac",
+      "name": "Preview USB DAC",
+      "state": "paused",
+      "pinned": true,
+      "length": 240,
+      "now_playing": {
+        "title": "A synthetic track title",
+        "artist": "Preview Artist",
+        "album": "Preview Album"
+      },
+      "volume": null,
+      "position": 42,
+      "controls": {
+        "transport": true,
+        "seek": true,
+        "volume": false,
+        "volume_output_id": null,
+        "mute_output_ids": [],
+        "muted": false
+      }
+    },
+    "zones": [
+      {
+        "id": "fixture-dac",
+        "name": "Preview USB DAC",
+        "state": "playing"
+      },
+      {
+        "id": "fixture-room",
+        "name": "Preview network room",
+        "state": "paused"
+      }
+    ],
+    "selection": {
+      "mode": "pinned",
+      "zone_id": "fixture-dac",
+      "availability": "available"
+    }
+  },
+  "long": {
+    "v": 1,
+    "status": "ok",
+    "core": {
+      "name": "Preview Core"
+    },
+    "zone": {
+      "id": "fixture-dac",
+      "name": "Preview USB DAC",
+      "state": "playing",
+      "pinned": true,
+      "length": 240,
+      "now_playing": {
+        "title": "A very long synthetic title to check ellipsis and prevent text from escaping the popup bounds on this display",
+        "artist": "A deliberately lengthy preview artist name for wrapping and clipping",
+        "album": "A long album name for the same visual acceptance check"
+      },
+      "volume": {
+        "value": 25,
+        "min": 0,
+        "max": 100,
+        "muted": false
+      },
+      "position": 42,
+      "controls": {
+        "transport": true,
+        "seek": true,
+        "volume": true,
+        "volume_output_id": "fixture-output",
+        "mute_output_ids": [
+          "fixture-output"
+        ],
+        "muted": false
+      }
+    },
+    "zones": [
+      {
+        "id": "fixture-dac",
+        "name": "Preview USB DAC",
+        "state": "playing"
+      },
+      {
+        "id": "fixture-room",
+        "name": "Preview network room",
+        "state": "paused"
+      }
+    ],
+    "selection": {
+      "mode": "pinned",
+      "zone_id": "fixture-dac",
+      "availability": "available"
+    }
+  },
+  "no_network": {
+    "v": 1,
+    "status": "no_network",
+    "core": {
+      "name": "Preview Core"
+    },
+    "zone": null,
+    "zones": [],
+    "selection": {
+      "mode": "auto",
+      "zone_id": null,
+      "availability": "none"
+    }
+  },
+  "no_seek": {
+    "v": 1,
+    "status": "ok",
+    "core": {
+      "name": "Preview Core"
+    },
+    "zone": {
+      "id": "fixture-dac",
+      "name": "Preview USB DAC",
+      "state": "playing",
+      "pinned": true,
+      "length": 240,
+      "now_playing": {
+        "title": "A synthetic track title",
+        "artist": "Preview Artist",
+        "album": "Preview Album"
+      },
+      "volume": {
+        "value": 25,
+        "min": 0,
+        "max": 100,
+        "muted": false
+      },
+      "position": 42,
+      "controls": {
+        "transport": true,
+        "seek": false,
+        "volume": true,
+        "volume_output_id": "fixture-output",
+        "mute_output_ids": [
+          "fixture-output"
+        ],
+        "muted": false
+      }
+    },
+    "zones": [
+      {
+        "id": "fixture-dac",
+        "name": "Preview USB DAC",
+        "state": "playing"
+      },
+      {
+        "id": "fixture-room",
+        "name": "Preview network room",
+        "state": "paused"
+      }
+    ],
+    "selection": {
+      "mode": "pinned",
+      "zone_id": "fixture-dac",
+      "availability": "available"
+    }
+  },
+  "incremental_mute": {
+    "v": 1,
+    "status": "ok",
+    "core": {
+      "name": "Preview Core"
+    },
+    "zone": {
+      "id": "fixture-dac",
+      "name": "Preview USB DAC",
+      "state": "paused",
+      "pinned": true,
+      "length": 240,
+      "now_playing": {
+        "title": "A synthetic track title",
+        "artist": "Preview Artist",
+        "album": "Preview Album"
+      },
+      "volume": null,
+      "position": 42,
+      "controls": {
+        "transport": true,
+        "seek": true,
+        "volume": false,
+        "volume_output_id": null,
+        "mute_output_ids": [
+          "fixture-output"
+        ],
+        "muted": true
+      }
+    },
+    "zones": [
+      {
+        "id": "fixture-dac",
+        "name": "Preview USB DAC",
+        "state": "playing"
+      },
+      {
+        "id": "fixture-room",
+        "name": "Preview network room",
+        "state": "paused"
+      }
+    ],
+    "selection": {
+      "mode": "pinned",
+      "zone_id": "fixture-dac",
+      "availability": "available"
+    }
+  }
+}

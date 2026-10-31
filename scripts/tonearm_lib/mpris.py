@@ -18,6 +18,8 @@ from dbus_next import PropertyAccess, Variant
 from dbus_next.aio import MessageBus
 from dbus_next.service import ServiceInterface, dbus_property, method
 
+from . import player
+
 LOG = logging.getLogger("tonearmd.mpris")
 
 BUS_NAME = "org.mpris.MediaPlayer2.tonearm"
@@ -193,7 +195,7 @@ class _Player(ServiceInterface):
         return True
 
     async def _run_command(self, verb: str, arg=None) -> None:
-        """Run session.command() off the asyncio loop thread.
+        """Capture transport intent before handing work to the executor.
 
         dbus-next dispatches D-Bus method calls (this method included) on the
         loop thread. RoonSession.command() blocks synchronously -- it walks
@@ -202,10 +204,29 @@ class _Player(ServiceInterface):
         directly here would stall the whole loop for that long on a slow or
         briefly unreachable Core, freezing every other bus consumer's
         PropertiesChanged traffic along with it. Running it in the default
-        executor keeps the loop free; RoonSession.command() already takes
-        its own lock, so concurrent calls from the executor's worker threads
-        are safe.
+        executor keeps the loop free. Transport uses the existing targeted
+        dispatcher so a selection change while work waits cannot redirect it.
+        Seek retains its legacy route; this does not change its contract.
         """
+        if verb in player.TRANSPORT:
+            payload = self._payload if isinstance(self._payload, dict) else {}
+            zone = payload.get("zone")
+            zone_id = zone.get("id") if isinstance(zone, dict) else None
+            if payload.get("status") != "ok" or not player.identity(zone_id):
+                return
+            if "selection" in payload:
+                selection = payload["selection"]
+                if (not isinstance(selection, dict)
+                        or selection.get("availability") != "available"
+                        or selection.get("zone_id") != zone_id):
+                    return
+            dispatch = getattr(self._session, "player_targeted", None)
+            if not callable(dispatch):
+                LOG.warning("MPRIS transport unavailable: targeted dispatch unsupported")
+                return
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, dispatch, zone_id, verb)
+            return
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._session.command, verb, arg)
 

@@ -46,10 +46,10 @@ RuntimeDirectoryMode=0700
 #     enumerate interfaces, talks netlink. Drop it and _local_networks()
 #     returns nothing -- discovery finds no Core and reports no error, so a
 #     first run just sits at "unpaired" forever.
-#   * ReadWritePaths must EXIST at start or systemd fails the unit at step
-#     NAMESPACE (226) before the process runs. $HOME is read-only here, so
-#     the daemon can no longer create it; setup.sh does, and
-#     tests/python/test_setup.py asserts the two stay in step.
+#   * Required bind sources must EXIST at start or systemd fails at step
+#     NAMESPACE (226). setup.sh creates the private state directory; it must
+#     not create the optional session bus socket owned by the user manager.
+#     tests/python/test_setup.py asserts these distinct requirements.
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
@@ -57,11 +57,15 @@ ProtectSystem=strict
 # tmpfs, not read-only. `read-only` still exposes every file the user owns
 # for READING -- ~/.ssh, browser profiles, password stores -- to a daemon that
 # parses untrusted LAN bytes through a vendored library and has outbound
-# network to send them somewhere. An empty tmpfs plus two binds is the
+# network to send them somewhere. An empty tmpfs plus narrow binds is the
 # difference between "cannot write your home" and "cannot see it".
 ProtectHome=tmpfs
 # Its own code, since ExecStart lives here and $HOME is now empty.
 BindReadOnlyPaths=%h/.config/omarchy/plugins/ssandys.tonearm
+# ProtectHome=tmpfs also hides /run/user. Expose only the session bus socket
+# for MPRIS; absence must not prevent ordinary Roon/IPC operation. The user
+# manager owns this socket, not setup.sh or RuntimeDirectory=tonearm.
+BindReadOnlyPaths=-%t/bus
 # Its own state: Core address, pairing token, pinned zone.
 BindPaths=%h/.config/tonearm
 

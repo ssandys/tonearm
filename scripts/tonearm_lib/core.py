@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+from . import player, queue_state, queue_wire
 import os
 import sys
 import threading
@@ -196,6 +198,7 @@ def _seeded_api() -> RoonApi:
     api = RoonApi.__new__(RoonApi)
     api._zones = {}
     api._outputs = {}
+    api._zone_list_generation = 0
     return api
 
 
@@ -214,6 +217,17 @@ def _connect_timeout(token) -> float:
     genuinely down or not yet reachable (boot ordering).
     """
     return PAIRING_TIMEOUT if token is None else CONNECT_TIMEOUT
+
+
+def _is_finite_number(value) -> bool:
+    """Finite native numbers only; avoid converting arbitrarily large ints."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return False
 
 
 # How often the connection watcher samples, and how many consecutive down
@@ -492,10 +506,18 @@ class RoonSession:
         self._on_restart_needed = on_restart_needed
         self._api: RoonApi | None = None
         self._cfg = config.load()
+        pinned_id = self._cfg.get("pinned_zone_id")
+        if not isinstance(pinned_id, str) or not 0 < len(pinned_id) <= MAX_ZONE_ID:
+            # Config is bounded on disk but hand-edited JSON can still carry
+            # a non-string/unhashable pin. Treat it as no explicit selection.
+            pinned_id = None
         self._arbiter = zones.Arbiter(
-            self._cfg.get("pinned_zone_id"),
+            pinned_id,
             strict_pins=self._cfg.get("strict_pins") is True)
         self._status = "connecting"
+        # A fresh full list is required before absence means "missing".
+        # Incremented by the vendored API only for get_zones/full zones.
+        self._required_zone_generation = 1
         self._lock = threading.Lock()
         # Separate from every other lock in this class. A browse round-trip is
         # far slower than a snapshot; sharing a lock with the publish path
@@ -520,10 +542,23 @@ class RoonSession:
         # Set by `_apply`, cleared by `_save_cfg`: an address taken in memory
         # that no Core has answered on yet.
         self._cfg_dirty = False
+        self._queue = queue_state.QueueCache(self._queue_context)
 
     @property
     def status(self) -> str:
         return self._status
+
+    def _zones_ready(self) -> bool:
+        """Whether the full zone list is fresh enough for zone resolution.
+
+        Socket reconnect can precede the new listing while cached rooms remain.
+        Production instances start at zero; generationless legacy test doubles
+        keep the existing generation-one default.
+        """
+        if not self._api:
+            return False
+        generation = getattr(self._api, "_zone_list_generation", 1)
+        return generation >= self._required_zone_generation
 
     def snapshot(self) -> dict:
         core = None
@@ -537,12 +572,19 @@ class RoonSession:
         # header directly above reads "Roon Core unreachable". Two halves of
         # one popup contradicting each other is worse than an empty card.
         if self._status != "ok":
-            return state.build(self._status, core, None, [])
+            return state.build(self._status, core, None, [],
+                               selection=state.selection(self._arbiter.pinned_id,
+                                                         None, [], False))
+        authoritative = self._zones_ready()
         listing, selected = self._zones()
-        return state.build(self._status, core, selected, listing)
+        return state.build(self._status, core, selected, listing,
+                           selection=state.selection(self._arbiter.pinned_id,
+                                                     selected, listing, authoritative))
 
     def _zones(self):
-        if not self._api:
+        # Snapshot, transport and browse must not feed cached rooms into the
+        # arbiter before a fresh full list arrives.
+        if not self._zones_ready():
             return [], None
         raw = self._raw_zones()
         listing = [z for z in (state.normalize_zone(r) for r in raw) if z]
@@ -622,6 +664,9 @@ class RoonSession:
 
         self._down_samples += 1
         if self._status == "ok" and self._down_samples >= DOWN_SAMPLES:
+            self._required_zone_generation = max(
+                self._required_zone_generation,
+                getattr(self._api, "_zone_list_generation", 1) + 1)
             self._status = _unreachable_status(self._cfg.get('host'))
             LOG.warning("Roon connection lost after %d polls: %s",
                         self._down_samples, self._status)
@@ -753,12 +798,15 @@ class RoonSession:
             time.sleep(POLL_INTERVAL)
             try:
                 self._check_connection()
+                self._queue_tick()
             except Exception:
                 LOG.exception("connection check failed")
 
     def _publish(self, *_args) -> None:
         try:
-            self._on_change(self.snapshot())
+            payload = self.snapshot()
+            self._queue.observe(self._queue_context(payload))
+            self._on_change(payload)
         except Exception:
             LOG.exception("publish failed")
 
@@ -977,10 +1025,47 @@ class RoonSession:
         LOG.info("connected to %s:%s", host, port)
         return api
 
+    def _queue_context(self, payload=None):
+        api = self._api
+        sock = getattr(api, "_roonsocket", None)
+        generation = getattr(api, "_zone_list_generation", 0)
+        if type(generation) is not int:
+            generation = 0
+        payload = self.snapshot() if payload is None else payload
+        selection = payload.get("selection") or {}
+        zid = selection.get("zone_id")
+        availability = selection.get("availability")
+        status = "unavailable"
+        if payload.get("status") != "ok" or not api or getattr(sock, "connected", False) is not True:
+            status = "disconnected"
+        elif availability == "unknown":
+            status = "unknown"
+        elif availability == "available" and zid and (payload.get("zone") or {}).get("id") == zid:
+            status = "available"
+        if api is not self._api or sock is not getattr(self._api, "_roonsocket", None):
+            status = "unknown"
+        return queue_state.Context(status, api, sock, zid, generation)
+
+    def _queue_tick(self):
+        # Existing connection watcher only: no UI-triggered SDK work.
+        self._queue.observe(self._queue_context())
+        self._queue.drain()
+
+    def queue_status(self, zone_id, request_id):
+        req = {"cmd":"queue_status", "v":1, "zone_id":zone_id, "request_id":request_id}
+        if not queue_wire.valid_request(req):
+            return queue_wire.result(req, "error", "bad_request")
+        reply = queue_wire.result(req, "unknown")
+        reply.update(self._queue.snapshot(self._queue_context(), zone_id))
+        return reply if queue_wire.valid_result(reply, req) else queue_wire.result(req, "error", "payload_limit")
+
     def stop(self) -> None:
-        if self._api:
-            self._api.stop()
-            self._api = None
+        try:
+            self._queue.stop()
+        finally:
+            if self._api:
+                self._api.stop()
+                self._api = None
 
     # -- browse -----------------------------------------------------------
     def selected_zone_id(self):
@@ -1003,8 +1088,8 @@ class RoonSession:
         put a browse round-trip's worth of Roon latency behind the same lock
         every transport command uses (spec 7.5).
         """
-        # The vendor API retains cached zones while disconnected. Browse must
-        # not treat those as a usable playback target.
+        # Status and the shared _zones readiness gate both constrain browse
+        # playback; navigation does not require a selected zone.
         if self._status != "ok":
             return None
         _, selected = self._zones()
@@ -1039,11 +1124,62 @@ class RoonSession:
                          evicted)
             return existing
 
+    def browse_play_selected(self, key, index, level_id, zone_id, request_id,
+                             action="play_now"):
+        """Opt-in selected Play Now, Play Next, or Add to Queue.
+
+        No global/server lock spans browse I/O. The default action preserves
+        in-process Play Now callers. A wire request must name its token; an
+        unknown token is refused before a browse session is used.
+        """
+        if (not isinstance(key, str) or not 0 < len(key) <= 64
+                or type(index) is not int or type(level_id) is not int
+                or not isinstance(zone_id, str) or not 0 < len(zone_id) <= 128
+                or not isinstance(request_id, str) or not 0 < len(request_id) <= 64
+                or type(action) is not str or action not in browse.SELECTED_ACTIONS):
+            return {"ok": False, "request_id": None, "zone_id": None,
+                    "action": None, "outcome": "refused", "error": "bad_request"}
+        session = self.browse_session(key)
+        api = session._api
+
+        def validate():
+            # Existing lock excludes local pin commands during this check,
+            # not SDK callbacks or unseen remote changes. Recheck each call;
+            # never hold it while waiting for Roon.
+            with self._lock:
+                if self._api is not api:
+                    return "core_changed"
+                if (not api or self._status != "ok"
+                        or getattr(getattr(api, "_roonsocket", None), "connected", True) is False):
+                    return "disconnected"
+                if not self._zones_ready():
+                    return "zones_unknown"
+                listing, selected = self._zones()
+                raw = api.zones.get(zone_id)
+                if (not any(z["id"] == zone_id for z in listing)
+                        or not isinstance(raw, dict) or raw.get("zone_id") != zone_id):
+                    return "unavailable"
+                pinned = self._arbiter.pinned_id
+                if ((pinned is not None and pinned != zone_id)
+                        or not selected or selected["id"] != zone_id):
+                    return "selection_changed"
+                return None
+
+        return session.play_selected(index, level_id, zone_id, request_id, validate, action)
+
     def browse(self, key: str, op: str, **kwargs) -> dict:
         """Dispatch one browse op. Never takes Server._lock (spec 7.5)."""
         if self._status != "ok":
             raise browse.BrowseError("unreachable", "Roon Core unreachable")
         session = self.browse_session(key)
+        if op == "library":
+            return session.library()
+        if op == "enter_nav":
+            return session.enter(kwargs.get("index"), kwargs.get("level_id"), navigation_only=True)
+        if op == "back_nav":
+            return session.back_navigation(kwargs.get("offset"), kwargs.get("level_id"))
+        if op == "page_nav":
+            return session.page_navigation(kwargs.get("offset"), kwargs.get("level_id"))
         if op == "search":
             return session.search(kwargs.get("term") or "")
         if op == "enter":
@@ -1064,6 +1200,71 @@ class RoonSession:
     def command(self, verb: str, arg=None) -> None:
         with self._lock:
             self._command_locked(verb, arg)
+
+    def pause_targeted(self, zone_id: str) -> dict:
+        # Retain the accepted pause-only API and result shape.
+        return self.player_targeted(zone_id, "pause")
+
+    def player_targeted(self, zone_id, verb, arg=None, output_id=None, output_ids=None):
+        """Bind normal-player targets once; no retry or remote-effect promise.
+
+        The existing lock excludes local commands/pinning, not SDK callbacks
+        or unseen Core changes. Group mute may partially complete on failure.
+        """
+        if (not player.identity(zone_id) or not isinstance(verb, str)
+                or not player.valid_arguments(verb, arg, output_id, output_ids)):
+            return {"outcome": "refused", "error": "bad_request"}
+        with self._lock:
+            api = self._api
+            if (not api or self._status != "ok"
+                    or getattr(getattr(api, "_roonsocket", None), "connected", True) is False):
+                return {"outcome": "refused", "error": "disconnected"}
+            if not self._zones_ready():
+                return {"outcome": "refused", "error": "zones_unknown"}
+            listing, selected = self._zones()
+            if not any(z["id"] == zone_id for z in listing):
+                return {"outcome": "refused", "error": "unavailable"}
+            pinned = self._arbiter.pinned_id
+            if ((pinned is not None and pinned != zone_id)
+                    or not selected or selected["id"] != zone_id):
+                return {"outcome": "refused", "error": "selection_changed"}
+            raw = api.zones.get(zone_id)
+            if not isinstance(raw, dict) or raw.get("zone_id") != zone_id:
+                return {"outcome": "refused", "error": "unavailable"}
+            caps = player.controls(raw)
+            if verb == "seek":
+                if not caps["seek"]:
+                    return {"outcome": "refused", "error": "capability_unavailable"}
+                if not 0 <= arg <= raw["now_playing"]["length"]:
+                    return {"outcome": "refused", "error": "out_of_range"}
+            if verb == "volume":
+                if not caps["volume"]:
+                    return {"outcome": "refused", "error": "capability_unavailable"}
+                if output_id != caps["volume_output_id"]:
+                    return {"outcome": "refused", "error": "output_changed"}
+                vol = raw["outputs"][0]["volume"]
+                if not vol["min"] <= arg <= vol["max"]:
+                    return {"outcome": "refused", "error": "out_of_range"}
+            if verb in ("mute", "unmute"):
+                if not caps["mute_output_ids"]:
+                    return {"outcome": "refused", "error": "capability_unavailable"}
+                if output_ids != caps["mute_output_ids"]:
+                    return {"outcome": "refused", "error": "output_changed"}
+                output_ids = list(output_ids)
+            try:
+                if verb in player.TRANSPORT:
+                    api.playback_control(zone_id, verb)
+                elif verb == "seek":
+                    api.seek(zone_id, arg, "absolute")
+                elif verb == "volume":
+                    api.change_volume_raw(output_id, arg, "absolute")
+                else:
+                    for oid in output_ids:
+                        api.mute(oid, verb == "mute")
+            except Exception:
+                LOG.warning("player dispatch failed; remote effect unknown")
+                return {"outcome": "unknown", "error": "dispatch_failed"}
+            return {"outcome": "attempted", "error": None}
 
     def _pin_locked(self, zone_id: str | None) -> None:
         """Follow `zone_id` (or resume auto-follow when None), and persist it.
@@ -1098,6 +1299,9 @@ class RoonSession:
         if not self._api or self._status != "ok":
             LOG.warning("dropping %s: not connected", verb)
             return
+        if not self._zones_ready():
+            LOG.warning("dropping %s: zone list not ready", verb)
+            return
         _, selected = self._zones()
         if not selected:
             LOG.warning("dropping %s: no followed zone", verb)
@@ -1107,6 +1311,11 @@ class RoonSession:
         if verb in ("playpause", "play", "pause", "next", "previous"):
             self._api.playback_control(zid, verb)
         elif verb == "seek":
+            # Normalized state omits this permission; consult current raw data.
+            raw_zone = self._api.zones.get(zid) or {}
+            if raw_zone.get("is_seek_allowed") is not True:
+                LOG.warning("dropping seek: zone does not allow seek")
+                return
             self._api.seek(zid, int(arg), "absolute")
         elif verb == "volume":
             # state.py's _volume_of reports outputs[0]'s raw min/max/value
@@ -1120,9 +1329,48 @@ class RoonSession:
             # not just imprecise. It would also silently discard the user's
             # deliberate per-output balance across the group. change_volume_raw
             # (not change_volume_percent) matches what the widget's slider shows.
-            outputs = self._api.zones.get(zid, {}).get("outputs") or []
-            if outputs:
-                self._api.change_volume_raw(outputs[0]["output_id"], int(arg), "absolute")
+            raw_zone = self._api.zones.get(zid) or {}
+            outputs = raw_zone.get("outputs") or []
+            if not isinstance(outputs, list) or not outputs or not isinstance(outputs[0], dict):
+                LOG.warning("dropping volume: no usable first output")
+                return
+            output = outputs[0]
+            output_id = output.get("output_id")
+            if not isinstance(output_id, str) or not output_id:
+                LOG.warning("dropping volume: missing output_id")
+                return
+            volume = output.get("volume")
+            if not isinstance(volume, dict):
+                LOG.warning("dropping volume: malformed metadata")
+                return
+            # "fixed" and "incremental" outputs cannot be set absolutely;
+            # any other type (including absent, for forward compatibility
+            # with a future Roon `type`) with usable metadata is fine.
+            vtype = volume.get("type")
+            if vtype in ("fixed", "incremental"):
+                LOG.warning("dropping volume: type %r is not absolute",
+                            vtype)
+                return
+            value = volume.get("value")
+            lo = volume.get("min")
+            hi = volume.get("max")
+            if not (_is_finite_number(value) and _is_finite_number(lo)
+                    and _is_finite_number(hi)):
+                LOG.warning("dropping volume: metadata is not numeric")
+                return
+            if not (lo < hi):
+                LOG.warning("dropping volume: min %r not < max %r", lo, hi)
+                return
+            if not (lo <= value <= hi):
+                LOG.warning("dropping volume: value %r not in [%r, %r]",
+                            value, lo, hi)
+                return
+            requested = int(arg)
+            if not (lo <= requested <= hi):
+                LOG.warning("dropping volume: request %r outside [%r, %r]",
+                            requested, lo, hi)
+                return
+            self._api.change_volume_raw(output_id, requested, "absolute")
         elif verb == "transfer":
             # `zid` is the followed zone, resolved above -- the source is never
             # the caller's to choose, so the only argument is the destination.

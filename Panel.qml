@@ -165,7 +165,7 @@ Panel {
   // whole pane into every subsequent popup open and silently undid R13/R14's
   // idle height. `opened` is Ui/Panel.qml's own readonly property; this is
   // the closing edge it exists for.
-  onOpenedChanged: if (!root.opened) browsePane.resetPane()
+  onOpenedChanged: if (!root.opened) { browsePane.resetPane(); queuePane.expanded = false }
 
   // BarIconButton, not a hand-rolled Item + MouseArea: it paints the glyph
   // through OpticalGlyph, which centers on the painted ink rather than the
@@ -261,12 +261,12 @@ Panel {
       // Unblocked while typing, every letter would be swallowed as a shortcut.
       blocked: browsePane.editing
 
-      onMoveRequested: function (dx, dy) { browsePane.handleMove(dx, dy) }
-      onActivateRequested: browsePane.handleActivate()
+      onMoveRequested: function (dx, dy) { if (queuePane.expanded) queuePane.move(dy); else browsePane.handleMove(dx, dy) }
+      onActivateRequested: { if (!queuePane.activate()) browsePane.handleActivate() }
 
       // Esc backs out one level and only closes at the top (spec 7.2). One
       // stray Esc must not discard a whole navigation.
-      onCloseRequested: { if (!browsePane.handleBack()) root.close() }
+      onCloseRequested: { if (!queuePane.back() && !browsePane.handleBack()) root.close() }
 
       // `/` is explicit; everything else printable starts a search SEEDED with
       // that character, so typing goes straight into the field without a
@@ -282,6 +282,7 @@ Panel {
       // so they cannot be recovered from this file. README and spec 7.2 say
       // so rather than promising "any letter".
       onTextKey: function (text) {
+        queuePane.expanded = false
         if (text === "/") { browsePane.focusSearch(""); return }
         if (text && text.length === 1 && text >= " ") {
           browsePane.focusSearch(text)
@@ -390,6 +391,17 @@ Panel {
           }
         }
 
+        Text {
+          width: parent.width
+          visible: Service.playerError.length > 0
+          text: Service.playerError
+          textFormat: Text.PlainText
+          color: Model.COLOR_ERROR
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+        }
+
         PanelSeparator { foreground: Commons.Color.foreground }
 
         Row {
@@ -451,7 +463,7 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 width: parent.width
-                text: root.np ? (root.np.title || "Nothing playing") : "Nothing playing"
+                text: root.np ? (root.np.title || "Nothing playing") : Model.emptyTitle(root.st)
                 color: Commons.Color.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.title
@@ -463,11 +475,13 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 width: parent.width
-                text: root.np ? (root.np.artist || "") : ""
+                text: root.np ? (root.np.artist || "") : Model.emptyDetail(root.st)
                 color: root.fgMid
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
-                elide: Text.ElideRight
+                // Fault guidance must remain readable beyond the short header.
+                wrapMode: root.np ? Text.NoWrap : Text.WordWrap
+                elide: root.np ? Text.ElideRight : Text.ElideNone
               }
               Text {
                 textFormat: Text.PlainText
@@ -487,6 +501,8 @@ Panel {
               anchors.right: parent.right
               spacing: Style.space(6)
               visible: root.hasZone
+              enabled: Model.canPlayer(root.st, "playpause")
+              opacity: enabled ? 1 : 0.45
 
               // -- seek ------------------------------------------------------
               // A bare track now, not a 22-unit Item carrying the time labels
@@ -524,7 +540,7 @@ Panel {
                   anchors.rightMargin: -Style.space(8)
                   anchors.topMargin: -Style.space(8)
                   anchors.bottomMargin: -Style.space(3)
-                  enabled: root.length > 0
+                  enabled: Model.canPlayer(root.st, "seek")
                   onClicked: function (mouse) {
                     // mouse.x is relative to THIS MouseArea's origin, not
                     // seekTrack's: the left margin above puts that origin
@@ -656,7 +672,7 @@ Panel {
           // `showVolume` setting was removed rather than kept: it was a second
           // mechanism for the same outcome, and the automatic one is the one
           // that is always right.
-          visible: root.volume !== null
+          visible: Model.canPlayer(root.st, "volume") || Model.canPlayer(root.st, "mute")
 
           Text {
             textFormat: Text.PlainText
@@ -664,7 +680,7 @@ Panel {
             // String.fromCodePoint in Model.js rather than a literal escape
             // here -- routed through the same constant-glyph convention as
             // every other Nerd Font icon in this file.
-            text: root.volume && root.volume.muted ? Model.GLYPH_VOLUME_MUTED : Model.GLYPH_VOLUME_HIGH
+            text: Model.playerMuted(root.st) ? Model.GLYPH_VOLUME_MUTED : Model.GLYPH_VOLUME_HIGH
             color: root.fgFaint
             font.family: root.fontFamily
             font.pixelSize: Style.font.subtitle
@@ -676,12 +692,14 @@ Panel {
             MouseArea {
               anchors.fill: parent
               anchors.margins: -Style.space(4)
-              onClicked: Service.send(root.volume && root.volume.muted ? "unmute" : "mute")
+              enabled: Model.canPlayer(root.st, "mute")
+              onClicked: Service.send(Model.playerMuted(root.st) ? "unmute" : "mute")
             }
           }
 
           Rectangle {
             id: volTrack
+            visible: Model.canPlayer(root.st, "volume")
             width: parent.width - Style.space(52)
             height: Style.space(3)
             radius: height / 2
@@ -717,6 +735,7 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
+            visible: Model.canPlayer(root.st, "volume")
             text: root.volume ? String(root.volume.value) : ""
             color: root.fgFaint
             font.family: root.fontFamily
@@ -758,6 +777,20 @@ Panel {
             }
 
             Text {
+              id: libraryHint
+              textFormat: Text.PlainText
+              anchors.right: searchHint.left
+              anchors.rightMargin: Style.space(16)
+              anchors.baseline: zonesLabel.baseline
+              text: "Library"
+              color: enabled ? root.fgMid : root.fgFaint
+              enabled: !!(root.st && root.st.status === "ok")
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              MouseArea { anchors.fill: parent; onClicked: { queuePane.expanded = false; browsePane.openLibrary() } }
+            }
+
+            Text {
               textFormat: Text.PlainText
               id: searchHint
               anchors.right: parent.right
@@ -777,7 +810,7 @@ Panel {
             MouseArea {
               anchors.fill: searchHint
               anchors.margins: -Style.space(5)
-              onClicked: browsePane.focusSearch("")
+              onClicked: { queuePane.expanded = false; browsePane.focusSearch("") }
             }
           }
 
@@ -885,11 +918,28 @@ Panel {
           // Bound to the same property BrowsePane uses for its own `visible`
           // (BrowsePane.qml's `hasContent`), so the separator and the pane
           // can never disagree about whether there is anything to show.
-          visible: browsePane.hasContent
+          visible: browsePane.hasContent && !queuePane.expanded
+        }
+
+        QueuePane {
+          id: queuePane
+          width: parent.width
+          service: Service
+          roonState: root.st
+          panelOpen: root.opened
+          session: root.browseSession
+          fontFamily: root.fontFamily
+          foreground: Commons.Color.foreground
+          muted: Commons.Color.muted
+          highlight: Util.alpha(Commons.Color.foreground, 0.08)
+          fontSize: Style.font.caption
+          unit: Style.space(1)
+          onExpandedChanged: if (expanded) { browsePane.editing = false; keyCatcher.forceActiveFocus() }
         }
 
         BrowsePane {
           id: browsePane
+          visible: hasContent && !queuePane.expanded
           width: parent.width
           service: Service
           session: root.browseSession

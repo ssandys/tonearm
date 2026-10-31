@@ -339,6 +339,10 @@ function barState(state, recvMs, nowMs) {
     return { severity: severity, glyph: GLYPH_FAULT, showArt: false, playing: false }
   }
 
+  if (missingPin(state)) {
+    return { severity: "warn", glyph: GLYPH_FAULT, showArt: false, playing: false }
+  }
+
   var zone = state.zone
   if (!zone) return { severity: "ok", glyph: GLYPH_VINYL, showArt: false, playing: false }
 
@@ -398,7 +402,43 @@ function faultText(state) {
 // nothing was playing. That reason lived only in the bar glyph's colour and
 // its tooltip, and an open popup covers the bar.
 function headerStatus(state) {
-  return faultText(state) || coreNameOf(state)
+  return faultText(state) || (missingPin(state) ? "Pinned output unavailable" :
+    waitingForZones(state) ? "Loading outputs\u2026" : coreNameOf(state))
+}
+
+function missingPin(state) {
+  return !!(state && state.status === "ok" && !state.zone && state.selection &&
+            state.selection.mode === "pinned" &&
+            state.selection.availability === "missing")
+}
+
+function waitingForZones(state) {
+  return !!(state && state.status === "ok" && !state.zone && state.selection &&
+            state.selection.availability === "unknown")
+}
+
+// A connection/selection transition is not evidence that playback is idle.
+// Keep legacy v1 snapshots without selection compatible with their old copy.
+function emptyTitle(state) {
+  if (!state) return "Waiting for Tonearm"
+  if (state.status === "connecting") return "Connecting to Roon\u2026"
+  if (state.status === "unpaired") return "Authorization required"
+  if (severityFor(state.status) !== "ok") return "Connection unavailable"
+  if (waitingForZones(state)) return "Loading outputs\u2026"
+  if (missingPin(state)) return "Output unavailable"
+  if (!state.zone && state.selection && state.selection.availability === "none") return "No output selected"
+  return "Nothing playing"
+}
+
+function emptyDetail(state) {
+  if (!state) return "The Tonearm service has not reported state yet."
+  if (state.status === "connecting") return "Waiting for the Roon connection."
+  if (state.status === "unpaired") return "Enable Tonearm in Roon \u2192 Settings \u2192 Extensions."
+  if (severityFor(state.status) !== "ok") return "Controls are unavailable until Roon reconnects."
+  if (waitingForZones(state)) return "Waiting for a fresh output list from Roon."
+  if (missingPin(state)) return "Choose an available output or wait for this one."
+  if (!state.zone && state.selection && state.selection.availability === "none") return "Choose an output from the list below."
+  return ""
 }
 
 function tooltipText(state) {
@@ -406,6 +446,8 @@ function tooltipText(state) {
   if (fault) return fault
 
   var coreName = coreNameOf(state)
+  if (missingPin(state)) return "Pinned output unavailable \u00b7 " + coreName
+  if (waitingForZones(state)) return "Loading outputs\u2026 \u00b7 " + coreName
   if (!state.zone) return "Nothing playing \u00b7 " + coreName
 
   var np = nowPlayingOf(state)
@@ -414,6 +456,132 @@ function tooltipText(state) {
   if (np.artist) head = head + " \u2014 " + np.artist
   return head + " \u00b7 " + (state.zone.name || coreName)
 }
+
+// Player requests capture the displayed identity, never a later selection.
+var PLAYER_VERBS = ["play", "pause", "playpause", "next", "previous", "seek", "volume", "mute", "unmute"]
+function isPlayerVerb(verb) { return PLAYER_VERBS.indexOf(verb) !== -1 }
+function playerId(id) { return typeof id === "string" && id.length > 0 && id.length <= 128 }
+function canPlayer(state, verb) {
+  if (!isPlayerVerb(verb) || !state || state.status !== "ok" || !state.zone || !state.selection) return false
+  var z = state.zone, c = z.controls, s = state.selection
+  if (!c || c.transport !== true || !playerId(z.id) || s.availability !== "available" || s.zone_id !== z.id) return false
+  if (verb === "seek") return c.seek === true && typeof z.length === "number" && isFinite(z.length) && z.length > 0
+  if (verb === "volume") return c.volume === true && playerId(c.volume_output_id) && !!z.volume
+  if (verb === "mute" || verb === "unmute") {
+    var ids = c.mute_output_ids
+    if (!Array.isArray(ids) || !ids.length || ids.length > 32) return false
+    for (var i=0;i<ids.length;i++) if (!playerId(ids[i]) || ids.indexOf(ids[i]) !== i) return false
+  }
+  return true
+}
+function playerMuted(state) {
+  return !!(canPlayer(state, "mute") && state.zone.controls.muted === true)
+}
+var BROWSE_ACTIONS = {
+  play_now:{attempted:"Play requested; check Now Playing.",
+    missing:"No Play Now action is available here.",
+    unknown:"Play result unknown; no retry was sent.", refused:"Play request refused."},
+  play_next:{attempted:"Play Next requested; check the queue.",
+    missing:"No Play Next action is available here.",
+    unknown:"Play Next result unknown; no retry was sent.", refused:"Play Next request refused."},
+  add_to_queue:{attempted:"Add to Queue requested; check the queue.",
+    missing:"No Add to Queue action is available here.",
+    unknown:"Add to Queue result unknown; no retry was sent.", refused:"Add to Queue request refused."}
+}
+function browseAction(action) { return Object.prototype.hasOwnProperty.call(BROWSE_ACTIONS, action) }
+function browsePlayRequest(state, row, index, level, requestId, action) {
+  if (!browseAction(action) || !state || state.status !== "ok" || !state.zone || !state.selection ||
+      state.selection.availability !== "available" || state.selection.zone_id !== state.zone.id ||
+      !playerId(state.zone.id) || !row || row.can_play !== true ||
+      !browseInteger(index) || index >= 100 || !browseInteger(level) ||
+      typeof requestId !== "string" || !requestId.length || requestId.length > 64) return null
+  return {index:index,level_id:level,zone_id:state.zone.id,request_id:requestId,action:action}
+}
+function validBrowsePlayReply(request, reply) {
+  return !!request && browseAction(request.action) && !!reply && reply.v === 1 &&
+    reply.request_id === request.request_id && reply.zone_id === request.zone_id &&
+    reply.action === request.action && ((reply.outcome === "attempted" && reply.error === null) ||
+    ((reply.outcome === "refused" || reply.outcome === "unknown") &&
+     typeof reply.error === "string" && reply.error.length > 0 && reply.error.length <= 64))
+}
+function browsePlayReplyText(request, reply) {
+  var copy = request && BROWSE_ACTIONS[request.action]
+  var unknown = copy ? copy.unknown : "Browse action result unknown; no retry was sent."
+  if (!validBrowsePlayReply(request,reply)) return unknown
+  if (reply.outcome === "attempted" && reply.error === null) return copy.attempted
+  if (reply.outcome === "refused" && typeof reply.error === "string" && reply.error.length) {
+    var play = request.action === "play_now"
+    var messages = {unsupported_prompt:"This action needs unsupported input or confirmation.",
+      unsupported_action:"This action is not supported here.", no_action:copy.missing,
+      unavailable:play ? "Selected output unavailable; play refused." : "Selected output unavailable; request refused.",
+      selection_changed:play ? "Output selection changed; play refused." : "Output selection changed; request refused.",
+      core_changed:play ? "Roon connection changed; play refused." : "Roon connection changed; request refused.",
+      disconnected:play ? "Roon disconnected; play refused." : "Roon disconnected; request refused.",
+      zones_unknown:play ? "Output list not ready; play refused." : "Output list not ready; request refused.",
+      stale:play ? "Browse view changed; reload before playing." : "Browse view changed; reload before trying again.",
+      unsupported:play ? "This daemon does not support selected-output browse playback." : "This daemon does not support selected browse actions."}
+    return Object.prototype.hasOwnProperty.call(messages,reply.error) ? messages[reply.error] : copy.refused
+  }
+  return unknown
+}
+function playerRequest(state, verb, arg, requestId) {
+  if (!canPlayer(state, verb) || typeof requestId !== "string" || !requestId.length || requestId.length > 64) return null
+  var z = state.zone
+  if (verb === "seek" || verb === "volume") {
+    if (typeof arg !== "number" || !isFinite(arg) || Math.floor(arg) !== arg) return null
+    if (verb === "seek" && !(arg >= 0 && arg <= z.length)) return null
+    if (verb === "volume" && !(arg >= z.volume.min && arg <= z.volume.max)) return null
+  } else if (arg !== undefined && arg !== null) return null
+  return {cmd:"player_targeted", v:1, request_id:requestId, zone_id:z.id, verb:verb,
+    arg:arg === undefined ? null : arg,
+    output_id:verb === "volume" ? z.controls.volume_output_id : null,
+    output_ids:(verb === "mute" || verb === "unmute") ? z.controls.mute_output_ids.slice() : null}
+}
+function playerReplyText(request, reply) {
+  if (!reply || reply.v !== 1 || reply.type !== "command_result" ||
+      reply.request_id !== request.request_id || reply.zone_id !== request.zone_id || reply.verb !== request.verb) {
+    return "Player result unknown; no retry was sent."
+  }
+  if (reply.outcome === "attempted" && reply.error === null) return ""
+  if (reply.outcome === "refused") {
+    var messages = {selection_changed:"Output selection changed; command refused.",
+      unavailable:"Selected output unavailable; command refused.", disconnected:"Roon disconnected; command refused.",
+      zones_unknown:"Output list not ready; command refused.", capability_unavailable:"Control unavailable for this output.",
+      output_changed:"Output group changed; command refused.", out_of_range:"Requested value outside the output range.",
+      bad_request:"Invalid player command.", unsupported:"This daemon does not support targeted player controls."}
+    if (typeof reply.error === "string" && Object.prototype.hasOwnProperty.call(messages, reply.error)) return messages[reply.error]
+  }
+  return "Player result unknown; no retry was sent."
+}
+
+// One page owns one backend row-key window; never append across levels.
+var BROWSE_PAGE_SIZE = 100
+function browseInteger(n) { return typeof n === "number" && isFinite(n) && n >= 0 && Math.floor(n) === n && n <= 9007199254740991 }
+function browsePage(reply, cursor) {
+  if (!reply || !browseInteger(reply.level_id) || !browseInteger(reply.count) ||
+      !browseInteger(reply.offset) || !Array.isArray(reply.rows) || reply.rows.length > BROWSE_PAGE_SIZE ||
+      !Array.isArray(reply.path)) return null
+  for (var i=0;i<reply.rows.length;i++) if (!reply.rows[i] || typeof reply.rows[i] !== "object" || Array.isArray(reply.rows[i])) return null
+  if (reply.rows.length && reply.count < reply.offset+reply.rows.length) return null
+  return {rows:reply.rows.slice(), levelId:reply.level_id, count:reply.count, offset:reply.offset,
+    path:reply.path.slice(), cursor:moveCursor(cursor,0,reply.rows.length)}
+}
+function browsePaging(offset, length, count) {
+  var previous = offset > 0 ? Math.max(0,offset-BROWSE_PAGE_SIZE) : null
+  var next = length > 0 && offset+length < count ? offset+length : null
+  return {previous:previous, next:next,
+    label:length ? String(offset+1)+"\u2013"+String(offset+length)+" of "+String(count) : "0 results"}
+}
+function browseContext(state, session) {
+  var core=state && state.core ? state.core : {}, s=state && state.selection ? state.selection : {}
+  return JSON.stringify([session || "",state ? state.status : "",core.host || "",core.http_port || "",core.name || "",
+    s.mode || "",s.zone_id || (state && state.zone ? state.zone.id : ""),s.availability || ""])
+}
+function browseReplyCurrent(token, active, view, context) {
+  return !!(token && active && token.request === active.request && token.view === view &&
+    token.view === active.view && token.context === context && token.context === active.context)
+}
+function canNavigateRow(row) { return !!(row && row.can_navigate === true) }
 
 function zoneList(state) {
   if (!state || !state.zones) return []
@@ -659,7 +827,22 @@ if (typeof module !== "undefined") {
     barState: barState,
     tooltipText: tooltipText,
     headerStatus: headerStatus,
+    emptyTitle: emptyTitle,
+    emptyDetail: emptyDetail,
     zoneList: zoneList,
+    browsePage: browsePage,
+    browsePaging: browsePaging,
+    browseContext: browseContext,
+    browseReplyCurrent: browseReplyCurrent,
+    canNavigateRow: canNavigateRow,
+    isPlayerVerb: isPlayerVerb,
+    canPlayer: canPlayer,
+    playerMuted: playerMuted,
+    browsePlayRequest: browsePlayRequest,
+    browsePlayReplyText: browsePlayReplyText,
+    validBrowsePlayReply: validBrowsePlayReply,
+    playerRequest: playerRequest,
+    playerReplyText: playerReplyText,
     isZonePinned: isZonePinned,
     canTransferTo: canTransferTo,
     activatePlayed: activatePlayed,

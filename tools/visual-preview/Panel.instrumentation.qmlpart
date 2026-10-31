@@ -1,0 +1,16 @@
+
+  IpcHandler {
+    target: "io.github.cbayschm74.tonearm-preview-fixture"
+    function fixture(name: string): string { return Service.selectFixture(name) }
+    function inspect(): string {
+      var screen = panel.screen
+      return JSON.stringify({fixture: Service.fixtureName, opened: root.opened,
+        header: Model.headerStatus(root.st), tooltip: Model.tooltipText(root.st),
+        width: panel.contentWidth, height: panel.contentHeight,
+        columnHeight: contentColumn.implicitHeight, focus: keyCatcher.activeFocus,
+        editing: browsePane.editing, consumers: Service.consumers,
+        blockedCommands: Service.blockedCommands, blockedBrowse: Service.blockedBrowse,
+        screen: screen ? {name:screen.name,x:screen.x,y:screen.y,width:screen.width,height:screen.height} : null,
+        card: {x:panel.cardOrigin.x,y:panel.cardOrigin.y}})
+    }
+  }

@@ -21,7 +21,7 @@ import os
 import socket
 import threading
 
-from . import browse
+from . import browse, targeted, browse_play, queue_wire
 
 LOG = logging.getLogger("tonearmd.server")
 
@@ -378,6 +378,83 @@ class Server:
             finally:
                 # In a finally so no later branch can be added that skips it.
                 conn.close()
+            return
+
+        if cmd == "pause_targeted":
+            if not targeted.valid_request(request):
+                reply = targeted.result(request, "refused", "bad_request")
+            elif not callable(getattr(self._session, "pause_targeted", None)):
+                reply = targeted.result(request, "refused", "unsupported")
+            else:
+                try:
+                    outcome = self._session.pause_targeted(request["zone_id"])
+                    reply = targeted.result(request, outcome["outcome"], outcome["error"])
+                    if not targeted.valid_result(reply, request):
+                        raise ValueError("invalid session result")
+                except Exception:
+                    # A session fault could follow dispatch. No retry and no
+                    # claim that it was refused before reaching the SDK.
+                    LOG.warning("explicit pause failed; remote effect unknown")
+                    reply = targeted.result(request, "unknown", "internal_error")
+            self._reply_once(conn, reply)
+            return
+
+        if cmd == "queue_status":
+            if not queue_wire.valid_request(request):
+                reply = queue_wire.result(request, "error", "bad_request")
+            elif not callable(getattr(self._session, "queue_status", None)):
+                reply = queue_wire.result(request, "error", "unsupported")
+            else:
+                try:
+                    reply = self._session.queue_status(request["zone_id"], request["request_id"])
+                    if not queue_wire.valid_result(reply, request):
+                        raise ValueError("invalid queue state")
+                except Exception:
+                    reply = queue_wire.result(request, "error", "internal_error")
+            try:
+                conn.sendall(_bounded_blob(reply))
+            finally:
+                conn.close()
+            return
+
+        if cmd == "player_targeted":
+            if not targeted.valid_player_request(request):
+                reply = targeted.player_result(request, "refused", "bad_request")
+            elif not callable(getattr(self._session, "player_targeted", None)):
+                reply = targeted.player_result(request, "refused", "unsupported")
+            else:
+                try:
+                    outcome = self._session.player_targeted(
+                        request["zone_id"], request["verb"], request["arg"],
+                        request["output_id"], request["output_ids"])
+                    reply = targeted.player_result(request, outcome["outcome"], outcome["error"])
+                    if not targeted.valid_player_result(reply, request):
+                        raise ValueError("invalid player result")
+                except Exception:
+                    LOG.warning("player failed; remote effect unknown")
+                    reply = targeted.player_result(request, "unknown", "internal_error")
+            self._reply_once(conn, reply)
+            return
+
+        if cmd == "browse" and request.get("op") == "play_selected":
+            if not browse_play.valid_request(request):
+                reply = browse_play.result(request, "refused", "bad_request")
+            elif not callable(getattr(self._session, "browse_play_selected", None)):
+                reply = browse_play.result(request, "refused", "unsupported")
+            else:
+                try:
+                    reply = dict(self._session.browse_play_selected(
+                        request["session"], request["index"], request["level_id"],
+                        request["zone_id"], request["request_id"], request["action"]))
+                    reply["v"] = 1
+                    if not browse_play.valid_result(reply, request):
+                        raise ValueError("invalid selected browse result")
+                    # Serialization is guarded: never retry a failed dispatch.
+                    _bounded_blob(reply)
+                except Exception:
+                    LOG.warning("selected browse result unknown; no retry sent")
+                    reply = browse_play.result(request, "unknown", "internal_error")
+            self._reply_once(conn, reply)
             return
 
         if cmd == "browse":

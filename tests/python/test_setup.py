@@ -14,6 +14,8 @@ touches the live user session.
 import json
 import os
 import shutil
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -43,6 +45,8 @@ class SetupTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.home = self.tmp.name
+        self.runtime = os.path.join(self.home, "runtime")
+        os.mkdir(self.runtime, 0o700)
 
         # setup.sh refuses to run from anywhere but the installed location.
         self.plugin = os.path.join(
@@ -70,6 +74,7 @@ class SetupTestCase(unittest.TestCase):
     def run_setup(self, *args):
         env = dict(os.environ)
         env["HOME"] = self.home
+        env["XDG_RUNTIME_DIR"] = self.runtime
         # config.py honours XDG_CONFIG_HOME before HOME. A developer session
         # may export it, but this real-setup fixture must never read or write
         # the developer's live Tonearm config.
@@ -78,6 +83,28 @@ class SetupTestCase(unittest.TestCase):
         env["SYSTEMCTL_LOG"] = self.systemctl_log
         return subprocess.run([os.path.join(self.plugin, "setup.sh"), *args],
                               env=env, capture_output=True, text=True, timeout=60)
+
+    def assert_mount_sources_exist(self, unit):
+        paths = [(line.split("=", 1)[0], line.split("=", 1)[1].strip())
+                 for line in unit.splitlines()
+                 if line.startswith(("ReadWritePaths=", "BindPaths=", "BindReadOnlyPaths="))]
+        self.assertTrue(paths, "the unit declares no path directives at all")
+        for directive, raw in paths:
+            for entry in raw.split():
+                # A '-' makes a missing source optional. Bind sources can be
+                # files/sockets, not just directories; %t is the user runtime.
+                optional = entry.startswith("-")
+                source = entry.removeprefix("-").split(":")[0]
+                path = source.replace("%h", self.home).replace("%t", self.runtime)
+                self.assertNotIn("%", path, "unhandled unit specifier")
+                if optional and not os.path.exists(path):
+                    continue
+                self.assertTrue(os.path.exists(path),
+                                "%s is in %s but its required source is absent"
+                                % (entry, directive))
+                if directive == "ReadWritePaths":
+                    self.assertTrue(os.path.isdir(path))
+
 
     def systemctl_calls(self):
         if not os.path.exists(self.systemctl_log):
@@ -380,11 +407,6 @@ class TestSandboxPrerequisites(SetupTestCase):
         self.run_setup()
         self.assertEqual(os.stat(self.state_dir()).st_mode & 0o077, 0)
 
-    # Every directive whose source path must EXIST when the unit starts.
-    # ReadWritePaths was the only one until #42 replaced it with binds; all
-    # three fail the same way, at step NAMESPACE, before the process runs.
-    PATH_DIRECTIVES = ("ReadWritePaths=", "BindPaths=", "BindReadOnlyPaths=")
-
     def test_every_bound_path_in_the_unit_exists_after_setup(self):
         """The coupling, asserted rather than assumed.
 
@@ -402,15 +424,87 @@ class TestSandboxPrerequisites(SetupTestCase):
         self.run_setup()
         with open(self.target) as handle:
             unit = handle.read()
-        paths = [(line.split("=", 1)[0], line.split("=", 1)[1].strip())
-                 for line in unit.splitlines()
-                 if line.startswith(self.PATH_DIRECTIVES)]
-        self.assertTrue(paths, "the unit declares no path directives at all")
-        for directive, raw in paths:
-            for entry in raw.split():
-                # A bind may be `source:dest`; the source is what must exist.
-                source = entry.lstrip("-").split(":")[0]
-                path = source.replace("%h", self.home)
-                self.assertTrue(os.path.isdir(path),
-                                "%s is in %s but setup.sh does not create it"
-                                % (entry, directive))
+        self.assert_mount_sources_exist(unit)
+
+
+class TestSessionBusPackaging(SetupTestCase):
+    def installed_unit(self):
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(self.target) as handle:
+            return handle.read()
+
+    def test_exposes_only_optional_session_bus_with_hardening_retained(self):
+        unit = self.installed_unit()
+        self.assertIn("BindReadOnlyPaths=-%t/bus", unit.splitlines())
+        for directive in ("ProtectHome=tmpfs", "ProtectSystem=strict",
+                          "PrivateTmp=yes", "PrivateDevices=yes",
+                          "NoNewPrivileges=yes", "UMask=0077"):
+            self.assertIn(directive, unit.splitlines())
+        binds = [line for line in unit.splitlines()
+                 if line.startswith(("BindPaths=", "BindReadOnlyPaths="))]
+        self.assertEqual(binds, [
+            "BindReadOnlyPaths=%h/.config/omarchy/plugins/ssandys.tonearm",
+            "BindReadOnlyPaths=-%t/bus", "BindPaths=%h/.config/tonearm"])
+
+    def test_missing_bus_is_not_created_or_owned_by_setup(self):
+        self.installed_unit()
+        self.assertFalse(os.path.lexists(os.path.join(self.runtime, "bus")))
+        self.assertEqual(self.run_setup("--uninstall").returncode, 0)
+        self.assertEqual(os.listdir(self.runtime), [])
+
+    def test_existing_socket_survives_install_reinstall_and_uninstall(self):
+        bus = os.path.join(self.runtime, "bus")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as fixture:
+            fixture.bind(bus)  # A disposable socket, never a session-bus client.
+            before = os.stat(bus)
+            unit = self.installed_unit()
+            self.assert_mount_sources_exist(unit)
+            self.installed_unit()
+            self.assertEqual(self.run_setup("--uninstall").returncode, 0)
+            after = os.stat(bus)
+            self.assertTrue(stat.S_ISSOCK(after.st_mode))
+            self.assertEqual((after.st_ino, after.st_mode),
+                             (before.st_ino, before.st_mode))
+
+    def test_path_guard_allows_optional_absence_but_rejects_required_absence(self):
+        self.assert_mount_sources_exist("BindReadOnlyPaths=-%t/missing")
+        with self.assertRaises(AssertionError):
+            self.assert_mount_sources_exist("BindReadOnlyPaths=%t/missing")
+        with self.assertRaises(AssertionError):
+            self.assert_mount_sources_exist("BindReadOnlyPaths=-%unknown/path")
+
+    def test_existing_bus_and_user_dropins_are_preserved(self):
+        directory = self.target + ".d"
+        os.makedirs(directory)
+        contents = {
+            "80-mpris-bus.conf": "[Service]\nBindReadOnlyPaths=-%t/bus\n",
+            "90-user.conf": "[Service]\nEnvironment=USER_CHOICE=kept\n"}
+        for name, text in contents.items():
+            path = os.path.join(directory, name)
+            with open(path, "w") as handle:
+                handle.write(text)
+            os.chmod(path, 0o600)
+        self.installed_unit()
+        self.installed_unit()
+        self.assertEqual(self.run_setup("--uninstall").returncode, 0)
+        self.assertEqual(sorted(os.listdir(directory)), sorted(contents))
+        for name, text in contents.items():
+            path = os.path.join(directory, name)
+            with open(path) as handle:
+                self.assertEqual(handle.read(), text)
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+    def test_symlinked_user_dropin_directory_is_not_traversed_or_removed(self):
+        os.makedirs(self.unit_dir)
+        external = os.path.join(self.home, "user-overrides")
+        os.mkdir(external)
+        marker = os.path.join(external, "90-user.conf")
+        with open(marker, "w") as handle:
+            handle.write("[Service]\nEnvironment=USER_CHOICE=kept\n")
+        os.symlink(external, self.target + ".d")
+        self.installed_unit()
+        self.assertEqual(self.run_setup("--uninstall").returncode, 0)
+        self.assertTrue(os.path.islink(self.target + ".d"))
+        with open(marker) as handle:
+            self.assertEqual(handle.read(), "[Service]\nEnvironment=USER_CHOICE=kept\n")

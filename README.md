@@ -4,7 +4,11 @@ Roon now-playing and transport, in the Omarchy shell bar.
 
 Tonearm shows what's playing on your Roon system — album art, artist, and
 album — with play/pause, previous/next, seek, and volume, plus the ability to
-switch which Roon zone the widget follows. It also publishes an MPRIS player
+switch which Roon zone the widget follows. Browse the library, search for a
+track or album, use Play Now / Play Next / Add to Queue, and inspect the selected
+zone’s queue and remaining time. See the [usage guide and current limits](docs/usage.md).
+
+It also publishes an MPRIS player
 on the session bus, so your keyboard's media keys (play/pause, next,
 previous) control Roon like they would any other player, with no Hyprland
 configuration required.
@@ -151,7 +155,7 @@ music on its own as usual.
 From a script: `tonearmctl transfer <zone_id>`.
 
 There's no keyboard shortcut for this yet — the zone rows aren't part of the
-popup's keyboard cursor, which currently only covers search results.
+popup's keyboard cursor, which covers Library/search results or the expanded queue.
 
 ## Strict pinning (optional)
 
@@ -168,48 +172,55 @@ Unpinning restores auto-follow. Omit the setting or set it to false to keep the
 existing fallback. There is no UI or CLI switch for this option.
 
 Remote commands are also refused while the Core is disconnected, regardless of
-this setting; cached zones are not usable playback targets. This policy does
-not lock a multi-step operation to one zone if the user changes selection.
+this setting; cached zones are not usable playback targets. The selected-output
+browse actions also recheck the intended zone and connection during resolution.
+These checks do not make a remote Roon operation transactional.
 
-## Library search
+## Library, search and queue
 
-The popup can search your whole Roon library — not just the current zone or
-the album that's playing. The search field stays hidden until you use it, on
-purpose, so the popup keeps its normal size when you're just glancing at what's
-playing; the `/  search` hint on the `ZONES` line is what tells you it's
-there, and clicking it opens the field.
+Open the popup and choose the output you want in **ZONES**. The three browse
+actions use that selected output, even though their short labels omit its name.
+Selecting a missing output does not authorize a browse action in another room.
 
-To search, open the popup and press `/` — or just start typing; most
-printable keys open the field and start your query with that character.
-Press `Enter` to submit. Results come back grouped the way Roon's own search
-groups them: a top match, then `Artists`, `Albums`, `Composers`, `Tracks`,
-and `Works`, each row showing a count.
+Click **Library** to browse categories, or click the search hint / press `/`
+to search. Most printable keys can also start a query; press `/` first for the
+shell-reserved keys `h j k l x X` and Space. Type the query and press Enter.
+Search can take a few seconds, particularly for streaming-service results.
 
-The exceptions are `h`, `j`, `k`, `l`, `x`, `X` and Space: the Omarchy
-shell's own panel key handler claims those before any widget sees them
-(`h`/`j`/`k`/`l` are vim-style movement, and `j`/`k` also double as Down/Up
-here; `x` is delete; Space activates). They cannot start a search — press `/`
-first and type them into the field.
-
-| Key | Behavior |
+| Control | Behavior |
 |---|---|
-| `/` | Focus the search field |
-| Any printable key except `h j k l x X` and Space | Focus the field and start the query with that character |
-| `Enter` (while typing) | Submit the search |
-| `↑` / `↓` | Move the selection |
-| `Enter` (on a result) | Play if the row is playable, otherwise descend into it (e.g. `Albums` → its list of albums) |
-| `→` | Descend into the selected row |
-| `←` | Back one level |
-| `Esc` | Back one level; closes the popup at the top level |
+| Click a result, Enter, or Right | Navigate into the current row; does not play it |
+| Up / Down | Move the current row highlight |
+| Previous / Next below the results | Change page (up to 100 rows per page) |
+| Left | Return to the parent list |
+| Esc | Leave search editing, go back through results, then close the popup |
+| **Play Now** | Ask Roon to play the highlighted track or whole album now |
+| **Play Next** | Ask Roon to put the highlighted track or whole album next |
+| **Add to Queue** | Ask Roon to append the highlighted track or whole album |
 
-Playing a row clears the search and leaves the popup open, so you can pick
-something else without reopening it. The now-playing card above updates to
-whatever just started, which is your confirmation it worked.
+Choose the **album row**, rather than one of its tracks, to act on the whole
+album. The three actions appear side by side. After an action, the browse view
+clears; browse or search again for your next selection. A “requested” message
+means Tonearm sent an attempt; check Now Playing or Queue for the remote result.
+Missing/unsupported actions are refused rather than replaced with Play Now.
+An unknown result is not retried automatically; inspect Roon before repeating it.
 
-**Play Now is the only action.** There's no Queue button and no queue key,
-because the popup has no way to show you a queue — so queuing would be a
-control whose effect you could never see. It isn't in the daemon either: Play
-Now is the only action tonearm invokes.
+Click **Queue** to expand the selected output's queue. Up/Down or a click moves
+the highlight; Enter does not play that row. Esc collapses it. The pane shows up
+to 100 items, and the header shows Roon's whole-queue time, for example
+**Queue (59:32)** or **Queue (1:02:03)**. Roon's updates refresh the time as
+playback advances or the queue changes; the total is not a sum of those 100 rows.
+If no valid total is available, the header simply says **Queue**.
+
+**Current limits:** one track or one whole album per action; no Ctrl/Shift
+multi-selection, queue-item removal, queue reorder, clear-queue control or
+play-from-here action. Use official Roon to remove or rearrange items. Roon
+controls whether an enqueue operation can start audio on an empty/stopped queue;
+use a safe volume. Streaming tracks such as TIDAL can take longer to start.
+
+The [usage guide](docs/usage.md) includes a walkthrough, limitations and what to
+include in a bug report. This feature set is available for testing, not a claim
+that every endpoint, theme or reconnect case has been qualified.
 
 ## Settings
 

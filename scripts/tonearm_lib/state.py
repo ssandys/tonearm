@@ -7,6 +7,8 @@ iterated without restarting the service.
 
 from __future__ import annotations
 
+from . import player
+
 SCHEMA_VERSION = 1
 VALID_STATUS = ("connecting", "unpaired", "unreachable",
                 "no_network", "ok")
@@ -88,10 +90,10 @@ def _number(value, default=0):
 
 def _volume_of(roon_zone: dict) -> dict | None:
     outputs = roon_zone.get("outputs") or []
-    if not outputs:
+    if not isinstance(outputs, list) or not outputs or not isinstance(outputs[0], dict):
         return None
     raw = outputs[0].get("volume")
-    if not raw or raw.get("type") == "incremental" or raw.get("value") is None:
+    if not isinstance(raw, dict) or not raw or raw.get("type") == "incremental" or raw.get("value") is None:
         # Many streamers expose no volume object at all (a fixed-volume
         # output) -- `not raw` -- or type "incremental", which has no
         # absolute value/min/max at all, only relative up/down steps `raw
@@ -154,6 +156,15 @@ def _seek_of(roon_zone: dict, np: dict) -> int:
     return _number(pos, 0)
 
 
+def _queue_remaining(roon_zone):
+    # Optional authoritative whole-queue seconds, never a sum of the visible
+    # 100-row queue window. Missing/invalid means unknown, not an empty queue.
+    value = roon_zone.get("queue_time_remaining")
+    if (type(value) not in (int, float) or not 0 <= value <= MAX_NUMBER):
+        return None
+    return value
+
+
 def normalize_zone(roon_zone: dict | None) -> dict | None:
     if not roon_zone:
         return None
@@ -164,14 +175,42 @@ def normalize_zone(roon_zone: dict | None) -> dict | None:
         "state": _state_word(roon_zone.get("state", "stopped")),
         "pinned": False,          # the daemon overwrites this; see zones.py
         "volume": _volume_of(roon_zone),
+        "controls": player.controls(roon_zone),
         "position": _seek_of(roon_zone, np),
         "length": _number(np.get("length"), 0),
+        "queue_time_remaining": _queue_remaining(roon_zone),
         "now_playing": _now_playing_of(roon_zone),
     }
 
 
+def selection(pinned_id, selected: dict | None, zones: list[dict],
+              authoritative: bool) -> dict:
+    """Selection identity independent of the legacy playable ``zone`` field.
+
+    Session startup discards malformed persisted pins. This helper still
+    refuses to publish an invalid identifier if called with one directly.
+    """
+    pinned = pinned_id is not None
+    valid_id = (pinned_id if isinstance(pinned_id, str) and
+                0 < len(pinned_id) <= MAX_ID else None)
+    if pinned:
+        if not authoritative:
+            return {"mode": "pinned", "zone_id": valid_id, "availability": "unknown"}
+        available = valid_id is not None and any(z.get("id") == valid_id for z in zones)
+        availability = ("available" if available else
+                        "missing" if valid_id is not None else "unknown")
+        return {"mode": "pinned", "zone_id": valid_id, "availability": availability}
+    chosen = selected.get("id") if selected else None
+    if not authoritative:
+        return {"mode": "auto", "zone_id": None, "availability": "unknown"}
+    if not isinstance(chosen, str) or len(chosen) > MAX_ID:
+        chosen = None
+    return {"mode": "auto", "zone_id": chosen,
+            "availability": "available" if chosen else "none"}
+
+
 def build(status: str, core: dict | None, zone: dict | None,
-          zones: list[dict]) -> dict:
+          zones: list[dict], selection: dict | None = None) -> dict:
     if status not in VALID_STATUS:
         raise ValueError("status must be one of %r, got %r" % (VALID_STATUS, status))
     trimmed_core = None
@@ -193,4 +232,7 @@ def build(status: str, core: dict | None, zone: dict | None,
              "state": _state_word(z.get("state", "stopped"))}
             for z in zones[:MAX_ZONES]
         ],
+        "selection": selection if selection is not None else {
+            "mode": "auto", "zone_id": None,
+            "availability": "unknown" if status != "ok" else "none"},
     }

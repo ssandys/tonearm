@@ -60,6 +60,25 @@ class TestAFullSnapshotReplacesRatherThanMerges(unittest.TestCase):
         a._on_state_change({"zones": [zone("z1", "iFi")]})
         self.assertEqual(sorted(a._zones), ["z1"])
 
+    def test_only_full_zone_lists_advance_authority_generation(self):
+        a = api()
+        self.assertEqual(getattr(a, "_zone_list_generation", 0), 0)
+        a._on_state_change({"zones_changed": [zone("z1", "iFi")]})
+        self.assertEqual(getattr(a, "_zone_list_generation", 0), 0)
+        a._on_state_change({"zones": []})
+        self.assertEqual(a._zone_list_generation, 1)
+        a._on_state_change({"zones_removed": ["z1"]})
+        self.assertEqual(a._zone_list_generation, 1)
+
+    def test_successful_initial_empty_query_is_authoritative(self):
+        a = api()
+        a._request = lambda *_: {"zones": []}
+        self.assertEqual(a._get_zones(), {})
+        self.assertEqual(a._zone_list_generation, 1)
+        a._request = lambda *_: None
+        self.assertEqual(a._get_zones(), {})
+        self.assertEqual(a._zone_list_generation, 1)
+
     def test_an_incremental_update_still_only_merges(self):
         # The distinction this rests on. `zones_changed` carries only what
         # changed, so treating IT as authoritative would delete every zone

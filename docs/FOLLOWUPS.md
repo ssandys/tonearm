@@ -1,3 +1,7 @@
+> Library navigation, selected-output actions and a bounded queue view have
+> since been added. For current behavior and limitations, see [the usage guide](usage.md).
+> The entries below preserve the earlier design/finding history.
+
 # Follow-ups
 
 Known gaps carried past the MVP, with enough context to act on each without

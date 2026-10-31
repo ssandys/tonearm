@@ -21,7 +21,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from tonearm_lib import cli, server, sood   # noqa: E402
+from tonearm_lib import cli, server, sood, contract_client, queue_wire   # noqa: E402
 
 EXIT_USAGE = 2
 EXIT_NO_DAEMON = 3
@@ -70,6 +70,15 @@ def main(argv):
         print(err, file=sys.stderr)
         return EXIT_USAGE
 
+    if request["cmd"] == "player_targeted":
+        try:
+            reply = contract_client.player(server.socket_path(), request)
+        except contract_client.ContractError:
+            print("player result unknown; no retry", file=sys.stderr)
+            return EXIT_TIMEOUT
+        print(json.dumps(reply))
+        return 0 if reply["outcome"] == "attempted" else 1
+
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     # A blocking connect to a unix socket whose server has stopped accepting
     # waits on the backlog rather than failing fast. TimeoutError is an OSError
@@ -85,6 +94,22 @@ def main(argv):
     try:
         sock.settimeout(_reply_timeout(request["cmd"]))
         sock.sendall((json.dumps(request) + "\n").encode())
+
+        if request["cmd"] == "queue_status":
+            # Cache-only query: bounded one-line read, validate before output.
+            with sock.makefile("rb") as reader:
+                line = reader.readline(queue_wire.MAX_REPLY_BYTES + 1)
+            try:
+                if len(line) > queue_wire.MAX_REPLY_BYTES or not line.endswith(b"\n"):
+                    raise ValueError("missing or oversized queue state")
+                reply = json.loads(line)
+                if not queue_wire.valid_result(reply, request):
+                    raise ValueError("uncorrelated queue state")
+            except (ValueError, TypeError):
+                print("invalid or missing queue state; no retry", file=sys.stderr)
+                return EXIT_TIMEOUT
+            print(json.dumps(reply))
+            return 1 if reply["status"] == "error" else 0
 
         if request["cmd"] == "status":
             # Unlike subscribe: one reply line, then exit -- this is a probe,

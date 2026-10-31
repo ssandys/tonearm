@@ -1,5 +1,4 @@
 import QtQuick
-import Quickshell
 import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
@@ -53,6 +52,52 @@ Item {
   property bool busy: false
   property string errorText: ""
   property bool editing: false
+
+  property int totalCount: 0
+  property int pageOffset: 0
+  property bool readOnlyNavigation: false
+  property int viewGeneration: 0
+  property int requestNumber: 0
+  property var activeRequest: null
+  property var navParents: []
+  property int playSequence: 0
+  // play_now here is only the shared row/output gate. All three actions use
+  // it; the clicked control sends its own token. One row, never a selection.
+  readonly property bool canPlaySelection: !root.editing && !root.busy && !!Model.browsePlayRequest(
+    root.state, root.rows[root.cursor], root.cursor, root.levelId, "availability", "play_now")
+  readonly property string contextKey: Model.browseContext(root.state, root.session)
+  readonly property var paging: Model.browsePaging(root.pageOffset, root.rows.length, root.totalCount)
+  onContextKeyChanged: root.invalidateView()
+
+  function invalidateView() {
+    root.viewGeneration++
+    root.activeRequest = null
+    root.busy = false
+    root.rows = []
+    root.path = []
+    root.levelId = -1
+    root.cursor = -1
+    root.totalCount = 0
+    root.pageOffset = 0
+    root.errorText = ""
+    root.readOnlyNavigation = false
+    root.navParents = []
+  }
+
+  function openLibrary() {
+    if (!root.state || root.state.status !== "ok") return
+    root.invalidateView()
+    root.releaseSearch()
+    root.readOnlyNavigation = true
+    root._send(["library"])
+  }
+
+  function changePage(direction, desiredCursor) {
+    if (root.busy) return false
+    var offset = direction > 0 ? root.paging.next : root.paging.previous
+    if (offset === null || root.levelId < 0) return false
+    return root._send(["page_nav", String(offset), String(root.levelId)], null, desiredCursor)
+  }
 
   readonly property int rowCount: rows.length
   readonly property bool hasResults: rows.length > 0
@@ -144,61 +189,68 @@ Item {
   function resetPane() {
     field.text = ""
     root.releaseSearch()
-    _send(["reset"])
+    // Invalidate before reset, even if an older read is still in flight.
+    root.invalidateView()
+    root._send(["reset"])
   }
 
-  function _apply(reply) {
+  function _apply(reply, args, desiredCursor) {
     root.busy = false
-    if (!reply) { root.errorText = "tonearmd is not answering"; return }
+    if (!reply) { root.errorText = "tonearmd is not answering"; return false }
     if (reply.ok === false) {
-      // A stale reply is not a user-visible failure: the screen was simply out
-      // of date. Re-render and discard the keystroke rather than replaying it
-      // against a level the user never saw (spec 5.2).
       root.errorText = reply.error === "stale" ? "" : (reply.message || "error")
-      if (reply.rows !== undefined) root._applyLevel(reply)
-      return
+      if (reply.rows === undefined) return false
+    } else root.errorText = ""
+    var page = (args[0] === "page_nav" || args[0] === "back_nav") && reply.ok !== false
+    var expectedPath = args[0] === "back_nav" ? root.path.slice(0,-1) : root.path
+    var next = Model.browsePage(reply, page ? root.cursor : -1)
+    if (!next || (page && (next.offset !== Number(args[1]) || next.levelId <= Number(args[2]) ||
+                           JSON.stringify(next.path) !== JSON.stringify(expectedPath)))) {
+      root.errorText = "Library view changed or returned an invalid page; reload Library."
+      return false
     }
-    root.errorText = ""
-    root._applyLevel(reply)
+    if (reply.ok === false) root.navParents = []
+    if (page && desiredCursor !== undefined) {
+      next.cursor = Model.moveCursor(desiredCursor === -2 ? next.rows.length-1 : desiredCursor,0,next.rows.length)
+    }
+    root.rows = next.rows
+    root.levelId = next.levelId
+    root.path = next.path
+    root.totalCount = next.count
+    root.pageOffset = next.offset
+    root.cursor = next.cursor
+    Qt.callLater(function() { if (root.cursor >= 0) list.positionViewAtIndex(root.cursor, ListView.Contain) })
+    return true
   }
 
-  // `level_id` increments on every level change (search/enter/back/reset,
-  // and an activate that resolves to a descend rather than a play) and stays
-  // put across a page reload or a play, which return the SAME level
-  // unchanged (spec 5.1.1, 5.3 "level_id is strictly increasing... on every
-  // level change"). A level change puts the cursor on the first row --
-  // descending into an album should not carry over whatever index the
-  // previous level happened to have the cursor on. page/play leave the
-  // cursor where the user had it, merely clamped to the (possibly shorter)
-  // new row count.
-  function _applyLevel(reply) {
-    var levelChanged = reply.level_id !== root.levelId
-    root.rows = reply.rows || []
-    root.levelId = reply.level_id
-    root.path = reply.path || []
-    root.cursor = Model.moveCursor(levelChanged ? -1 : root.cursor, 0, root.rows.length)
-  }
-
-  // `after` runs once the reply has been applied, so a caller can react to
-  // what the daemon actually did rather than to what it hoped would happen.
-  //
-  // Returns whether the request was actually SENT. handleBack() needs that:
-  // returning true when `busy` had suppressed the send told Panel.qml the key
-  // was consumed, so Esc was swallowed and the popup could not be closed from
-  // the keyboard while a browse was in flight.
-  function _send(args, after) {
+  function _send(args, after, desiredCursor) {
     if (!root.service || root.busy) return false
+    var token = {view:root.viewGeneration, request:++root.requestNumber, context:root.contextKey}
+    root.activeRequest = token
     root.busy = true
+    root.errorText = ""
     root.service.browse(root.session, args, function (reply) {
-      root._apply(reply)
-      if (after) after(reply)
+      if (!Model.browseReplyCurrent(token, root.activeRequest, root.viewGeneration, root.contextKey)) return
+      root.activeRequest = null
+      if (args[0] === "play_selected") {
+        var expected = {zone_id:args[3], request_id:args[4], action:args[5]}
+        var message = Model.browsePlayReplyText(expected, reply)
+        if (!Model.validBrowsePlayReply(expected,reply) || reply.rows === undefined) root.invalidateView()
+        else root._apply(reply,args)
+        root.busy = false
+        root.errorText = message
+        return
+      }
+      var accepted = root._apply(reply, args, desiredCursor)
+      if (accepted && after) after(reply)
     })
     return true
   }
 
   function search(term) {
     if (!term || term.length === 0) return
-    root.cursor = -1
+    root.invalidateView()
+    root.readOnlyNavigation = true
     // releaseSearch, not `editing = false`: the results are about to be
     // keyboard-navigable and the catcher cannot see a key it does not have
     // focus for.
@@ -210,71 +262,62 @@ Item {
   // left goes back (spec 7.2). PanelKeyCatcher delivers both axes through one
   // signal, so they are separated here rather than in Panel.qml.
   function handleMove(dx, dy) {
-    if (root.editing) return
+    if (root.editing || root.busy) return
     if (dx > 0) { root.handleDescend(); return }
     if (dx < 0) { root.handleBack(); return }
     if (dy === 0) return
+    if (dy > 0 && root.cursor === root.rows.length-1 && root.paging.next !== null) { root.changePage(1,0); return }
+    if (dy < 0 && root.cursor === 0 && root.paging.previous !== null) { root.changePage(-1,-2); return }
     root.cursor = Model.moveCursor(root.cursor, dy, root.rows.length)
     list.positionViewAtIndex(root.cursor, ListView.Contain)
   }
 
-  // Enter: activate -- plays if playable, descends if not. The widget must NOT
-  // decide which: spec 2.4 measured that a category row and an album row are
-  // both hint "list" and indistinguishable before descending, so any rule here
-  // would be a guess that fails on art-less albums.
-  //
-  // On a PLAY, the search clears and the popup stays open. This reverses spec
-  // 7.3, which closed it. That made sense while Queue existed: playing was the
-  // terminal action and queuing was the one you repeated, so closing on play
-  // was "done, get out of the way". With Queue gone, Play Now is the ONLY
-  // action -- so closing on it meant every selection ended the session and a
-  // second one cost a reopen and a retype.
-  //
-  // Clearing rather than merely leaving the results up: the reset shrinks the
-  // pane back to idle height, which is the visible confirmation that something
-  // was picked, and it lands the popup in the same state a fresh open would --
-  // no stale cursor pointing into a level the user has moved on from.
-  //
-  // Only when the daemon reports it actually PLAYED. Resetting unconditionally
-  // would wipe the search the moment Enter descended into a category, throwing
-  // away the very list the user was navigating.
-  function handleActivate() {
-    if (root.editing || root.cursor < 0) return
-    _send(["activate", String(root.cursor), String(root.levelId)],
-          function (reply) {
-            // Model.activatePlayed, not the condition inline: this is the one
-            // decision in the callback, and it is node-tested there.
-            if (Model.activatePlayed(reply)) {
-              // Safe from inside an `after` callback: _apply has already
-              // cleared `busy`, so resetPane's own _send is not suppressed.
-              root.resetPane()
-            }
-          })
+  // Enter navigates only. Playback is a separate, explicit selected-output action.
+  function handleActivate() { root.handleDescend() }
+
+  function handlePlay(action) {
+    if (root.busy || root.editing) return false
+    if (action !== "play_now" && action !== "play_next" && action !== "add_to_queue") {
+      root.errorText = "This browse action is not supported."
+      return false
+    }
+    var rid = "browse-" + Date.now().toString(36) + "-" + (++root.playSequence)
+    var request = Model.browsePlayRequest(root.state,root.rows[root.cursor],root.cursor,root.levelId,rid,action)
+    if (!request) { root.errorText = "Choose an available output and a playable row first."; return false }
+    return root._send(["play_selected",String(request.index),String(request.level_id),request.zone_id,request.request_id,request.action])
   }
 
   function handleDescend() {
     if (root.editing || root.cursor < 0) return
-    if (!root.rows[root.cursor].can_descend) return
-    _send(["enter", String(root.cursor), String(root.levelId)])
+    var row = root.rows[root.cursor]
+    if (!Model.canNavigateRow(row)) {
+      root.errorText = "This row requires search or playback; navigation only here."
+      return
+    }
+    if (!row.can_descend) return
+    var parent = {path:root.path.slice(), offset:root.pageOffset, cursor:root.cursor}
+    _send(["enter_nav", String(root.cursor), String(root.levelId)],
+      function(reply) {
+        if (reply.ok !== false) root.navParents = root.navParents.concat([parent]).slice(-64)
+      })
   }
 
-  // No handleQueue(). Play Now is the only action the UI offers, because the
-  // popup has no way to SHOW a queue -- so queuing was a write-only control
-  // whose effect the user could never see. Removing it also deleted the
-  // `hasSelection` property and Panel.qml's context-sensitive `q` branch, the
-  // trickiest piece of key handling in that file, which existed solely because
-  // `q` is both the queue shortcut and the first letter of Queen.
-  //
-  // The daemon does not carry it either. Keeping a queue action there would
-  // have left protocol surface with no consumer and no path to one, so the
-  // whole action-selection argument went with it: `play` now takes an index
-  // and a level, and Play Now is the only action browse.py invokes.
+  // One cursor, three explicit actions. Play Next and Add to Queue use the
+  // same selected row as Play Now: a track row, or an album row for the
+  // whole album. There is no Ctrl/Shift selection and no `q` shortcut; `q`
+  // stays a search letter. The existing queue pane shows the subscribed
+  // queue. These controls do not edit that pane or claim the queue changed.
 
   // Returns true when it consumed the key. Panel.qml uses that to decide
   // whether Esc should close the popup instead (spec 7.2).
   function handleBack() {
     if (root.editing) { root.releaseSearch(); return true }
-    if (root.path.length > 1) return _send(["back"])
+    if (root.path.length > 1) {
+      var parent = root.navParents.length ? root.navParents[root.navParents.length-1] : null
+      if (parent && JSON.stringify(parent.path) !== JSON.stringify(root.path.slice(0,-1))) parent = null
+      return _send(["back_nav", String(parent ? parent.offset : 0), String(root.levelId)],
+        function(reply) { if (reply.ok !== false) root.navParents = root.navParents.slice(0,-1) }, parent ? parent.cursor : -1)
+    }
     // At the top level, `reset` is the same op class as every other browse
     // call: gated by `busy`, and cleared only once the daemon's reply says
     // so, via _apply -- not optimistically here. An earlier draft cleared
@@ -309,6 +352,16 @@ Item {
       // useless while this field still holds active focus.
       Keys.onEscapePressed: root.releaseSearch()
       onActiveFocusChanged: if (activeFocus) root.editing = true
+    }
+
+    Text {
+      textFormat: Text.PlainText
+      width: parent.width
+      visible: root.busy
+      text: "Loading library\u2026"
+      color: Commons.Color.foreground
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
     }
 
     Text {
@@ -349,10 +402,14 @@ Item {
       width: parent.width
       // Fixed maximum so the popup grows once and then stops, rather than
       // tracking result count into an unusable column (spec 7.1).
-      height: Math.min(contentHeight, Style.space(8 * 38))
+      // Six visible rows leave room for player, four zones, guidance and pager
+      // at the laptop's current scaled font; one backend page remains100 rows.
+      height: Math.min(contentHeight, Style.space(6 * 38))
       visible: root.rows.length > 0
       clip: true
       model: root.rows
+      enabled: !root.busy
+      opacity: enabled ? 1 : 0.5
       boundsBehavior: Flickable.StopAtBounds
 
       delegate: Rectangle {
@@ -427,6 +484,69 @@ Item {
           anchors.fill: parent
           onClicked: { root.cursor = index; root.handleActivate() }
         }
+      }
+    }
+
+    Row {
+      id: actionRow
+      objectName: "browseActions"
+      width: parent.width
+      visible: root.rows.length > 0
+      spacing: Style.space(8)
+
+      Repeater {
+        model: [ {label: "Play Now", action: "play_now"},
+                 {label: "Play Next", action: "play_next"},
+                 {label: "Add to Queue", action: "add_to_queue"} ]
+        delegate: Text {
+          required property var modelData
+          objectName: modelData.action
+          width: Math.max(0, (actionRow.width - 2 * actionRow.spacing) / 3)
+          textFormat: Text.PlainText
+          text: modelData.label
+          horizontalAlignment: Text.AlignHCenter
+          elide: Text.ElideRight
+          color: enabled ? Commons.Color.foreground : Commons.Color.muted
+          enabled: root.canPlaySelection
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          MouseArea { anchors.fill: parent; onClicked: root.handlePlay(parent.modelData.action) }
+        }
+      }
+    }
+
+    Item {
+      width: parent.width
+      height: pageLabel.implicitHeight + Style.space(8)
+      visible: root.path.length > 0
+      Text {
+        textFormat: Text.PlainText
+        text: "\u2039 Previous"
+        anchors.left: parent.left
+        color: enabled ? Commons.Color.foreground : Commons.Color.muted
+        enabled: !root.busy && root.paging.previous !== null
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        MouseArea { anchors.fill: parent; onClicked: root.changePage(-1) }
+      }
+      Text {
+        id: pageLabel
+        textFormat: Text.PlainText
+        text: root.paging.label
+        anchors.horizontalCenter: parent.horizontalCenter
+        color: Commons.Color.muted
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+      Text {
+        textFormat: Text.PlainText
+        text: "Next \u203a"
+        anchors.right: parent.right
+        color: enabled ? Commons.Color.foreground : Commons.Color.muted
+        enabled: !root.busy && root.paging.next !== null
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        MouseArea { anchors.fill: parent; onClicked: root.changePage(1) }
       }
     }
   }

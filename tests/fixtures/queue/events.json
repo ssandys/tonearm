@@ -1,0 +1,10 @@
+{
+  "provenance": "Synthetic feasibility payloads, not captured Core events or a verified queue body schema. Only real vendor routing is asserted.",
+  "frames": [
+    {"name":"Subscribed","body":{"items":[{"queue_item_id":71,"three_line":{"line1":"Synthetic alpha","line2":"Fixture artist","line3":"Fixture album"}},{"queue_item_id":83,"three_line":{"line1":"Synthetic beta"}}]}},
+    {"name":"Changed","body":{"changes":[{"operation":"remove","index":0,"count":1},{"operation":"insert","index":1,"items":[{"queue_item_id":97,"three_line":{"line1":"Synthetic gamma"}}]}]}},
+    {"name":"Changed","body":{"changes":[{"operation":"update","index":0,"items":[{"queue_item_id":83,"three_line":{"line1":"Synthetic revised beta"}}]}]}},
+    {"name":"Subscribed","body":{"items":[]}},
+    {"name":"Unsubscribed","body":{}}
+  ]
+}

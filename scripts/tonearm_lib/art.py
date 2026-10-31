@@ -502,6 +502,26 @@ class CachingSession:
     def command(self, verb: str, arg=None) -> None:
         self._session.command(verb, arg)
 
+    def pause_targeted(self, zone_id: str) -> dict:
+        # Same pass-through boundary as command(): core owns admission,
+        # and dispatch must not hold the artwork snapshot lock.
+        return self._session.pause_targeted(zone_id)
+
+    def queue_status(self, zone_id, request_id):
+        # Core cache owns its own short lock; no artwork lock or SDK I/O.
+        return self._session.queue_status(zone_id, request_id)
+
+    def player_targeted(self, zone_id, verb, arg=None, output_id=None, output_ids=None):
+        return self._session.player_targeted(zone_id, verb, arg, output_id, output_ids)
+
+    def browse_play_selected(self, key, index, level_id, zone_id, request_id,
+                             action="play_now"):
+        # Same unlocked pass-through as browse(): Core owns admission and
+        # a slow browse must not hold the artwork snapshot lock. The action
+        # token is forwarded unchanged; this wrapper does not choose one.
+        return self._session.browse_play_selected(
+            key, index, level_id, zone_id, request_id, action)
+
     def browse(self, key: str, op: str, **kwargs) -> dict:
         # Deliberately NOT under self._lock, for two independent reasons:
         #
