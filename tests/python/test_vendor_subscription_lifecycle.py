@@ -208,6 +208,22 @@ class SubscriptionLifecycleTests(unittest.TestCase):
         frame(sock, 10, {'synthetic': True})
         sock.unsubscribe('synthetic', 'events')
 
+    def test_disconnected_logging_runs_outside_bookkeeping_lock(self):
+        sock = socket()
+        sock.connected = False
+
+        def log_without_lock(*args):
+            def acquire():
+                acquired = sock._request_lock.acquire(timeout=0.5)
+                if acquired:
+                    sock._request_lock.release()
+                return acquired
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                self.assertTrue(pool.submit(acquire).result(timeout=1))
+
+        with patch('roonapi.roonapisocket.LOGGER.error', side_effect=log_without_lock):
+            self.assertIs(sock.send_request('synthetic/read'), False)
+
     def test_close_clears_routing_before_reuse(self):
         sock = socket()
         callback = Mock()

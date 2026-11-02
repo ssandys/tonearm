@@ -262,12 +262,14 @@ class RoonApiWebSocket(
     ):
         """Send request to the roon sever."""
         with self._request_lock:
-            if not self.connected:
-                LOGGER.error("Connection is not (yet) ready!")
-                return False
-            request_id = self._requestid
-            self._requestid += 1
-            self._results[request_id] = None
+            request_id = None
+            if self.connected:
+                request_id = self._requestid
+                self._requestid += 1
+                self._results[request_id] = None
+        if request_id is None:
+            LOGGER.error("Connection is not (yet) ready!")
+            return False
         try:
             self._send_allocated(command, request_id, body, content_type)
         except Exception:
