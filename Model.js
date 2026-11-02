@@ -339,6 +339,10 @@ function barState(state, recvMs, nowMs) {
     return { severity: severity, glyph: GLYPH_FAULT, showArt: false, playing: false }
   }
 
+  if (missingPin(state)) {
+    return { severity: "warn", glyph: GLYPH_FAULT, showArt: false, playing: false }
+  }
+
   var zone = state.zone
   if (!zone) return { severity: "ok", glyph: GLYPH_VINYL, showArt: false, playing: false }
 
@@ -398,7 +402,13 @@ function faultText(state) {
 // nothing was playing. That reason lived only in the bar glyph's colour and
 // its tooltip, and an open popup covers the bar.
 function headerStatus(state) {
-  return faultText(state) || coreNameOf(state)
+  return faultText(state) || (missingPin(state) ? "Pinned output unavailable" : coreNameOf(state))
+}
+
+function missingPin(state) {
+  return !!(state && state.status === "ok" && !state.zone && state.selection &&
+            state.selection.mode === "pinned" &&
+            state.selection.availability === "missing")
 }
 
 function tooltipText(state) {
@@ -406,6 +416,7 @@ function tooltipText(state) {
   if (fault) return fault
 
   var coreName = coreNameOf(state)
+  if (missingPin(state)) return "Pinned output unavailable \u00b7 " + coreName
   if (!state.zone) return "Nothing playing \u00b7 " + coreName
 
   var np = nowPlayingOf(state)

@@ -27,6 +27,7 @@ def fake_api(playing=None):
 class RecordingApi:
     """Only the transport surface these safety tests exercise."""
     def __init__(self):
+        self._zone_list_generation = 1
         self.zones = {
             "zone-a": {"zone_id": "zone-a", "display_name": "Fixed room",
                        "state": "paused",

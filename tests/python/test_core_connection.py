@@ -35,6 +35,7 @@ class FakeApi:
 
     def __init__(self, connected=True):
         self._roonsocket = FakeSocket(connected)
+        self._zone_list_generation = 1
         self.zones = {
             "z1": {"zone_id": "z1", "display_name": "Kitchen", "state": "playing"},
         }
