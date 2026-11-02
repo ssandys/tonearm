@@ -25,16 +25,6 @@ would otherwise bring them back.
 
 ## Local patches
 
-`roonapi.py`, search-input response budget: browse requests carrying nonempty
-string input wait up to10s for their single response instead of the ordinary2.5s.
-No request is resent; load, transport and input-free browse budgets are unchanged.
-`test_search_reply_budget.py` covers delayed completion, bounded timeout, cleanup
-and unchanged ordinary calls. A reported local search defect reproduced at about
-2.8s while Library navigation took0.27s and official Roon search succeeded. This
-patch addresses the demonstrated short-budget failure mechanism; whether it fixes
-that live defect remains pending controlled validation. It does not fix general
-socket replacement/request ownership or subscriber fanout issues.
-
 Marked in the source with `LOCAL PATCH (tonearm #<issue>)` and pinned by
 `tests/python/test_vendor_patches.py`, so a refresh that loses them fails the
 suite rather than failing a user. Each is worth re-checking against upstream
@@ -48,6 +38,21 @@ brief `ok`-before-zones interval after connect/reconnect. The patch does not
 change roonapi's public callback signature or zone dictionary; it only exposes
 the full-list boundary to the daemon. Keep this marker when refreshing the
 vendor; `test_vendor_patches.py` and `test_selection_identity.py` cover it.
+
+`roonapi/roonapi.py`, search-input response budget ([#49](https://github.com/ssandys/tonearm/pull/49)):
+browse requests carrying nonempty string input wait up to 10 s for their single
+response instead of the ordinary 2.5 s. No request is resent; load, transport
+and input-free browse budgets are unchanged. `test_search_reply_budget.py`
+covers delayed completion, bounded timeout, cleanup and unchanged ordinary calls.
+
+Controlled live-Core validation on 2026-10-30 used this same vendor change:
+four searches succeeded in 4.12, 4.18, 5.33 and 4.27 s, each returning six rows
+and the expected match. The user also confirmed results in the popup. Before
+the change, the reported failing search returned no response at about 2.77 s;
+Library navigation took 0.27 s. These are whole-search timings, not traces of
+each underlying SDK request. No claim of a general socket ownership or
+subscriber fanout fix is made. The 22.5 s worst-case search walk remains inside
+the CLI's 25 s browse reply timeout; keep them in step when changing the walk.
 
 `roonapi/roonapi.py`, `_on_state_change` ([#13](https://github.com/ssandys/tonearm/issues/13)):
 

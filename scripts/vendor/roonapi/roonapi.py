@@ -1020,7 +1020,7 @@ class RoonApi:  # pylint: disable=too-many-instance-attributes, too-many-lines
         LOGGER.debug("_request: sending")
         request_id = self._roonsocket.send_request(command, data)
         result = None
-        # LOCAL PATCH: search input can outlast the ordinary ~2.5s response
+        # LOCAL PATCH (tonearm #49): search input can outlast the ordinary ~2.5s response
         # budget even while Library navigation is fast. Wait up to 10s for
         # this one request; never resend it. Other browse/transport calls keep
         # their existing budget. This remains inside tonearmctl's 25s budget
