@@ -4,6 +4,34 @@ Notable changes to tonearm. Versions follow [semantic versioning](https://semver
 while the major version is 0, the minor version carries changes that would
 otherwise be breaking.
 
+## 0.14.3 — 2026-11-01
+
+### Fixed
+
+- **Media keys work again.** Since 0.14.0 the daemon's sandbox has hidden
+  your whole runtime directory, session bus included, so it could not publish
+  its MPRIS player: play/pause, next and previous did nothing, the journal
+  said `MPRIS unavailable`, and `setup.sh --check` still reported healthy.
+
+  The daemon still does not get your session bus. Setup now installs a
+  second, small unit, `tonearmd-bus.service`, which runs `xdg-dbus-proxy` with
+  a policy of exactly one permission: own `org.mpris.MediaPlayer2.tonearm`.
+  The daemon sees only that proxy's socket. Your desktop can control the
+  player and receive its updates; the daemon cannot call, see or impersonate
+  anything else on the bus. `xdg-dbus-proxy` is already installed on a stock
+  Omarchy system; without it everything but media keys keeps working, and
+  setup says so.
+
+- **`setup.sh --check` reports media keys**, and no longer says "healthy"
+  when they are not working.
+
+- **Re-running `setup.sh` now applies an updated unit.** It used to start the
+  service but leave an already-running one alone; it now restarts it.
+
+**Upgrading:** run `~/.config/omarchy/plugins/ssandys.tonearm/setup.sh` once
+after updating. It installs the new proxy unit and restarts the daemon.
+Updating the plugin alone does not bring media keys back.
+
 ## 0.14.2 — 2026-11-01
 
 ### Fixed
