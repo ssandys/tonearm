@@ -53,20 +53,28 @@ class RoonApiWebSocket(
         else:
             LOGGER.debug("socket connection closed")
 
+    # LOCAL PATCH (tonearm #47): invalidate before unsubscribe, and close even if cancellation fails.
     def stop(self):
         """Stop the socket thread."""
         self._exit = True
-        subscriptions = []
-        for _, value in self._subscriptions.items():
-            subscriptions.append((value["service"], value["endpoint"]))
-        for service, _ in subscriptions:
-            self.unsubscribe(service, subscriptions)
-        self._socket.close()
+        with self._request_lock:
+            entries = list(self._subscriptions.values())
+            self._subscriptions.clear()
+        try:
+            for entry in entries:
+                try:
+                    self._cancel_entry(entry)
+                except Exception:
+                    LOGGER.warning("subscription cancellation failed during stop")
+        finally:
+            self._socket.close()
 
+    # LOCAL PATCH (tonearm #47): initialize the per-instance bookkeeping lock.
     def __init__(self, host):
         """Create the websocket connection to the roon server."""
 
         self._socket = None
+        self._request_lock = threading.RLock()
         self._results = {}
         self._requestid = 10  # initial request_id of 10 to prevent confusion with the requests that are sent by the server at initialization
         self._subkey = 0
@@ -90,39 +98,60 @@ class RoonApiWebSocket(
         threading.Thread.__init__(self)
         self.daemon = True
 
+    # LOCAL PATCH (tonearm #47): register before send, preserving body-only/None.
     def subscribe(self, service, endpoint, callback, opt_data=None):
-        """Subscribe to events."""
-        subkey = self._subkey
-        self._subkey += 1
-        data = {"subscription_key": subkey}
-        if opt_data and isinstance(opt_data, dict):
-            data.update(opt_data)
-        request_id = self.send_request(service + "/subscribe_" + endpoint, data)
-        self._subscriptions[request_id] = {
-            "service": service,
-            "endpoint": endpoint,
-            "request_id": request_id,
-            "subkey": subkey,
-            "callback": callback,
-        }
+        """Subscribe without retaining an ordinary result or exposing a new API."""
+        with self._request_lock:
+            if not self.connected:
+                return None
+            subkey = self._subkey
+            self._subkey += 1
+            request_id = self._requestid
+            self._requestid += 1
+            data = {"subscription_key": subkey}
+            if opt_data and isinstance(opt_data, dict):
+                data.update(opt_data)
+            entry = {"service": service, "endpoint": endpoint, "request_id": request_id,
+                     "subkey": subkey, "callback": callback}
+            self._subscriptions[request_id] = entry
+        try:
+            self._send_allocated(service + "/subscribe_" + endpoint, request_id, data)
+        except Exception:
+            with self._request_lock:
+                if self._subscriptions.get(request_id) is entry:
+                    del self._subscriptions[request_id]
+            raise
+        return None
 
+    # LOCAL PATCH (tonearm #47): cancellation replies have no ordinary result owner.
+    def _cancel_entry(self, entry):
+        with self._request_lock:
+            if not self.connected:
+                return
+            request_id = self._requestid
+            self._requestid += 1
+        # Never create/pop a result entry: a reentrant close may reuse this
+        # ID for a new ordinary request before cancellation send returns.
+        self._send_allocated(entry["service"] + "/unsubscribe_" + entry["endpoint"],
+                             request_id, {"subscription_key": entry["subkey"]})
+
+    # LOCAL PATCH (tonearm #47): invalidate all matching routing before sending cancellation.
     def unsubscribe(self, service, endpoint):
-        """Subscribe to events."""
-        matches = []
-        for key, value in self._subscriptions.items():
-            if value["service"] == service and value["endpoint"] == endpoint:
-                matches.append((key, value["subkey"]))
-        for item in matches:
-            self.send_request(
-                service + "/unsubscribe_" + endpoint, {"subscription_key": item[1]}
-            )
-            del self._subscriptions[item[0]]
+        with self._request_lock:
+            matches = [(k,v) for k,v in self._subscriptions.items()
+                       if v["service"] == service and v["endpoint"] == endpoint]
+            for key, entry in matches:
+                del self._subscriptions[key]
+        for _, entry in matches:
+            self._cancel_entry(entry)
 
     # pylint: disable=too-many-branches
+    # LOCAL PATCH (tonearm #47): drop unsolicited results and call subscribers outside the lock.
     def on_message(self, w_socket, message=None):
         """Handle message callback."""
         if not message:
             message = w_socket  # compatability fix because of change in websocket-client v0.49
+        request_id = None
         try:
             message = message.decode("utf-8")
             lines = message.split("\n")
@@ -156,18 +185,22 @@ class RoonApiWebSocket(
                 LOGGER.debug("CONTROL_VOLUME endpoint %s", event)
                 if self._volume_controls_callback:
                     self._volume_controls_callback(event, request_id, body)
-            elif request_id in self._subscriptions:
-                # this is callback for one of our subscriptions
-                self._subscriptions[request_id]["callback"](body)
             else:
-                # this is just a result for one of our requests
-                self._results[request_id] = body
+                # No callback/I/O while holding the bookkeeping lock. Only
+                # ordinary requests already in flight may receive a result.
+                with self._request_lock:
+                    entry = self._subscriptions.get(request_id)
+                    if entry is None and request_id in self._results:
+                        self._results[request_id] = body
+                if entry is not None:
+                    entry["callback"](body)
         except websocket.WebSocketConnectionClosedException:
             # This can happen while closing a connection - so ignore
             pass
 
         except Exception:  # pylint: disable=broad-except
-            LOGGER.exception("Error while parsing message '%s'", message)
+            # Message bodies can contain personal library data.
+            LOGGER.exception("Error while parsing message")
 
     def on_error(self, w_socket, error=None):
         """Handle error callback."""
@@ -176,13 +209,15 @@ class RoonApiWebSocket(
         LOGGER.info("on_error %s", error)
 
     # pylint: disable=unused-argument
+    # LOCAL PATCH (tonearm #47): reset subscription identifiers under the instance lock.
     def on_close(self, w_socket, close_status_code, close_msg):
         """Handle closing the session."""
         LOGGER.debug("session closed (%s) %s", close_msg, close_status_code)
-        self.connected = False
-        self._requestid = 10
-        self._subkey = 0
-        self._subscriptions = {}
+        with self._request_lock:
+            self.connected = False
+            self._requestid = 10
+            self._subkey = 0
+            self._subscriptions = {}
 
     # pylint: disable=unused-argument
     def on_open(self, w_socket=None):
@@ -221,16 +256,28 @@ class RoonApiWebSocket(
         msg = bytes(msg, "utf-8")
         self._socket.send(msg, 0x2)
 
+    # LOCAL PATCH (tonearm #47): allocate ordinary requests once under the instance lock.
     def send_request(
         self, command, body=None, content_type="application/json", header_type="REQUEST"
     ):
         """Send request to the roon sever."""
-        if not self.connected:
-            LOGGER.error("Connection is not (yet) ready!")
-            return False
-        request_id = self._requestid
-        self._requestid += 1
-        self._results[request_id] = None
+        with self._request_lock:
+            if not self.connected:
+                LOGGER.error("Connection is not (yet) ready!")
+                return False
+            request_id = self._requestid
+            self._requestid += 1
+            self._results[request_id] = None
+        try:
+            self._send_allocated(command, request_id, body, content_type)
+        except Exception:
+            with self._request_lock:
+                self._results.pop(request_id, None)
+            raise
+        return request_id
+
+    # LOCAL PATCH (tonearm #47): send outside the bookkeeping lock after registration.
+    def _send_allocated(self, command, request_id, body, content_type="application/json"):
         if body is None:
             msg = "MOO/1 REQUEST %s\nRequest-Id: %s\n\n" % (command, request_id)
         else:
@@ -241,4 +288,3 @@ class RoonApiWebSocket(
             )
         msg = bytes(msg, "utf-8")
         self._socket.send(msg, 0x2)
-        return request_id
