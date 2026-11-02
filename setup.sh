@@ -6,6 +6,24 @@ readonly installed_root="$HOME/.config/omarchy/plugins/ssandys.tonearm"
 readonly source_unit="$plugin_root/systemd/tonearmd.service"
 readonly unit_dir="$HOME/.config/systemd/user"
 readonly target_unit="$unit_dir/tonearmd.service"
+# The filtered session-bus socket tonearmd publishes MPRIS through. See the
+# header of systemd/tonearmd-bus.service for why the daemon does not get the
+# session bus itself.
+readonly source_bus_unit="$plugin_root/systemd/tonearmd-bus.service"
+readonly target_bus_unit="$unit_dir/tonearmd-bus.service"
+# Must match the unit's ExecStart and ConditionFileIsExecutable;
+# tests/python/test_setup.py asserts that it does.
+readonly proxy_bin=/usr/bin/xdg-dbus-proxy
+readonly mpris_name=org.mpris.MediaPlayer2.tonearm
+
+# Ownership tests for an existing file at either unit path. The daemon's is
+# matched by its exact ExecStart; the proxy's by the socket only it serves.
+owns_daemon_unit() {
+  grep -Fxq 'ExecStart=%h/.config/omarchy/plugins/ssandys.tonearm/scripts/tonearmd' -- "$1"
+}
+owns_bus_unit() {
+  grep -Eq '^ExecStart=/usr/bin/xdg-dbus-proxy .*%t/tonearm-bus/bus' -- "$1"
+}
 
 usage() {
   printf 'Usage: %s [--core HOST [--http-port PORT] [--tcp-port PORT]] | --check | --uninstall\n' \
@@ -28,22 +46,36 @@ if (($# == 1)) && [[ $1 == --uninstall ]]; then
     printf 'Run setup from the installed plugin: %s/setup.sh\n' "$installed_root" >&2
     exit 1
   fi
-  if [[ -L "$unit_dir" || -L "$target_unit" ]]; then
+  if [[ -L "$unit_dir" || -L "$target_unit" || -L "$target_bus_unit" ]]; then
     printf 'Refusing to uninstall: service directory or unit is a symlink.\n' >&2
     exit 1
   fi
-  if [[ -e "$target_unit" ]]; then
-    if [[ ! -f "$target_unit" ]]; then
-      printf 'Refusing to uninstall: %s is not a regular file.\n' "$target_unit" >&2
+  # Both units are vetted before either is stopped or removed.
+  for unit in "$target_unit" "$target_bus_unit"; do
+    if [[ -e "$unit" && ! -f "$unit" ]]; then
+      printf 'Refusing to uninstall: %s is not a regular file.\n' "$unit" >&2
       exit 1
     fi
-    if ! grep -Fxq 'ExecStart=%h/.config/omarchy/plugins/ssandys.tonearm/scripts/tonearmd' -- "$target_unit"; then
-      printf 'Refusing to uninstall an unrelated service file: %s\n' "$target_unit" >&2
-      exit 1
-    fi
+  done
+  if [[ -e "$target_unit" ]] && ! owns_daemon_unit "$target_unit"; then
+    printf 'Refusing to uninstall an unrelated service file: %s\n' "$target_unit" >&2
+    exit 1
+  fi
+  if [[ -e "$target_bus_unit" ]] && ! owns_bus_unit "$target_bus_unit"; then
+    printf 'Refusing to uninstall an unrelated service file: %s\n' "$target_bus_unit" >&2
+    exit 1
+  fi
+  if [[ -e "$target_unit" || -e "$target_bus_unit" ]]; then
     command -v systemctl >/dev/null 2>&1 || { echo 'systemctl is required' >&2; exit 1; }
-    systemctl --user disable --now tonearmd.service
-    rm -- "$target_unit"
+    if [[ -e "$target_unit" ]]; then
+      systemctl --user disable --now tonearmd.service
+      rm -- "$target_unit"
+    fi
+    # Not enabled on its own (no [Install]); stopping is all there is to undo.
+    if [[ -e "$target_bus_unit" ]]; then
+      systemctl --user stop tonearmd-bus.service
+      rm -- "$target_bus_unit"
+    fi
     systemctl --user daemon-reload
   fi
   printf 'tonearmd removed; pairing and configuration were preserved.\n'
@@ -109,12 +141,30 @@ if $check_only; then
     || { echo 'tonearmd.service is not running' >&2; exit 1; }
   "$plugin_root/scripts/tonearmctl" status >/dev/null 2>&1 \
     || { echo 'tonearmd is not answering on its socket' >&2; exit 1; }
+  # Media keys are not load-bearing, so a problem here is reported, not
+  # failed -- but it is never reported as healthy.
+  media_ok=false
+  if [[ ! -x "$proxy_bin" ]]; then
+    media="unavailable -- xdg-dbus-proxy is not installed.
+  Install with: omarchy pkg add xdg-dbus-proxy, then re-run setup.sh."
+  elif busctl --timeout=5 --user status "$mpris_name" >/dev/null 2>&1; then
+    media_ok=true
+    media="$mpris_name is registered."
+  else
+    media="unavailable -- $mpris_name is not registered on the session bus.
+  See: journalctl --user -u tonearmd -u tonearmd-bus"
+  fi
   if [[ -e "$HOME/.config/tonearm/token" ]]; then
-    printf 'Tonearm setup is healthy.\n'
+    if $media_ok; then
+      printf 'Tonearm setup is healthy.\n'
+    else
+      printf 'Tonearm is running and paired, but media keys do not work.\n'
+    fi
   else
     printf 'Tonearm is running but NOT PAIRED.\n'
     printf 'Enable it in Roon Remote -> Settings -> Extensions.\n'
   fi
+  printf 'Media keys: %s\n' "$media"
   exit 0
 fi
 
@@ -125,27 +175,36 @@ fi
 
 mkdir -p "$unit_dir"
 
-# `cp` FOLLOWS a symlink at its destination, so a link planted at the unit path
-# would redirect this write to whatever it names. Refuse rather than write.
-if [[ -L "$target_unit" ]]; then
-  printf 'Refusing to install: %s is a symlink.\n' "$target_unit" >&2
-  printf 'Remove it and re-run if you did not put it there on purpose.\n' >&2
-  exit 1
-fi
+# Both unit paths are vetted before either is written, so a refusal cannot
+# leave a daemon unit that Wants= a proxy unit nobody installed.
+for unit in "$target_unit" "$target_bus_unit"; do
+  # `cp` FOLLOWS a symlink at its destination, so a link planted at a unit
+  # path would redirect this write to whatever it names. Refuse rather than
+  # write.
+  if [[ -L "$unit" ]]; then
+    printf 'Refusing to install: %s is a symlink.\n' "$unit" >&2
+    printf 'Remove it and re-run if you did not put it there on purpose.\n' >&2
+    exit 1
+  fi
 
-# A socket, FIFO or directory at that path is equally not something to write
-# through.
-if [[ -e "$target_unit" && ! -f "$target_unit" ]]; then
-  printf 'Refusing to install: %s exists and is not a regular file.\n' "$target_unit" >&2
-  exit 1
-fi
+  # A socket, FIFO or directory at that path is equally not something to
+  # write through.
+  if [[ -e "$unit" && ! -f "$unit" ]]; then
+    printf 'Refusing to install: %s exists and is not a regular file.\n' "$unit" >&2
+    exit 1
+  fi
+done
 
-# An existing regular file has to be OUR unit. The name is tonearm-specific, so
-# an unrelated service sitting there means something unexpected is going on and
-# clobbering it would be destructive. The script this was modelled on
+# An existing regular file has to be OUR unit. The names are tonearm-specific,
+# so an unrelated service sitting there means something unexpected is going on
+# and clobbering it would be destructive. The script this was modelled on
 # (stappmus.audio) guards the same way.
 if [[ -f "$target_unit" ]] && ! grep -q 'tonearmd' -- "$target_unit"; then
   printf 'Refusing to overwrite an unrelated service file: %s\n' "$target_unit" >&2
+  exit 1
+fi
+if [[ -f "$target_bus_unit" ]] && ! owns_bus_unit "$target_bus_unit"; then
+  printf 'Refusing to overwrite an unrelated service file: %s\n' "$target_bus_unit" >&2
   exit 1
 fi
 
@@ -172,16 +231,34 @@ chmod 700 "$HOME/.config/tonearm"
 # Unpredictable name, created O_EXCL by mktemp, in the destination's own
 # directory so the rename is atomic. Nothing can be pre-planted at a name
 # nobody can guess, and systemd never observes a half-written unit.
-readonly tmp_unit=$(mktemp -- "$unit_dir/.tonearmd.service.XXXXXXXX")
-trap 'rm -f -- "$tmp_unit"' EXIT
-cat -- "$source_unit" > "$tmp_unit"
-chmod 0644 -- "$tmp_unit"
-mv -f -- "$tmp_unit" "$target_unit"
+tmp_unit=""
+trap '[[ -z "$tmp_unit" ]] || rm -f -- "$tmp_unit"' EXIT
+install_unit() {
+  local source=$1 target=$2
+  tmp_unit=$(mktemp -- "$unit_dir/.${target##*/}.XXXXXXXX")
+  cat -- "$source" > "$tmp_unit"
+  chmod 0644 -- "$tmp_unit"
+  mv -f -- "$tmp_unit" "$target"
+  tmp_unit=""
+}
+# The proxy first, so the daemon's Wants= never names a unit that is not there.
+install_unit "$source_bus_unit" "$target_bus_unit"
+install_unit "$source_unit" "$target_unit"
 trap - EXIT
 
+# restart, not `enable --now`: --now starts a stopped unit but leaves a running
+# one alone, so re-running setup.sh after an update never applied a changed
+# unit. restart also starts a stopped one. The proxy needs no call of its own:
+# tonearmd Wants= it, and it is PartOf= tonearmd, so it follows the restart.
 systemctl --user daemon-reload
-systemctl --user enable --now tonearmd.service
+systemctl --user enable tonearmd.service
+systemctl --user restart tonearmd.service
 
-printf 'tonearmd installed and started.\n'
+if [[ ! -x "$proxy_bin" ]]; then
+  printf 'Note: xdg-dbus-proxy is not installed, so media keys will be unavailable.\n' >&2
+  printf 'Install with: omarchy pkg add xdg-dbus-proxy, then re-run setup.sh.\n' >&2
+fi
+
+printf 'tonearmd installed and (re)started.\n'
 printf 'Now enable "tonearm" in Roon Remote -> Settings -> Extensions.\n'
 printf 'Check with: %s/setup.sh --check\n' "$installed_root"

@@ -1,6 +1,12 @@
 [Unit]
 Description=tonearm — Roon bridge for the Omarchy shell bar
 After=graphical-session.target
+# The filtered session-bus socket MPRIS publishes through; see BindReadOnlyPaths
+# below and tonearmd-bus.service. Wants=, not Requires=: without the proxy
+# (xdg-dbus-proxy absent, or the unit failed) the daemon must still run -- the
+# widget does not need the bus, only media keys do.
+Wants=tonearmd-bus.service
+After=tonearmd-bus.service
 # If the plugin directory was removed before the user unit, skip startup
 # instead of repeatedly failing at EXEC (203) under Restart=on-failure.
 ConditionPathExists=%h/.config/omarchy/plugins/ssandys.tonearm/scripts/tonearmd
@@ -32,8 +38,7 @@ RuntimeDirectoryMode=0700
 # --- sandbox ------------------------------------------------------------
 #
 # tonearmd needs very little: a unix socket under $XDG_RUNTIME_DIR, its own
-# ~/.config/tonearm, outbound TCP/UDP to the LAN, and the session bus for
-# MPRIS. Everything below is the difference between "the daemon needs that"
+# ~/.config/tonearm, outbound TCP/UDP to the LAN, and a way to publish MPRIS. Everything below is the difference between "the daemon needs that"
 # and "the daemon runs as you". Without it, a bug in this daemon -- or in
 # the vendored roonapi it feeds untrusted LAN bytes to -- reaches every file
 # the user owns.
@@ -64,6 +69,18 @@ ProtectHome=tmpfs
 BindReadOnlyPaths=%h/.config/omarchy/plugins/ssandys.tonearm
 # Its own state: Core address, pairing token, pinned zone.
 BindPaths=%h/.config/tonearm
+# MPRIS, and nothing else on the session bus. ProtectHome=tmpfs also hides
+# /run/user/$UID, so the bus socket is not visible here -- which is correct:
+# never bind %t/bus itself. That is the whole session bus, including
+# org.freedesktop.systemd1, whose StartTransientUnit would run anything this
+# daemon asked for outside every directive in this file. tonearmd-bus.service
+# instead serves an xdg-dbus-proxy socket whose only permission is owning
+# org.mpris.MediaPlayer2.tonearm; only that directory comes in, read-only
+# (connect(2) needs no write access to the mount). The `-` makes it optional:
+# without the proxy the directory never exists, and a missing bind source
+# would otherwise fail this whole unit at step NAMESPACE.
+BindReadOnlyPaths=-%t/tonearm-bus
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/tonearm-bus/bus
 
 # Measured on a running daemon, not chosen from a template -- the same rule
 # as the directives above. Steady state is 6 threads, 12 descriptors and a

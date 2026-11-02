@@ -22,6 +22,15 @@ import unittest
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 SYSTEMCTL_SHIM = "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_LOG\"\nexit 0\n"
+# `busctl --user status NAME` is how --check asks whether MPRIS is registered.
+# BUSCTL_RC decides the answer; every call is logged like systemctl's.
+BUSCTL_SHIM = ("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$BUSCTL_LOG\"\n"
+               "exit \"${BUSCTL_RC:-0}\"\n")
+
+INSTALL_CALLS = ["--user daemon-reload", "--user enable tonearmd.service",
+                 "--user restart tonearmd.service"]
+UNINSTALL_CALLS = ["--user disable --now tonearmd.service",
+                   "--user stop tonearmd-bus.service", "--user daemon-reload"]
 
 
 def _deps_present():
@@ -57,6 +66,7 @@ class SetupTestCase(unittest.TestCase):
 
         self.unit_dir = os.path.join(self.home, ".config", "systemd", "user")
         self.target = os.path.join(self.unit_dir, "tonearmd.service")
+        self.bus_target = os.path.join(self.unit_dir, "tonearmd-bus.service")
 
         shim_dir = os.path.join(self.home, "shim")
         os.makedirs(shim_dir)
@@ -64,8 +74,41 @@ class SetupTestCase(unittest.TestCase):
         with open(shim, "w") as handle:
             handle.write(SYSTEMCTL_SHIM)
         os.chmod(shim, 0o755)
+        busctl = os.path.join(shim_dir, "busctl")
+        with open(busctl, "w") as handle:
+            handle.write(BUSCTL_SHIM)
+        os.chmod(busctl, 0o755)
         self.shim_dir = shim_dir
         self.systemctl_log = os.path.join(self.home, "systemctl.log")
+        self.busctl_log = os.path.join(self.home, "busctl.log")
+        self.busctl_rc = 0
+        # The real /usr/bin/xdg-dbus-proxy may or may not exist on the machine
+        # running the suite; every test decides for itself.
+        self.use_proxy(present=True)
+
+    def use_proxy(self, present):
+        """Point the fixture's setup.sh at a fake proxy binary, or at none.
+
+        Same technique as test_uninstall_does_not_require_python_dependencies:
+        only the copied fixture script changes.
+        """
+        fake = os.path.join(self.home, "bin", "xdg-dbus-proxy")
+        os.makedirs(os.path.dirname(fake), exist_ok=True)
+        if present and not os.path.exists(fake):
+            with open(fake, "w") as handle:
+                handle.write("#!/bin/sh\nexit 0\n")
+            os.chmod(fake, 0o755)
+        elif not present and os.path.exists(fake):
+            os.unlink(fake)
+        script = os.path.join(self.plugin, "setup.sh")
+        with open(script) as handle:
+            lines = handle.read().splitlines(keepends=True)
+        marker = "readonly proxy_bin="
+        hits = [i for i, line in enumerate(lines) if line.startswith(marker)]
+        self.assertEqual(len(hits), 1, "setup.sh must define proxy_bin once")
+        lines[hits[0]] = marker + fake + "\n"
+        with open(script, "w") as handle:
+            handle.writelines(lines)
 
     def run_setup(self, *args):
         env = dict(os.environ)
@@ -76,6 +119,8 @@ class SetupTestCase(unittest.TestCase):
         env.pop("XDG_CONFIG_HOME", None)
         env["PATH"] = self.shim_dir + os.pathsep + env["PATH"]
         env["SYSTEMCTL_LOG"] = self.systemctl_log
+        env["BUSCTL_LOG"] = self.busctl_log
+        env["BUSCTL_RC"] = str(self.busctl_rc)
         return subprocess.run([os.path.join(self.plugin, "setup.sh"), *args],
                               env=env, capture_output=True, text=True, timeout=60)
 
@@ -94,7 +139,8 @@ class SetupTestCase(unittest.TestCase):
     def temp_leftovers(self):
         if not os.path.isdir(self.unit_dir):
             return []
-        return [n for n in os.listdir(self.unit_dir) if n != "tonearmd.service"]
+        return [n for n in os.listdir(self.unit_dir)
+                if n not in ("tonearmd.service", "tonearmd-bus.service")]
 
 
 class TestCleanInstall(SetupTestCase):
@@ -218,8 +264,8 @@ class TestUninstall(SetupTestCase):
         result = self.run_setup("--uninstall")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(os.path.lexists(self.target))
-        self.assertEqual(self.systemctl_calls(), [
-            "--user disable --now tonearmd.service", "--user daemon-reload"])
+        self.assertFalse(os.path.lexists(self.bus_target))
+        self.assertEqual(self.systemctl_calls(), UNINSTALL_CALLS)
         with open(token) as handle:
             self.assertEqual(handle.read(), "pairing-token")
         self.assertEqual(os.stat(state_dir).st_mode & 0o077, 0)
@@ -290,8 +336,7 @@ class TestUninstall(SetupTestCase):
         result = self.run_setup("--uninstall")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(os.path.exists(self.target))
-        self.assertEqual(self.systemctl_calls(), [
-            "--user disable --now tonearmd.service", "--user daemon-reload"])
+        self.assertEqual(self.systemctl_calls(), UNINSTALL_CALLS)
 
     def test_unit_skips_start_when_daemon_has_been_removed(self):
         self.assertEqual(self.run_setup().returncode, 0)
@@ -408,9 +453,221 @@ class TestSandboxPrerequisites(SetupTestCase):
         self.assertTrue(paths, "the unit declares no path directives at all")
         for directive, raw in paths:
             for entry in raw.split():
+                # A `-` prefix is systemd's own "skip if missing", which is
+                # the opposite of this hazard: the proxy directory is bound
+                # that way precisely so a missing xdg-dbus-proxy cannot keep
+                # the daemon from starting (test_session_bus_proxy.py).
+                if entry.startswith("-"):
+                    continue
                 # A bind may be `source:dest`; the source is what must exist.
-                source = entry.lstrip("-").split(":")[0]
+                source = entry.split(":")[0]
                 path = source.replace("%h", self.home)
                 self.assertTrue(os.path.isdir(path),
                                 "%s is in %s but setup.sh does not create it"
                                 % (entry, directive))
+
+
+class TestBusProxyUnit(SetupTestCase):
+    """setup.sh installs tonearmd-bus.service next to tonearmd.service.
+
+    Same guards as the daemon's unit -- it is written to the same directory by
+    the same script -- and both are checked before EITHER is written, so a
+    refusal cannot leave a daemon unit that wants a proxy nobody installed.
+    """
+
+    def test_installs_both_units(self):
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(self.bus_target) as handle:
+            installed = handle.read()
+        with open(os.path.join(REPO, "systemd", "tonearmd-bus.service")) as handle:
+            self.assertEqual(installed, handle.read())
+        self.assertEqual(os.stat(self.bus_target).st_mode & 0o777, 0o644)
+        self.assertEqual(self.temp_leftovers(), [])
+
+    def test_rerunning_restarts_the_daemon_so_unit_changes_apply(self):
+        # `enable --now` starts a stopped unit and does nothing to a running
+        # one, so a re-run never applied a changed unit -- 0.14.2's upgrade
+        # note had to tell users to restart by hand. The proxy needs no call
+        # of its own: tonearmd Wants= it, and its PartOf= follows the restart.
+        self.assertEqual(self.run_setup().returncode, 0)
+        os.unlink(self.systemctl_log)
+        second = self.run_setup()
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self.systemctl_calls(), INSTALL_CALLS)
+
+    def test_a_symlink_at_the_proxy_unit_path_is_refused_before_any_write(self):
+        victim = os.path.join(self.home, "victim")
+        with open(victim, "w") as handle:
+            handle.write("untouched")
+        os.makedirs(self.unit_dir)
+        os.symlink(victim, self.bus_target)
+
+        result = self.run_setup()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("symlink", result.stderr)
+        with open(victim) as handle:
+            self.assertEqual(handle.read(), "untouched")
+        self.assertFalse(os.path.exists(self.target))
+        self.assertEqual(self.systemctl_calls(), [])
+
+    def test_a_non_regular_proxy_unit_is_refused(self):
+        os.makedirs(self.unit_dir)
+        os.mkfifo(self.bus_target)
+        self.addCleanup(os.unlink, self.bus_target)
+        result = self.run_setup()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not a regular file", result.stderr)
+        self.assertFalse(os.path.exists(self.target))
+
+    def test_an_unrelated_proxy_unit_is_not_clobbered(self):
+        os.makedirs(self.unit_dir)
+        with open(self.bus_target, "w") as handle:
+            handle.write("[Service]\nExecStart=/usr/bin/something-else\n")
+        result = self.run_setup()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unrelated", result.stderr)
+        with open(self.bus_target) as handle:
+            self.assertIn("something-else", handle.read())
+        self.assertFalse(os.path.exists(self.target))
+        self.assertEqual(self.temp_leftovers(), [])
+
+    def test_a_missing_proxy_warns_but_still_installs(self):
+        # The widget does not need the bus; only media keys do.
+        self.use_proxy(present=False)
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("xdg-dbus-proxy", result.stderr)
+        self.assertIn("media keys", result.stderr)
+        self.assertTrue(os.path.isfile(self.target))
+        self.assertTrue(os.path.isfile(self.bus_target))
+        self.assertEqual(self.systemctl_calls(), INSTALL_CALLS)
+
+    def test_a_present_proxy_does_not_warn(self):
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("xdg-dbus-proxy", result.stderr)
+
+    def test_setup_checks_the_binary_the_unit_runs(self):
+        with open(os.path.join(REPO, "setup.sh")) as handle:
+            [line] = [l for l in handle if l.startswith("readonly proxy_bin=")]
+        proxy_bin = line.split("=", 1)[1].strip()
+        with open(os.path.join(REPO, "systemd", "tonearmd-bus.service")) as handle:
+            unit = handle.read()
+        self.assertIn("ExecStart=" + proxy_bin + " ", unit)
+        self.assertIn("ConditionFileIsExecutable=" + proxy_bin + "\n", unit)
+
+
+class TestUninstallBusProxy(SetupTestCase):
+    def test_uninstalls_an_older_install_without_the_proxy_unit(self):
+        # Everything before 0.14.3 installed tonearmd.service alone.
+        self.assertEqual(self.run_setup().returncode, 0)
+        os.unlink(self.bus_target)
+        os.unlink(self.systemctl_log)
+        result = self.run_setup("--uninstall")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(os.path.lexists(self.target))
+        self.assertEqual(self.systemctl_calls(), [
+            "--user disable --now tonearmd.service", "--user daemon-reload"])
+
+    def test_removes_a_proxy_unit_left_without_its_daemon(self):
+        self.assertEqual(self.run_setup().returncode, 0)
+        os.unlink(self.target)
+        os.unlink(self.systemctl_log)
+        result = self.run_setup("--uninstall")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(os.path.lexists(self.bus_target))
+        self.assertEqual(self.systemctl_calls(), [
+            "--user stop tonearmd-bus.service", "--user daemon-reload"])
+
+    def test_refuses_an_unowned_proxy_unit_before_stopping_anything(self):
+        for kind in ("symlink", "fifo", "directory", "unrelated"):
+            with self.subTest(kind=kind):
+                self.assertEqual(self.run_setup().returncode, 0)
+                os.unlink(self.systemctl_log)
+                os.unlink(self.bus_target)
+                if kind == "symlink":
+                    victim = os.path.join(self.home, "victim")
+                    with open(victim, "w") as handle:
+                        handle.write("untouched")
+                    os.symlink(victim, self.bus_target)
+                elif kind == "fifo":
+                    os.mkfifo(self.bus_target)
+                elif kind == "directory":
+                    os.mkdir(self.bus_target)
+                else:
+                    with open(self.bus_target, "w") as handle:
+                        handle.write("[Service]\nExecStart=/usr/bin/other\n")
+
+                result = self.run_setup("--uninstall")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(os.path.lexists(self.bus_target))
+                # The daemon's own unit is untouched too: nothing was stopped.
+                self.assertTrue(os.path.isfile(self.target))
+                self.assertEqual(self.systemctl_calls(), [])
+                if kind == "symlink":
+                    with open(victim) as handle:
+                        self.assertEqual(handle.read(), "untouched")
+                    os.unlink(victim)
+                if kind == "directory":
+                    os.rmdir(self.bus_target)
+                else:
+                    os.unlink(self.bus_target)
+
+
+class TestCheckReportsMediaKeys(SetupTestCase):
+    """--check says whether media keys can work, and why not if they cannot.
+
+    Not a failure exit: the widget works without MPRIS, the same way an
+    unpaired daemon is reported but exits 0. It must never say "healthy"
+    while media keys are dead, which is how 0.14.0's regression went unseen.
+    """
+
+    def setUp(self):
+        super().setUp()
+        ctl = os.path.join(self.plugin, "scripts", "tonearmctl")
+        with open(ctl, "w") as handle:
+            handle.write("#!/bin/sh\nexit 0\n")
+        os.chmod(ctl, 0o755)
+        state = os.path.join(self.home, ".config", "tonearm")
+        os.makedirs(state)
+        with open(os.path.join(state, "token"), "w") as handle:
+            handle.write("pairing-token")
+
+    def busctl_calls(self):
+        if not os.path.exists(self.busctl_log):
+            return []
+        with open(self.busctl_log) as handle:
+            return handle.read().splitlines()
+
+    def test_healthy_when_mpris_is_registered(self):
+        result = self.run_setup("--check")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("healthy", result.stdout)
+        self.assertIn("Media keys: org.mpris.MediaPlayer2.tonearm is registered",
+                      result.stdout)
+        self.assertIn("--user status org.mpris.MediaPlayer2.tonearm",
+                      " ".join(self.busctl_calls()))
+
+    def test_reports_a_missing_proxy_binary(self):
+        self.use_proxy(present=False)
+        result = self.run_setup("--check")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("healthy", result.stdout)
+        self.assertIn("xdg-dbus-proxy is not installed", result.stdout)
+        self.assertIn("omarchy pkg add xdg-dbus-proxy", result.stdout)
+
+    def test_reports_an_unregistered_name(self):
+        self.busctl_rc = 1
+        result = self.run_setup("--check")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("healthy", result.stdout)
+        self.assertIn("not registered", result.stdout)
+        self.assertIn("tonearmd-bus", result.stdout)
+
+    def test_unpaired_still_reports_media_keys(self):
+        os.unlink(os.path.join(self.home, ".config", "tonearm", "token"))
+        self.busctl_rc = 1
+        result = self.run_setup("--check")
+        self.assertIn("NOT PAIRED", result.stdout)
+        self.assertIn("not registered", result.stdout)

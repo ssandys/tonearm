@@ -43,7 +43,8 @@ configuration required.
    ```
 
    This installs and starts `tonearmd`, the background daemon that talks to
-   your Roon Core, as a systemd user service (`tonearmd.service`). It starts
+   your Roon Core, as a systemd user service (`tonearmd.service`), plus the
+   small bus proxy it publishes media keys through (`tonearmd-bus.service`). It starts
    automatically on every login from then on.
 
    If automatic discovery cannot see a Core that you know is reachable, supply
@@ -78,10 +79,12 @@ configuration required.
 
    This confirms the service is running, the daemon is answering on its
    socket, and — until you complete step 4 — will tell you it's running but
-   not yet paired.
+   not yet paired. It also reports whether media keys are working (see
+   [Media keys](#media-keys)).
 
 To update later: `omarchy plugin update ssandys.tonearm`, then re-run
-`setup.sh` if the daemon changed.
+`setup.sh`. It reinstalls both units and restarts the daemon, so changes take
+effect immediately; re-running it when nothing changed is harmless.
 
 Once paired, the bar widget starts showing whatever is playing on your
 followed Roon zone.
@@ -239,6 +242,14 @@ a local music player, etc.), your media keys follow whichever your desktop's
 existing MPRIS arbitration considers active, the same as any other MPRIS
 player.
 
+The daemon does not get your session bus itself. It reaches it through a
+filtering proxy, `tonearmd-bus.service` (`xdg-dbus-proxy`), that lets it
+publish this one player name and do nothing else on the bus. `xdg-dbus-proxy`
+ships with a stock Omarchy install; if yours lacks it, media keys are
+unavailable until you install it (`omarchy pkg add xdg-dbus-proxy`) and
+re-run `setup.sh`. Everything else works without it. `setup.sh --check`
+tells you which case you are in.
+
 ## If your Roon Core goes away
 
 Tonearm notices within a few seconds. The bar icon switches to the alert
@@ -282,7 +293,8 @@ the leftover unit manually:
 
 ```bash
 systemctl --user disable --now tonearmd.service
-rm ~/.config/systemd/user/tonearmd.service
+systemctl --user stop tonearmd-bus.service
+rm -f ~/.config/systemd/user/tonearmd.service ~/.config/systemd/user/tonearmd-bus.service
 systemctl --user daemon-reload
 ```
 

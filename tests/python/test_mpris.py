@@ -98,3 +98,96 @@ class TestPlaybackStatus(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestConnectingThroughTheProxy(unittest.TestCase):
+    """The bus is xdg-dbus-proxy's socket now, and it can lag or be absent.
+
+    tonearmd-bus.service is Type=exec, so the daemon's After= is released once
+    the proxy has exec'd -- its socket appears a moment later. And without
+    xdg-dbus-proxy installed there is no socket at all. Neither may take the
+    daemon down, and the second must say what is missing rather than dump a
+    bare ENOENT traceback into the journal.
+    """
+
+    def setUp(self):
+        import asyncio
+        import tempfile
+        from unittest import mock
+        self.asyncio = asyncio
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.socket_path = os.path.join(self.tmp.name, "tonearm-bus", "bus")
+        patcher = mock.patch.dict(os.environ, {
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=" + self.socket_path})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        delay = mock.patch.object(mpris, "CONNECT_DELAY", 0)
+        delay.start()
+        self.addCleanup(delay.stop)
+
+    def test_a_missing_socket_is_a_clear_bus_unavailable(self):
+        adapter = mpris.MprisAdapter(session=None)
+        with self.assertRaises(mpris.BusUnavailable) as caught:
+            self.asyncio.run(adapter.start())
+        message = str(caught.exception)
+        # The path the daemon actually tried, and where to look next.
+        self.assertIn(self.socket_path, message)
+        self.assertIn("tonearmd-bus", message)
+        self.assertIn("setup.sh --check", message)
+
+    def test_a_socket_that_appears_late_is_retried(self):
+        from unittest import mock
+        attempts = []
+
+        class FakeBus:
+            def __init__(self):
+                attempts.append(1)
+                # Two refusals, deliberately unlike CONNECT_ATTEMPTS, so an
+                # implementation that never retries -- or retries forever --
+                # cannot pass.
+                if len(attempts) == 1:
+                    raise FileNotFoundError(2, "No such file or directory")
+                if len(attempts) == 2:
+                    raise ConnectionRefusedError(111, "Connection refused")
+
+            async def connect(self):
+                return self
+
+            def export(self, path, iface):
+                pass
+
+            async def request_name(self, name):
+                self.requested = name
+
+        with mock.patch.object(mpris, "MessageBus", FakeBus):
+            adapter = mpris.MprisAdapter(session=None)
+            self.asyncio.run(adapter.start())
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(adapter._bus.requested, mpris.BUS_NAME)
+
+    def test_retries_are_bounded(self):
+        from unittest import mock
+        attempts = []
+
+        class NeverBus:
+            def __init__(self):
+                attempts.append(1)
+                raise FileNotFoundError(2, "No such file or directory")
+
+        with mock.patch.object(mpris, "MessageBus", NeverBus):
+            with self.assertRaises(mpris.BusUnavailable):
+                self.asyncio.run(mpris.MprisAdapter(session=None).start())
+        self.assertEqual(len(attempts), mpris.CONNECT_ATTEMPTS)
+        self.assertGreater(mpris.CONNECT_ATTEMPTS, 1)
+
+    def test_other_failures_are_not_disguised_as_a_missing_proxy(self):
+        from unittest import mock
+
+        class BrokenBus:
+            def __init__(self):
+                raise PermissionError(13, "Permission denied")
+
+        with mock.patch.object(mpris, "MessageBus", BrokenBus):
+            with self.assertRaises(PermissionError):
+                self.asyncio.run(mpris.MprisAdapter(session=None).start())

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 
 from dbus_next import PropertyAccess, Variant
@@ -23,6 +24,19 @@ LOG = logging.getLogger("tonearmd.mpris")
 BUS_NAME = "org.mpris.MediaPlayer2.tonearm"
 OBJECT_PATH = "/org/mpris/MediaPlayer2"
 TRACK_PREFIX = "/com/onemanposse/tonearm/"
+
+# The bus is tonearmd-bus.service's xdg-dbus-proxy socket, not the session
+# bus itself (see systemd/tonearmd.service). That unit is Type=exec, so this
+# daemon may start a moment before the proxy has bound its socket: retry for
+# about two seconds, then give up with a reason. Nothing here blocks the
+# socket server or the Roon session; boot() runs MPRIS as its own task.
+CONNECT_ATTEMPTS = 10
+CONNECT_DELAY = 0.2
+
+
+class BusUnavailable(Exception):
+    """No bus socket to connect to: the proxy is missing, skipped or down."""
+
 
 _STATUS = {"playing": "Playing", "loading": "Playing",
            "paused": "Paused", "stopped": "Stopped"}
@@ -270,8 +284,25 @@ class MprisAdapter:
         self._player = _Player(session)
         self._root = _Root()
 
+    async def _connect(self) -> MessageBus:
+        # Only "nothing is listening there" is retried and reworded. Anything
+        # else -- a permission error, an auth failure -- is a different
+        # problem and propagates as itself.
+        last = None
+        for attempt in range(CONNECT_ATTEMPTS):
+            try:
+                return await MessageBus().connect()
+            except (FileNotFoundError, ConnectionRefusedError) as exc:
+                last = exc
+                if attempt + 1 < CONNECT_ATTEMPTS:
+                    await asyncio.sleep(CONNECT_DELAY)
+        address = os.environ.get("DBUS_SESSION_BUS_ADDRESS") or "(unset)"
+        raise BusUnavailable(
+            "no session-bus proxy at %s (%s) -- is tonearmd-bus.service "
+            "running? setup.sh --check says why" % (address, last)) from last
+
     async def start(self) -> None:
-        self._bus = await MessageBus().connect()
+        self._bus = await self._connect()
         self._bus.export(OBJECT_PATH, self._root)
         self._bus.export(OBJECT_PATH, self._player)
         await self._bus.request_name(BUS_NAME)

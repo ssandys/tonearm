@@ -1,0 +1,75 @@
+[Unit]
+Description=tonearm — filtered session-bus socket for tonearmd's media keys
+# Why this exists: tonearmd.service hides /run/user/$UID (ProtectHome=tmpfs),
+# so the session bus is not reachable from inside its sandbox. Binding the bus
+# back in would hand a daemon that parses untrusted LAN bytes the WHOLE
+# session bus -- org.freedesktop.systemd1's StartTransientUnit included, which
+# runs any command outside every directive in that unit. Instead tonearmd gets
+# this proxy's socket, on which it can do exactly one thing: own
+# org.mpris.MediaPlayer2.tonearm. It cannot see, call or own anything else.
+#
+# What --own permits, measured against this policy on 2026-11-01: other
+# clients' method calls INTO the owned name are relayed (playerctl, the
+# shell's media keys), the daemon's broadcast PropertiesChanged signals go
+# out, and the bus driver answers Hello/RequestName. Calling
+# org.freedesktop.systemd1, org.freedesktop.Notifications or any other peer
+# returns ServiceUnknown; RequestName for any other name is refused.
+#
+# Pulled in only by tonearmd.service's Wants= (no [Install] section), and
+# PartOf= it, so stopping or restarting the daemon does the same to the
+# proxy. The daemon's sandbox bind-mounts this unit's RuntimeDirectory, which
+# is recreated on every proxy start, so the two must restart together: restart
+# tonearmd.service, not this unit alone, which leaves MPRIS down until the
+# daemon restarts (docs/FOLLOWUPS.md item 20).
+PartOf=tonearmd.service
+After=dbus.socket
+# Shipped by the xdg-dbus-proxy package (a dependency of webkit2gtk-4.1 on a
+# stock Omarchy install, but not guaranteed). Without it the unit is skipped,
+# tonearmd still starts, and only media keys are unavailable; setup.sh and
+# `setup.sh --check` say so.
+ConditionFileIsExecutable=/usr/bin/xdg-dbus-proxy
+
+[Service]
+# exec, not simple: tonearmd is ordered After= this unit and bind-mounts its
+# RuntimeDirectory optionally. `simple` would release that ordering at fork,
+# before the directory is guaranteed to exist, and the bind would be skipped.
+Type=exec
+# %t/bus is the session bus that systemd's own dbus.socket listens on.
+# Spelled out rather than read from $DBUS_SESSION_BUS_ADDRESS so the upstream
+# is fixed in this file and visible to review.
+ExecStart=/usr/bin/xdg-dbus-proxy unix:path=%t/bus %t/tonearm-bus/bus --filter --own=org.mpris.MediaPlayer2.tonearm
+RuntimeDirectory=tonearm-bus
+RuntimeDirectoryMode=0700
+
+# --- sandbox ------------------------------------------------------------
+#
+# The proxy needs two unix sockets: the session bus to connect to and its own
+# to listen on. Nothing else. Same directives as tonearmd.service where they
+# apply, plus no network at all.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+# The upstream bus socket. Its RuntimeDirectory is made writable by systemd.
+BindReadOnlyPaths=%t/bus
+TasksMax=16
+MemoryMax=64M
+MemoryDenyWriteExecute=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077

@@ -117,6 +117,7 @@ validate` exiting 0 is not the bar.
 | **`PropertiesChanged` must be emitted for the `Can*` properties**, not only `PlaybackStatus` and `Metadata`. | omarchy's media-key handler returns "unhandled" if `CanPlay`/`CanPause`/`CanGoNext`/`CanGoPrevious` never change — the keys silently do nothing even though the player is on the bus. Also: consumers query `DesktopEntry` within seconds of the name appearing, and omarchy calls `Play`/`Pause` individually against `PlaybackStatus` rather than `PlayPause`. |
 | **MPRIS `xesam:artist` is `as`.** | A bare string makes strict clients drop the whole metadata dict. |
 | **MPRIS `mpris:trackid` must be a valid object path.** | Roon's image keys contain hyphens; unsanitized, some clients drop off the bus. |
+| **The daemon's sandbox hides the session bus — on purpose.** | `ProtectHome=tmpfs` (0.14.0) also covers `/run/user/$UID`, so `MessageBus().connect()` found no socket, the daemon logged "MPRIS unavailable" and media keys were dead from 0.14.0 to 0.14.3 while `setup.sh --check` said "healthy". Do **not** fix that by binding `%t/bus`: the full session bus includes `org.freedesktop.systemd1`, whose `StartTransientUnit` escapes every sandbox directive. `tonearmd-bus.service` runs `xdg-dbus-proxy --filter --own=org.mpris.MediaPlayer2.tonearm` and the daemon binds only that socket's directory. If MPRIS ever needs another bus permission, add the narrowest `--call`/`--talk` rule to the proxy, not a bind to the daemon; `test_session_bus_proxy.py` will make you justify it. |
 
 ### QML / Service / Process
 
@@ -196,8 +197,8 @@ What actually verifies a QML change in this repo:
 ./bin/dev deploy               # deploy only; never touches the running shell
 ./bin/dev status               # what is deployed, registered, enabled
 ./bin/dev-watch                 # redeploy on change
-setup.sh                       # install the systemd unit for the INSTALLED copy, enable it now
-setup.sh --check               # health check: service active? socket answering? paired?
+setup.sh                       # install both systemd units for the INSTALLED copy, enable, restart
+setup.sh --check               # health check: service active? socket answering? paired? MPRIS registered?
 omarchy plugin validate .      # manifest gate -- NOT a QML gate, see above. Capture $? directly.
 ```
 

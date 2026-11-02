@@ -60,13 +60,32 @@ directories is modified.
 There is no `sudo` and no `pkexec` anywhere in the repository — code, scripts
 or documentation. `setup.sh` uses `systemctl --user` and writes only under
 `~/.config/systemd/user/`, refusing to install through a symlink, over a
-non-regular file, or over a regular file that is not tonearm's own unit.
+non-regular file, or over a regular file that is not tonearm's own unit. It
+installs two units, `tonearmd.service` and `tonearmd-bus.service`, and
+vets both paths before writing either.
 
-The unit runs under `ProtectSystem=strict` and `ProtectHome=read-only` with
-a single `ReadWritePaths`, `NoNewPrivileges`, `ProtectProc=invisible`, a
-syscall filter and a restricted address-family set. `AF_NETLINK` is required
-and documented in the unit: `if_nameindex(3)` needs it, and without it
-discovery silently finds nothing.
+`tonearmd.service` runs under `ProtectSystem=strict` and `ProtectHome=tmpfs`
+with three binds (its own plugin directory read-only, `~/.config/tonearm`,
+and the proxy directory below, read-only), `NoNewPrivileges`,
+`ProtectProc=invisible`, `MemoryDenyWriteExecute`, a syscall filter and a
+restricted address-family set. `AF_NETLINK` is required and documented in
+the unit: `if_nameindex(3)` needs it, and without it discovery silently
+finds nothing.
+
+The daemon never sees the session bus. `ProtectHome=tmpfs` hides
+`/run/user/$UID`, and `%t/bus` is deliberately not bound back in: that would
+give a process parsing untrusted LAN bytes `org.freedesktop.systemd1`, whose
+`StartTransientUnit` runs anything outside the sandbox. MPRIS goes through
+`tonearmd-bus.service` instead — `xdg-dbus-proxy --filter
+--own=org.mpris.MediaPlayer2.tonearm`, with no `--talk`, `--see`, `--call` or
+`--broadcast` rule — whose socket is the only thing under `%t` the daemon
+can reach besides its own runtime directory. On that socket the daemon can
+own its MPRIS name, answer calls made to it and emit its own signals;
+calling any other peer returns `ServiceUnknown` and requesting any other
+name is refused. The proxy unit is itself sandboxed (`PrivateNetwork`,
+`AF_UNIX` only, `ProtectHome=tmpfs` with only `%t/bus` bound) and has no
+`[Install]` section: it runs only as a dependency of the daemon.
+`tests/python/test_session_bus_proxy.py` pins the policy and the plumbing.
 
 ## What the shared shell process consumes
 
@@ -100,7 +119,11 @@ reader is `ColorQuantizer`, which exposes none.
 ## Dependencies
 
 Two Arch packages the user installs themselves, `python-dbus-next` and
-`python-websocket-client`; neither is bundled. `scripts/vendor/roonapi/` is
+`python-websocket-client`; neither is bundled. Media keys also need
+`xdg-dbus-proxy` (already present on a stock Omarchy install as a dependency
+of `webkit2gtk-4.1`); without it the proxy unit is skipped by its
+`ConditionFileIsExecutable`, the daemon runs without MPRIS, and `setup.sh`
+and `setup.sh --check` say so. `scripts/vendor/roonapi/` is
 a vendored, unmodified copy of `roonapi` 0.1.6 (Apache-2.0) with its licence
 retained in place and the reason for vendoring in `scripts/vendor/README.md`.
 tonearm's own code is MIT; `LICENSE` carries the dependency breakdown below

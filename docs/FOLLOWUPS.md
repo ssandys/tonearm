@@ -160,6 +160,23 @@ are taken by the shell before the widget sees them, and every other printable
 key opens search. Neither half is hard; together they are their own piece of
 work rather than a line in the transfer change.
 
+## 20. Restarting the bus proxy on its own drops MPRIS until tonearmd restarts
+
+`tonearmd.service` bind-mounts `%t/tonearm-bus`, and `tonearmd-bus.service`
+recreates that directory (new inode) on every start, so after
+`systemctl --user restart tonearmd-bus` -- or an xdg-dbus-proxy crash -- the
+daemon's sandbox still holds the old, deleted directory and its bus
+connection is gone. Measured 2026-11-01: the name drops off the bus and stays
+off; `setup.sh --check` reports "not registered"; re-running `setup.sh` (or
+`systemctl --user restart tonearmd`) recovers. The other direction is fine:
+the proxy is `PartOf=tonearmd.service`, so restarting the daemon restarts both.
+
+Not done in 0.14.3 because each fix widens a security-reviewed patch:
+`PartOf=tonearmd-bus.service` on the daemon would let stopping the proxy take
+the widget down, and a daemon-side fix needs `wait_for_disconnect()`, a
+reconnect loop that re-exports and re-requests the name, and
+`RuntimeDirectoryPreserve=` on the proxy so the bound directory survives.
+
 ## Closed
 
 Recorded so they are not re-opened.

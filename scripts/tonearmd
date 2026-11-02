@@ -116,16 +116,26 @@ def main() -> int:
     raw_session.start()
 
     async def boot():
-        # The import lives inside this try too: MPRIS is not load-bearing,
+        # The import is guarded as well: MPRIS is not load-bearing,
         # so even a broken/missing dbus_next must not take the daemon down --
         # only bus-unavailable or registration failures are expected in
         # practice, but nothing here should be allowed to escape.
         try:
-            from tonearm_lib.mpris import MprisAdapter
+            from tonearm_lib.mpris import BusUnavailable, MprisAdapter
+        except Exception:
+            logging.getLogger("tonearmd").exception(
+                "MPRIS unavailable; continuing without media keys")
+            return
+        try:
             adapter = MprisAdapter(session)
             await adapter.start()
             holder["mpris"] = adapter
             adapter.update(session.snapshot())
+        except BusUnavailable as exc:
+            # Expected when xdg-dbus-proxy is not installed: one clear line,
+            # no traceback.
+            logging.getLogger("tonearmd").warning(
+                "MPRIS unavailable: %s; continuing without media keys", exc)
         except Exception:
             # Not load-bearing: the widget works without media keys.
             logging.getLogger("tonearmd").exception(
