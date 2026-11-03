@@ -27,6 +27,12 @@ class RoonApiWebSocket(
         """Return the result of the previous request."""
         return self._results
 
+    # LOCAL PATCH (tonearm #47): synchronize waiter cleanup with reply admission.
+    def remove_result(self, request_id):
+        """Forget a completed or timed-out request without admitting a late reply."""
+        with self._request_lock:
+            self._results.pop(request_id, None)
+
     def register_connected_callback(self, callback):
         """To be called on connection."""
         self._connected_callback = callback

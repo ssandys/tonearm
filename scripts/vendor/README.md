@@ -77,6 +77,10 @@ replies instead of growing `_results`, and actually unsubscribes before stop clo
 the socket. Callbacks and socket sends run outside the lock. Existing subscribe
 callbacks receive only the body, and subscribe still returns None.
 
+`RoonApi._request` removes completed or timed-out results through the socket's
+locked `remove_result` helper. Cleanup and reply admission share the same lock,
+so an admitted late reply cannot reinsert a result after its waiter removes it.
+
 Regression pins: `test_vendor_patches.py` and `test_vendor_subscription_lifecycle.py`.
 On vendor refresh, reapply or deliberately retire this patch after these tests
 and the full suite. This PR adds no `subscribe_queue`/`subscribe_owned_queue` or

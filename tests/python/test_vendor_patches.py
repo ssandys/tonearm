@@ -164,16 +164,13 @@ class TestNoSoodImplementation(unittest.TestCase):
         self.assertFalse(hasattr(constants, "SOOD_MULTICAST_IP"))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestSubscriptionHardeningSurvivesVendorRefresh(unittest.TestCase):
     def test_touched_socket_methods_keep_numbered_patch_markers(self):
         from roonapi import roonapisocket
         source = inspect.getsource(roonapisocket)
         for method in ("__init__", "stop", "subscribe", "unsubscribe", "on_message",
-                       "on_close", "send_request", "_cancel_entry", "_send_allocated"):
+                       "on_close", "send_request", "_cancel_entry", "_send_allocated",
+                       "remove_result"):
             with self.subTest(method=method):
                 self.assertRegex(source, r"# LOCAL PATCH \(tonearm #47\):[^\n]*\n    def " + method + r"\(")
 
@@ -186,3 +183,7 @@ class TestSubscriptionHardeningSurvivesVendorRefresh(unittest.TestCase):
             sock.on_message(None, ('MOO/1 CONTINUE Changed\nRequest-Id: %s\n'
                                   'Content-Type: application/json\n\n{"synthetic": true}' % request_id).encode())
         self.assertEqual(sock.results, {})
+
+
+if __name__ == "__main__":
+    unittest.main()

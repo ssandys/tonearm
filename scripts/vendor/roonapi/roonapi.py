@@ -1004,6 +1004,7 @@ class RoonApi:  # pylint: disable=too-many-instance-attributes, too-many-lines
             self._zone_list_generation = getattr(self, "_zone_list_generation", 0) + 1
         return zones
 
+    # LOCAL PATCH (tonearm #47): remove completed/expired results under the socket lock.
     def _request(self, command, data=None):
         """Send command and wait for result."""
         LOGGER.debug("_request: command: %s", command)
@@ -1033,10 +1034,7 @@ class RoonApi:  # pylint: disable=too-many-instance-attributes, too-many-lines
             retries -= 1
 
             time.sleep(0.05)
-        try:
-            del self._roonsocket.results[request_id]
-        except KeyError:
-            pass
+        self._roonsocket.remove_result(request_id)
         return result
 
     def _socket_watcher(self):

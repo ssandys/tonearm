@@ -1,6 +1,7 @@
 """General vendor lifecycle regressions: fake websocket, no owned queue APIs."""
 import json
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import unittest
@@ -40,6 +41,81 @@ def frame(sock, request_id, body, name='Changed'):
 
 
 class SubscriptionLifecycleTests(unittest.TestCase):
+    def test_timeout_cleanup_cannot_race_admitted_reply_and_reinsert_result(self):
+        sock = socket()
+        api = RoonApi.__new__(RoonApi)
+        api._roonsocket = sock
+        polling = threading.Event()
+        finish_polling = threading.Event()
+        admitted = threading.Event()
+        finish_reply = threading.Event()
+        cleanup_attempted = threading.Event()
+        waiter = []
+        lock = sock._request_lock
+
+        class ObservedLock:
+            def __enter__(self):
+                if admitted.is_set() and threading.get_ident() == waiter[0]:
+                    cleanup_attempted.set()
+                lock.acquire()
+
+            def __exit__(self, *args):
+                lock.release()
+
+        class PausedReplyResults(dict):
+            def __contains__(self, key):
+                present = super().__contains__(key)
+                admitted.set()
+                if not finish_reply.wait(3):
+                    raise AssertionError('reply was not released')
+                return present
+
+            def __delitem__(self, key):
+                # Observe the old unlocked cleanup too, so it fails on the
+                # leaked entry rather than on a coordination timeout.
+                super().__delitem__(key)
+                cleanup_attempted.set()
+
+        sock._request_lock = ObservedLock()
+        sock._results = PausedReplyResults()
+
+        def poll(_seconds):
+            polling.set()
+            self.assertTrue(finish_polling.wait(3))
+
+        def request():
+            waiter.append(threading.get_ident())
+            return api._request('synthetic/read')
+
+        with patch('roonapi.roonapi.time.sleep', side_effect=poll):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                pending = pool.submit(request)
+                reply = None
+                try:
+                    self.assertTrue(polling.wait(3))
+                    reply = pool.submit(frame, sock, 10, {'late': True})
+                    self.assertTrue(admitted.wait(3))
+                    finish_polling.set()
+                    self.assertTrue(cleanup_attempted.wait(3))
+                finally:
+                    finish_polling.set()
+                    finish_reply.set()
+                self.assertIsNone(pending.result(timeout=3))
+                if reply is not None:
+                    reply.result(timeout=3)
+        self.assertEqual(sock.results, {})
+
+    def test_completed_request_removes_result_and_drops_late_reply(self):
+        sock = socket()
+        api = RoonApi.__new__(RoonApi)
+        api._roonsocket = sock
+        with patch('roonapi.roonapi.time.sleep',
+                   side_effect=lambda _: frame(sock, 10, {'received': True})):
+            self.assertEqual(api._request('synthetic/read'), {'received': True})
+        self.assertEqual(sock.results, {})
+        frame(sock, 10, {'late': True})
+        self.assertEqual(sock.results, {})
+
     def test_register_before_synchronous_initial_reply_and_preserve_none_return(self):
         sock = socket()
         seen = []
