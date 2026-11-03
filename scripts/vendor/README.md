@@ -70,12 +70,15 @@ vendor; `test_vendor_patches.py` and `test_selection_identity.py` cover it.
 
 ### General subscription hardening ([#47](https://github.com/ssandys/tonearm/pull/47))
 
-`roonapisocket.py` uses a per-instance bookkeeping lock for ID allocation and
+`roonapisocket.py` uses a per-instance non-reentrant lock for ID allocation and
 subscription/result maps. It registers routing before sending, refuses to register
 when disconnected, invalidates routing before unsubscribe, drops unknown/late
 replies instead of growing `_results`, and actually unsubscribes before stop closes
 the socket. Callbacks and socket sends run outside the lock. Existing subscribe
 callbacks receive only the body, and subscribe still returns None.
+
+Malformed-message error logs omit the message body so private response contents
+are not included in parse-error diagnostics.
 
 `RoonApi._request` removes completed or timed-out results through the socket's
 locked `remove_result` helper. Cleanup and reply admission share the same lock,

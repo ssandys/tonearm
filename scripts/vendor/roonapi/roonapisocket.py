@@ -80,7 +80,7 @@ class RoonApiWebSocket(
         """Create the websocket connection to the roon server."""
 
         self._socket = None
-        self._request_lock = threading.RLock()
+        self._request_lock = threading.Lock()
         self._results = {}
         self._requestid = 10  # initial request_id of 10 to prevent confusion with the requests that are sent by the server at initialization
         self._subkey = 0
