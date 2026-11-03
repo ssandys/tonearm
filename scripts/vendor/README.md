@@ -45,13 +45,8 @@ response instead of the ordinary 2.5 s. No request is resent; load, transport
 and input-free browse budgets are unchanged. `test_search_reply_budget.py`
 covers delayed completion, bounded timeout, cleanup and unchanged ordinary calls.
 
-Controlled live-Core validation on 2026-10-30 used this same vendor change:
-four searches succeeded in 4.12, 4.18, 5.33 and 4.27 s, each returning six rows
-and the expected match. The user also confirmed results in the popup. Before
-the change, the reported failing search returned no response at about 2.77 s;
-Library navigation took 0.27 s. These are whole-search timings, not traces of
-each underlying SDK request. No claim of a general socket ownership or
-subscriber fanout fix is made. The 22.5 s worst-case search walk remains inside
+No claim of a general socket ownership or subscriber fanout fix is made.
+The 22.5 s worst-case search walk remains inside
 the CLI's 25 s browse reply timeout; keep them in step when changing the walk.
 
 `roonapi/roonapi.py`, `_on_state_change` ([#13](https://github.com/ssandys/tonearm/issues/13)):
