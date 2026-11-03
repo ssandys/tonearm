@@ -4,6 +4,36 @@ Notable changes to tonearm. Versions follow [semantic versioning](https://semver
 while the major version is 0, the minor version carries changes that would
 otherwise be breaking.
 
+## 0.14.4 — 2026-11-03
+
+### Fixed
+
+- **Searches that take a few seconds now return results.** Roon can take
+  longer than the usual 2.5-second reply window to answer a search, and when
+  it did the popup showed nothing. A search request now waits up to 10 seconds
+  for its one reply, and is never resent. All other requests keep the usual
+  window, and the whole search still fits inside `tonearmctl`'s 25-second
+  browse limit. (#49)
+
+- **More robust Roon connection bookkeeping.** A subscription's first reply is
+  no longer missed if it arrives right away. Replies that come in after their
+  request gave up are thrown away instead of piling up. Stopping a
+  subscription always unsubscribes, even when cancelling fails. Error logs for
+  malformed messages leave out the message body. (#47)
+
+### Added
+
+- **A missing pinned output is reported as unavailable, not idle.** The state
+  now carries `selection: {mode, zone_id, availability}`, so the widget can
+  tell "your pinned output is gone" apart from "nothing is playing". Existing
+  fields keep their shape, and an output is only reported missing after a full
+  zone list has loaded. (#45)
+
+### Internal
+
+- Artwork test fixtures wait for in-flight fetches before cleaning up, which
+  removes a source of flaky tests. (#50, #51)
+
 ## 0.14.3 — 2026-11-01
 
 ### Fixed
