@@ -17,6 +17,8 @@ class SearchReplyBudgetTests(unittest.TestCase):
                 self.sent += 1
                 self.results[17] = None
                 return 17
+            def remove_result(self, request_id):
+                self.results.pop(request_id, None)
         sock = Socket()
         api = roonapi.RoonApi.__new__(roonapi.RoonApi)
         api._roonsocket = sock
