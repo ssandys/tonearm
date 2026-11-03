@@ -921,7 +921,7 @@ class RoonApi:  # pylint: disable=too-many-instance-attributes, too-many-lines
                     for gone in [z for z in self._zones if z not in changed_ids]:
                         del self._zones[gone]
                         changed_ids.append(gone)
-                    # LOCAL PATCH (tonearm selection identity): a full zone
+                    # LOCAL PATCH (tonearm #45): a full zone
                     # subscription, including an empty one, is authoritative.
                     self._zone_list_generation = getattr(self, "_zone_list_generation", 0) + 1
                 event = (
@@ -1000,10 +1000,11 @@ class RoonApi:  # pylint: disable=too-many-instance-attributes, too-many-lines
         if data and "zones" in data:
             for zone in data["zones"]:
                 zones[zone["zone_id"]] = zone
-            # A successful initial list is authoritative even when empty.
+            # LOCAL PATCH (tonearm #45): a successful initial list is authoritative even when empty.
             self._zone_list_generation = getattr(self, "_zone_list_generation", 0) + 1
         return zones
 
+    # LOCAL PATCH (tonearm #47): remove completed/expired results under the socket lock.
     def _request(self, command, data=None):
         """Send command and wait for result."""
         LOGGER.debug("_request: command: %s", command)
@@ -1033,10 +1034,7 @@ class RoonApi:  # pylint: disable=too-many-instance-attributes, too-many-lines
             retries -= 1
 
             time.sleep(0.05)
-        try:
-            del self._roonsocket.results[request_id]
-        except KeyError:
-            pass
+        self._roonsocket.remove_result(request_id)
         return result
 
     def _socket_watcher(self):

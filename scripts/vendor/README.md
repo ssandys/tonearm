@@ -67,3 +67,34 @@ vendor; `test_vendor_patches.py` and `test_selection_identity.py` cover it.
   `SOOD\x02` datagram, and `_parse_property` misaligns on multi-byte UTF-8.
   `TestNoSoodImplementation` in `tests/python/test_vendor_patches.py` asserts
   they stay removed after a vendor refresh.
+
+### General subscription hardening ([#47](https://github.com/ssandys/tonearm/pull/47))
+
+`roonapisocket.py` uses a per-instance non-reentrant lock for ID allocation and
+subscription/result maps. It registers routing before sending, refuses to register
+when disconnected, invalidates routing before unsubscribe, drops unknown/late
+replies instead of growing `_results`, and actually unsubscribes before stop closes
+the socket. Callbacks and socket sends run outside the lock. Existing subscribe
+callbacks receive only the body, and subscribe still returns None.
+
+Malformed-message error logs omit the message body so private response contents
+are not included in parse-error diagnostics.
+
+`RoonApi._request` removes completed or timed-out results through the socket's
+locked `remove_result` helper. Cleanup and reply admission share the same lock,
+so an admitted late reply cannot reinsert a result after its waiter removes it.
+
+Regression pins: `test_vendor_patches.py` and `test_vendor_subscription_lifecycle.py`.
+On vendor refresh, reapply or deliberately retire this patch after these tests
+and the full suite. This PR adds no `subscribe_queue`/`subscribe_owned_queue` or
+owned cancellation API; those unused APIs are deferred to a queue-consumer PR.
+
+`max_item_count` in an optional subscription payload is only a server-side
+request. The vendor does not locally enforce it or bound the incoming body.
+A queue consumer must independently cap item counts, field sizes, encoded bytes
+and cache size; it must not trust the requested server limit as a safety bound.
+The generic callback remains body-only and does not validate live queue schemas.
+
+This is not a complete ordinary-request socket-ownership (#30) or synchronous
+fanout (#38) fix. An already admitted callback may finish after unsubscribe;
+callers must reject stale state. No remote cancellation acknowledgment is claimed.

@@ -164,5 +164,26 @@ class TestNoSoodImplementation(unittest.TestCase):
         self.assertFalse(hasattr(constants, "SOOD_MULTICAST_IP"))
 
 
+class TestSubscriptionHardeningSurvivesVendorRefresh(unittest.TestCase):
+    def test_touched_socket_methods_keep_numbered_patch_markers(self):
+        from roonapi import roonapisocket
+        source = inspect.getsource(roonapisocket)
+        for method in ("__init__", "stop", "subscribe", "unsubscribe", "on_message",
+                       "on_close", "send_request", "_cancel_entry", "_send_allocated",
+                       "remove_result"):
+            with self.subTest(method=method):
+                self.assertRegex(source, r"# LOCAL PATCH \(tonearm #47\):[^\n]*\n    def " + method + r"\(")
+
+    def test_unrequested_replies_cannot_grow_results(self):
+        from unittest.mock import patch
+        from roonapi.roonapisocket import RoonApiWebSocket
+        with patch('roonapi.roonapisocket.websocket.WebSocketApp'):
+            sock = RoonApiWebSocket('ws://synthetic.invalid')
+        for request_id in range(20):
+            sock.on_message(None, ('MOO/1 CONTINUE Changed\nRequest-Id: %s\n'
+                                  'Content-Type: application/json\n\n{"synthetic": true}' % request_id).encode())
+        self.assertEqual(sock.results, {})
+
+
 if __name__ == "__main__":
     unittest.main()
