@@ -162,6 +162,14 @@ class ArtServerTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
+    def finish_fetch(self, cache):
+        # An unsafe cached file starts a replacement fetch. Join its trailing
+        # write/prune before the fixture removes the temporary directory.
+        worker = cache._last_thread
+        if worker is not None:
+            worker.join(art.FETCH_TIMEOUT + 1)
+            self.assertFalse(worker.is_alive(), "fetch outlived fixture cleanup")
+
 
 class TestFetch(ArtServerTestCase):
     def test_fetches_bytes_to_the_destination_path(self):
@@ -566,7 +574,9 @@ class TestImageDimensions(unittest.TestCase):
 
 class TestOnlyAnImageIsPublished(ArtServerTestCase):
     def cache(self):
-        return art.Cache(self.tmp.name)
+        cache = art.Cache(self.tmp.name)
+        self.addCleanup(self.finish_fetch, cache)
+        return cache
 
     def _plant(self, cache, data):
         dest = art.path_for(cache._dir, "k")
@@ -686,16 +696,7 @@ class TestOnlyASafeFileIsPublished(ArtServerTestCase):
 
     def cache(self):
         cache = art.Cache(self.tmp.name)
-
-        def finish_fetch():
-            # An unsafe cached file starts a replacement fetch. Join its
-            # trailing write/prune before ArtServerTestCase removes the tree.
-            worker = cache._last_thread
-            if worker is not None:
-                worker.join(art.FETCH_TIMEOUT + 1)
-                self.assertFalse(worker.is_alive(), "fetch outlived fixture cleanup")
-
-        self.addCleanup(finish_fetch)
+        self.addCleanup(self.finish_fetch, cache)
         return cache
 
     def test_a_real_cached_file_is_published(self):
