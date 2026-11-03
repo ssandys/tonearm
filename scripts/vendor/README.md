@@ -39,6 +39,16 @@ change roonapi's public callback signature or zone dictionary; it only exposes
 the full-list boundary to the daemon. Keep this marker when refreshing the
 vendor; `test_vendor_patches.py` and `test_selection_identity.py` cover it.
 
+`roonapi/roonapi.py`, search-input response budget ([#49](https://github.com/ssandys/tonearm/pull/49)):
+browse requests carrying nonempty string input wait up to 10 s for their single
+response instead of the ordinary 2.5 s. No request is resent; load, transport
+and input-free browse budgets are unchanged. `test_search_reply_budget.py`
+covers delayed completion, bounded timeout, cleanup and unchanged ordinary calls.
+
+No claim of a general socket ownership or subscriber fanout fix is made.
+The 22.5 s worst-case search walk remains inside
+the CLI's 25 s browse reply timeout; keep them in step when changing the walk.
+
 `roonapi/roonapi.py`, `_on_state_change` ([#13](https://github.com/ssandys/tonearm/issues/13)):
 
 - The `zones` and `outputs` subscription payloads are FULL snapshots, but

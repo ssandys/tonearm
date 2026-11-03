@@ -35,6 +35,8 @@ CONNECT_TIMEOUT = 5.0
 # unwind -- roughly ten round-trips, each of which roonapi itself allows ~2.5s.
 # One shared number would either cut a legitimate search short or leave the
 # health probe hanging for twenty seconds.
+# Search input may wait 10 s plus five ordinary 2.5 s requests: 22.5 s
+# worst case inside this 25 s browse budget. Recheck both when changing the walk.
 REPLY_TIMEOUTS = {"status": 5.0, "browse": 25.0}
 DEFAULT_REPLY_TIMEOUT = 5.0
 
