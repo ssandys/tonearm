@@ -21,6 +21,10 @@ def fake_api(playing=None):
               "state": "playing" if playing == zid else "paused"}
         for zid, name in ((KITCHEN, "Kitchen"), (DEN, "Den"))
     }
+    # These zones are loaded, so the listing is authoritative; a
+    # generationless fake reads as a stale one and the daemon refuses to
+    # resolve a room from it.
+    api._zone_list_generation = 1
     return api
 
 

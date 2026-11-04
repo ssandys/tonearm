@@ -153,7 +153,74 @@ Item {
   // Variadic ahead of need: Task 16's `zone pin <id>` must reach tonearmctl
   // as two argv entries, not one joined string, so arg2 is accepted now
   // rather than widening this signature later.
+
+  // -- targeted player feedback --------------------------------------------
+  // One banner shared by every surface (the singleton is shared deliberately;
+  // per-surface feedback would need per-surface state this file does not
+  // hold). Cleared on the next player send and whenever the selected
+  // zone/state identity changes -- a result about a room or selection the
+  // user has left is not feedback, it is noise.
+  property string playerError: ""
+  property string playerErrorKey: ""
+  property int playerSequence: 0
+  // The request id the newest player send claimed. Every player send claims
+  // it -- targeted, legacy, or a click the route rejected -- so a late reply
+  // for an older click can never overwrite the result of a newer one.
+  property string latestPlayerRequest: ""
+
+  onStateChanged: {
+    var key = Model.playerContext(root.state)
+    if (key !== root.playerErrorKey) {
+      root.playerErrorKey = key
+      root.playerError = ""
+      // The pending id is keyed to the same identity: a reply arriving after
+      // the change is late by definition and must be ignored.
+      root.latestPlayerRequest = ""
+    }
+  }
+
   function send(verb, arg, arg2) {
+    if (Model.isPlayerVerb(verb)) {
+      // The whole decision -- route AND captured request/argv -- comes from
+      // one pure Model call made synchronously HERE, before any process
+      // spawns, so a state push cannot change the route mid-dispatch. Each
+      // branch below returns: exactly one dispatch unit per click, and no
+      // fallback between them.
+      var rid = "player-" + Date.now().toString(36) + "-" + (++root.playerSequence)
+      root.latestPlayerRequest = rid
+      root.playerErrorKey = Model.playerContext(root.state)
+      root.playerError = ""
+      var plan = Model.playerRoute(root.state, verb, arg, rid)
+      if (plan.route === "targeted") {
+        var proc = rpcComponent.createObject(root, {
+          command: [root.ctlPath, "player", JSON.stringify(plan.request)],
+          callback: function (reply) {
+            // null feedback means the reply is foreign, superseded, or about
+            // another room: ignored entirely rather than rendered as a result.
+            var text = Model.playerFeedback(root.latestPlayerRequest, plan.request, root.state, reply)
+            if (text !== null) root.playerError = text
+          }
+        })
+        // A failed spawn is an UNCERTAIN dispatch: report unknown and stop.
+        // Never fall through to a legacy command here -- that would be a
+        // second action for one click.
+        if (proc === null) {
+          root.playerError = Model.PLAYER_UNKNOWN
+          return
+        }
+        proc.running = true
+        return
+      }
+      if (plan.route === "legacy") {
+        // The plain-verb CLI every daemon back to 092e950 accepts, argv built
+        // by Model exactly as upstream send() always has. Fire-and-forget by
+        // design: it claims no result, and nothing here invents one.
+        Quickshell.execDetached([root.ctlPath].concat(plan.argv))
+        return
+      }
+      root.playerError = plan.reason
+      return
+    }
     var argv = [root.ctlPath, verb]
     if (arg !== undefined && arg !== null) argv.push(String(arg))
     if (arg2 !== undefined && arg2 !== null) argv.push(String(arg2))

@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vendor"))
 
 from roonapi import RoonApi              # noqa: E402  (vendored, path-inserted)
 
-from . import browse, config, net, server, sood, state, zones  # noqa: E402
+from . import browse, config, net, server, sood, state, zones, player  # noqa: E402
 
 LOG = logging.getLogger("tonearmd.core")
 
@@ -534,6 +534,31 @@ class RoonSession:
     def status(self) -> str:
         return self._status
 
+    def _zones_ready(self) -> bool:
+        """Whether the zone listing is fresh enough to act on.
+
+        roonapi keeps the previous session's zone map while its replacement
+        socket is up but has not yet delivered a new full listing, and
+        `_check_connection` raises `_required_zone_generation` whenever the
+        link is judged down so the next listing has to be a NEW one. A
+        generation below the requirement therefore means "we do not know what
+        the rooms are", not "the rooms are the old ones".
+
+        Fail-closed on a missing marker: `getattr(..., 0)`, never 1. A
+        generationless double would otherwise be treated as authoritative and
+        the readiness gate would be decoration -- which is exactly the
+        mistake this default exists to prevent.
+
+        This gates the COMMAND path as well as the snapshot. The snapshot
+        withheld a cached room, but a command still resolved one through
+        `_zones()`, so a daemon could be told "ok" while a click played into
+        a room from the previous session.
+        """
+        if not self._api:
+            return False
+        generation = getattr(self._api, "_zone_list_generation", 0)
+        return generation >= self._required_zone_generation
+
     def snapshot(self) -> dict:
         core = None
         if self._cfg.get("host"):
@@ -550,8 +575,7 @@ class RoonSession:
                                selection=state.selection(self._arbiter.pinned_id,
                                                          None, [], False))
         # Unknown API objects cannot establish an authoritative listing.
-        generation = getattr(self._api, "_zone_list_generation", 0) if self._api else 0
-        authoritative = generation >= self._required_zone_generation
+        authoritative = self._zones_ready()
         # roonapi can retain last session's map while its replacement socket
         # is up but has not delivered the new full listing. Do not feed that
         # map into the arbiter or publish it as a current playable zone.
@@ -561,7 +585,14 @@ class RoonSession:
                                                      selected, listing, authoritative))
 
     def _zones(self):
-        if not self._api:
+        # A cached listing is not a listing. roonapi keeps the previous
+        # session's zone map while its replacement socket is up but has not
+        # delivered a new full one, so reading it here would let a command
+        # target a room that is no longer there -- or, worse, one that now
+        # belongs to a different Core. The arbiter must not observe a stale
+        # map either: that re-stamps play transitions from a session that is
+        # already over, and the auto-follow picks its winner from them.
+        if not self._zones_ready():
             return [], None
         raw = self._raw_zones()
         listing = [z for z in (state.normalize_zone(r) for r in raw) if z]
@@ -1093,6 +1124,117 @@ class RoonSession:
         with self._lock:
             self._command_locked(verb, arg)
 
+    def player_targeted(self, zone_id, verb, arg=None, output_id=None,
+                        output_ids=None) -> dict:
+        """One normal-player control, aimed at the room the caller saw.
+
+        Returns {"outcome": ..., "error": ...}; the vocabulary is
+        player.py's, and the server turns it into the reply line.
+
+        The rules, all of them refusals BEFORE any SDK call:
+
+          disconnected            no live Core
+          zones_unknown           the zone list is not authoritative yet
+          unavailable             the captured room is gone from that list
+          selection_changed       the captured room is not the followed one
+          capability_unavailable  the room does not support this control
+          out_of_range            the argument is outside the room's bounds
+          output_changed          the captured outputs are not the room's
+
+        No retargeting: the captured zone id is the target, and a room that
+        is no longer followed is refused rather than swapped for the one
+        that is. No retry, no undo, no fallback -- an uncertain outcome is
+        reported as uncertain and left there.
+
+        "attempted" means the SDK call RETURNED. It does not mean the Core
+        accepted the command: the vendored API answers None when the Core
+        does not reply inside its own budget, and returns None after
+        swallowing a send failure. A None answer is therefore reported as
+        unknown -- an unproven attempt is not an attempt.
+
+        The lock excludes other local commands and pinning, not the Core's
+        own changes: a group mute may complete for some outputs and not
+        others, and that is reported as unknown rather than tidied up.
+        """
+        if (not player.identity(zone_id) or not isinstance(verb, str)
+                or not player.valid_arguments(verb, arg, output_id, output_ids)):
+            return {"outcome": "refused", "error": "bad_request"}
+        with self._lock:
+            api = self._api
+            if not api or self._status != "ok":
+                return {"outcome": "refused", "error": "disconnected"}
+            # The socket has to be there AND up, exactly as the status poll
+            # decides it (`_check_connection`). A missing socket used to
+            # default to "connected", so a session whose socket was not
+            # attached fell through to the SDK, waited out its own ~4s
+            # timeout, and reported the result as unknown -- with the
+            # session lock held for all of it.
+            sock = getattr(api, "_roonsocket", None)
+            if sock is None or not getattr(sock, "connected", False):
+                return {"outcome": "refused", "error": "disconnected"}
+            if not self._zones_ready():
+                return {"outcome": "refused", "error": "zones_unknown"}
+            listing, selected = self._zones()
+            raw = api.zones.get(zone_id) if isinstance(api.zones, dict) else None
+            if (not any(z.get("id") == zone_id for z in listing)
+                    or not isinstance(raw, dict)
+                    or raw.get("zone_id") != zone_id):
+                return {"outcome": "refused", "error": "unavailable"}
+            pinned = self._arbiter.pinned_id
+            if ((pinned is not None and pinned != zone_id)
+                    or not selected or selected.get("id") != zone_id):
+                return {"outcome": "refused", "error": "selection_changed"}
+
+            caps = player.controls(raw)
+            if verb == "seek":
+                if not caps["seek"]:
+                    return {"outcome": "refused", "error": "capability_unavailable"}
+                length = player.seek_length(raw)
+                if length is None or not 0 <= arg <= length:
+                    return {"outcome": "refused", "error": "out_of_range"}
+            elif verb == "volume":
+                if not caps["volume"]:
+                    return {"outcome": "refused", "error": "capability_unavailable"}
+                if output_id != caps["volume_output_id"]:
+                    return {"outcome": "refused", "error": "output_changed"}
+                bounds = player.volume_range(raw)
+                if bounds is None or not bounds[0] <= arg <= bounds[1]:
+                    return {"outcome": "refused", "error": "out_of_range"}
+            elif verb in ("mute", "unmute"):
+                if not caps["mute_output_ids"]:
+                    return {"outcome": "refused", "error": "capability_unavailable"}
+                if list(output_ids) != list(caps["mute_output_ids"]):
+                    return {"outcome": "refused", "error": "output_changed"}
+                output_ids = list(output_ids)
+
+            try:
+                if verb in player.TRANSPORT:
+                    reply = api.playback_control(zone_id, verb)
+                elif verb == "seek":
+                    reply = api.seek(zone_id, arg, "absolute")
+                elif verb == "volume":
+                    reply = api.change_volume_raw(output_id, arg, "absolute")
+                else:
+                    # A group mute is a bounded, sequential fan-out over the
+                    # captured ids. Any uncertainty stops it there: sending
+                    # the rest after a doubtful one would mute speakers the
+                    # user did not ask for, and there is no undo.
+                    reply = {}
+                    for output in output_ids:
+                        partial = api.mute(output, verb == "mute")
+                        if partial is None:
+                            reply = None
+                            break
+            except Exception:
+                LOG.warning("player dispatch failed; remote effect unknown")
+                return {"outcome": "unknown", "error": "dispatch_failed"}
+            if reply is None:
+                # The SDK gave no answer that proves an attempt was made.
+                LOG.warning("player dispatch did not prove an attempt;"
+                            " remote effect unknown")
+                return {"outcome": "unknown", "error": "dispatch_failed"}
+            return {"outcome": "attempted", "error": None}
+
     def _pin_locked(self, zone_id: str | None) -> None:
         """Follow `zone_id` (or resume auto-follow when None), and persist it.
 
@@ -1125,6 +1267,16 @@ class RoonSession:
 
         if not self._api or self._status != "ok":
             LOG.warning("dropping %s: not connected", verb)
+            return
+        # The listing has to be authoritative before a command may resolve a
+        # room through it. Without this, a reconnect left the daemon
+        # reporting "ok" while `_zones()` still handed out the previous
+        # session's rooms, and a click played into one of them. The pin verb
+        # above is deliberately NOT gated: remembering a room is allowed
+        # before the rooms are known.
+        if not self._zones_ready():
+            LOG.warning("dropping %s: the zone list is not authoritative yet",
+                        verb)
             return
         _, selected = self._zones()
         if not selected:
