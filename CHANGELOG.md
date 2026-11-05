@@ -4,6 +4,21 @@ Notable changes to tonearm. Versions follow [semantic versioning](https://semver
 while the major version is 0, the minor version carries changes that would
 otherwise be breaking.
 
+## 0.14.5 — 2026-11-05
+
+### Security
+
+- **PNG album art can no longer exhaust the shell's memory through its
+  metadata.** The daemon checked each cover's file size and pixel
+  dimensions, then saved the PNG unchanged. A PNG can carry compressed text
+  chunks, and Qt inflates those when it loads the image, so a few kilobytes
+  of text inside both limits could still expand to gigabytes in the shell. A
+  spoofed or malicious Core was enough. The daemon now rebuilds every PNG
+  from only the chunks needed to draw it, and refuses one that is malformed.
+  Before handing a cover to the shell it re-reads the whole file, and refuses
+  a PNG that has any other chunk in it. Covers look the same. Raised by the
+  marketplace security review.
+
 ## 0.14.4 — 2026-11-03
 
 ### Fixed
