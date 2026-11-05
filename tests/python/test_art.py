@@ -23,6 +23,7 @@ import time
 import unittest
 from unittest.mock import patch
 import unittest.mock
+import zlib
 
 sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "scripts")))
@@ -45,11 +46,34 @@ def jpeg_bytes(width=64, height=64):
             + b"\xff\xd9")                                   # EOI
 
 
-def png_bytes(width=64, height=64):
-    """A PNG signature plus the IHDR the daemon reads dimensions out of."""
+def png_chunk(kind, body):
+    return (struct.pack(">I", len(body)) + kind + body
+            + struct.pack(">I", zlib.crc32(kind + body)))
+
+
+def png_bytes(width=64, height=64, before_idat=(), after_idat=()):
+    """A complete, well-formed PNG: IHDR, IDAT, IEND, with valid CRCs.
+
+    The daemon now walks every chunk, so a header-only fixture would test
+    the refusal path rather than the success path. `before_idat` and
+    `after_idat` are (type, body) pairs inserted around the image data. Text
+    chunks are legal on either side of it.
+    """
     ihdr = struct.pack(">II", width, height) + b"\x08\x02\x00\x00\x00"
-    return (b"\x89PNG\r\n\x1a\n" + struct.pack(">I", len(ihdr)) + b"IHDR"
-            + ihdr)
+    # RGB, 8-bit, filter byte 0 per row. Only two rows' worth: no decoder
+    # runs here, so the IDAT need only be a well-formed chunk.
+    idat = zlib.compress(b"\x00" + b"\x00" * 3 * min(width, 64))
+    return (b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", ihdr)
+            + b"".join(png_chunk(k, b) for k, b in before_idat)
+            + png_chunk(b"IDAT", idat)
+            + b"".join(png_chunk(k, b) for k, b in after_idat)
+            + png_chunk(b"IEND", b""))
+
+
+# A zTXt chunk: 16 KiB on the wire that a text-enabled Qt build inflates to
+# 16 MiB in the shell process. Repeat it and the caps stay satisfied while
+# the expansion does not. This is the shape of the marketplace finding.
+ZTXT_BOMB = (b"zTXt", b"Comment\x00\x00" + zlib.compress(b"A" * (16 << 20), 9))
 
 
 IMAGE_BYTES = jpeg_bytes()
@@ -108,6 +132,14 @@ class _ImageHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "image/png")
             self.end_headers()
             self.wfile.write(png_bytes(30000, 30000))
+            return
+        if self.path.startswith("/api/image/pngtext"):
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.end_headers()
+            self.wfile.write(png_bytes(
+                before_idat=[ZTXT_BOMB, (b"tEXt", b"Title\x00cover")],
+                after_idat=[(b"iTXt", b"Note\x00\x00\x00\x00\x00hi")]))
             return
         if self.path.startswith("/api/image/png"):
             self.send_response(200)
@@ -616,6 +648,80 @@ class TestOnlyAnImageIsPublished(ArtServerTestCase):
         dest = art.path_for(cache._dir, "k")
         os.makedirs(dest, exist_ok=True)
         self.assertIsNone(cache.get(self.host, self.port, "k"))
+
+
+class TestPngTextIsNeverWritten(ArtServerTestCase):
+    """Compressed PNG chunks must not reach the shell's decoder.
+
+    Marketplace review of 0.14.x: fetch() checked the byte size and the IHDR
+    dimensions and then wrote the PNG unchanged. Qt's PNG reader inflates
+    zTXt/iTXt into QImage::text(), so text chunks within both caps could
+    still exhaust the shared shell's memory.
+    """
+
+    def _chunk_types(self, data):
+        types, i = [], 8
+        while i < len(data):
+            (length,) = struct.unpack(">I", data[i:i + 4])
+            types.append(data[i + 4:i + 8])
+            i += 12 + length
+        return types
+
+    def test_fetch_writes_the_png_without_its_text_chunks(self):
+        dest = os.path.join(self.tmp.name, "art.png")
+        self.assertTrue(art.fetch(self.host, self.port, "pngtext", dest))
+        with open(dest, "rb") as handle:
+            written = handle.read()
+        self.assertEqual(self._chunk_types(written), [b"IHDR", b"IDAT", b"IEND"])
+        self.assertEqual(written, png_bytes())
+        self.assertTrue(art.is_publishable(dest))
+
+    def test_sanitize_keeps_the_chunks_needed_to_draw_in_order(self):
+        data = png_bytes(before_idat=[(b"gAMA", b"\x00\x00\xb1\x8f"),
+                                      (b"PLTE", b"\x00" * 3),
+                                      (b"iCCP", b"p\x00\x00" + zlib.compress(b"x")),
+                                      (b"tRNS", b"\x00"),
+                                      (b"eXIf", b"MM\x00*")])
+        self.assertEqual(self._chunk_types(art.sanitize_png(data)),
+                         [b"IHDR", b"PLTE", b"tRNS", b"IDAT", b"IEND"])
+
+    def test_sanitize_refuses_rather_than_repairs(self):
+        good = png_bytes()
+        bad_crc = good[:-1] + bytes([good[-1] ^ 1])
+        no_iend = good[:-12]
+        no_idat = (b"\x89PNG\r\n\x1a\n" + good[8:33]
+                   + png_chunk(b"IEND", b""))
+        not_ihdr_first = (b"\x89PNG\r\n\x1a\n" + png_chunk(b"tEXt", b"a\x00b")
+                          + good[8:])
+        overrun = good[:33] + struct.pack(">I", 1 << 30) + good[37:]
+        for name, data in [("bad crc", bad_crc), ("no IEND", no_iend),
+                           ("no IDAT", no_idat),
+                           ("IHDR not first", not_ihdr_first),
+                           ("length past the end", overrun)]:
+            with self.subTest(name):
+                self.assertIsNone(art.sanitize_png(data))
+
+    def test_trailing_bytes_after_iend_are_dropped(self):
+        self.assertEqual(art.sanitize_png(png_bytes() + b"junk"), png_bytes())
+
+    def test_a_planted_png_with_text_is_not_published(self):
+        # The fetch path strips it; is_publishable must also refuse a file
+        # swapped in afterwards. The text sits AFTER the image data and past
+        # the first 64 KiB, where a header-only re-check never looked.
+        dest = os.path.join(self.tmp.name, "planted.png")
+        padding = [(b"tEXt", b"pad\x00" + b"p" * (70 * 1024))]
+        with open(dest, "wb") as handle:
+            handle.write(png_bytes(after_idat=padding + [ZTXT_BOMB]))
+        self.assertLess(os.path.getsize(dest), art.MAX_ART_BYTES)
+        self.assertFalse(art.is_publishable(dest))
+
+    def test_a_clean_png_and_a_jpeg_are_still_published(self):
+        for name, data in [("png", png_bytes()), ("jpeg", IMAGE_BYTES)]:
+            with self.subTest(name):
+                dest = os.path.join(self.tmp.name, "ok." + name)
+                with open(dest, "wb") as handle:
+                    handle.write(data)
+                self.assertTrue(art.is_publishable(dest))
 
 
 if __name__ == "__main__":

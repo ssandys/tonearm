@@ -105,7 +105,12 @@ directly, outside every cap below; that was raised by this review on
 `O_NOFOLLOW|O_NONBLOCK` and answers every question from that descriptor;
 fetched art is refused unless it is a PNG or JPEG within `MAX_ART_BYTES` and
 `MAX_ART_DIMENSION` per side, read from the PNG `IHDR` or by walking JPEG
-segments — decoding nothing. Text from the Core is bounded by `MAX_TEXT`
+segments — decoding nothing. A PNG is then rebuilt from `IHDR`, `PLTE`,
+`tRNS`, `IDAT` and `IEND` only (CRC-checked, nothing inflated), so the text
+and profile chunks a decoder would decompress (`zTXt`, `iTXt`, `iCCP`) never
+reach the shell; `is_publishable()` re-reads the whole file and refuses a PNG
+carrying any other chunk. That was raised by this review on 2026-11-02 and
+fixed in 0.14.5. Text from the Core is bounded by `MAX_TEXT`
 and the zone listing by `MAX_ZONES`. The socket bounds every resource a
 client can reach: request line, connection deadline, handler threads,
 subscribers, per-write deadline, browse sessions, session key and search

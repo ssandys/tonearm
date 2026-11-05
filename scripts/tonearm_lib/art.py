@@ -45,6 +45,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 
 LOG = logging.getLogger("tonearmd.art")
 
@@ -112,11 +113,6 @@ MAX_ROW_FAILED = 512
 MAX_ART_DIMENSION = 2048
 MAX_ART_PIXELS = MAX_ART_DIMENSION * MAX_ART_DIMENSION
 
-# How much of a cached file is read back to re-check its header. The daemon
-# wrote it, so the header is at the front; this is a page-cache read of at
-# most 64 KiB, once per snapshot.
-HEADER_WINDOW = 64 * 1024
-
 _SAFE_KEY = re.compile(r"[^A-Za-z0-9_-]")
 
 # Start-of-frame markers, which carry the dimensions. C4 (Huffman table), C8
@@ -125,6 +121,69 @@ _SAFE_KEY = re.compile(r"[^A-Za-z0-9_-]")
 _SOF_MARKERS = frozenset(m for m in range(0xC0, 0xD0)
                          if m not in (0xC4, 0xC8, 0xCC))
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+# The only PNG chunks a cover needs in order to be drawn. Everything else is
+# dropped before the file is written, above all the ones a decoder INFLATES:
+# zTXt and iTXt (compressed text) and iCCP (a compressed ICC profile). Qt's
+# PNG reader decompresses text chunks into QImage::text() as it loads, so a
+# few kilobytes of zTXt inside the byte and pixel caps could still expand to
+# gigabytes in the shared shell process. Dimension checks cannot see that;
+# keeping only these chunks removes it. Dropping gAMA/cHRM/sRGB, EXIF and
+# animation chunks costs nothing for a thumbnail-sized cover.
+_PNG_KEEP = frozenset({b"IHDR", b"PLTE", b"tRNS", b"IDAT", b"IEND"})
+
+
+def _png_chunks(data: bytes) -> list[tuple[bytes, bytes]] | None:
+    """Split a PNG into (type, chunk bytes) pairs, or None if it is malformed.
+
+    Header walking only. The CRC is checked with zlib.crc32, but nothing is
+    ever decompressed. The walk demands IHDR first and ends at IEND. Bytes
+    after IEND are discarded, since the caller rebuilds the file anyway. A
+    file with no IEND, a bad CRC, a chunk that runs past the end, or a type
+    that is not four ASCII letters is refused rather than repaired.
+    """
+    if not data.startswith(_PNG_MAGIC):
+        return None
+    chunks = []
+    i, end = len(_PNG_MAGIC), len(data)
+    while i + 12 <= end:
+        (length,) = struct.unpack(">I", data[i:i + 4])
+        kind = data[i + 4:i + 8]
+        stop = i + 12 + length
+        if stop > end or not kind.isalpha() or not kind.isascii():
+            return None
+        (crc,) = struct.unpack(">I", data[stop - 4:stop])
+        if zlib.crc32(data[i + 4:stop - 4]) != crc:
+            return None
+        if not chunks and kind != b"IHDR":
+            return None
+        chunks.append((kind, data[i:stop]))
+        if kind == b"IEND":
+            return chunks
+        i = stop
+    return None
+
+
+def sanitize_png(data: bytes) -> bytes | None:
+    """`data` rebuilt from the chunks in _PNG_KEEP, or None if malformed.
+
+    The rebuilt file is what gets written to disk, so the shell's decoder
+    never sees a text or profile chunk that the Core sent.
+    """
+    chunks = _png_chunks(data)
+    if chunks is None or not any(kind == b"IDAT" for kind, _ in chunks):
+        return None
+    return _PNG_MAGIC + b"".join(raw for kind, raw in chunks
+                                 if kind in _PNG_KEEP)
+
+
+def png_is_clean(data: bytes) -> bool:
+    """Is `data` a well-formed PNG made only of _PNG_KEEP chunks?"""
+    chunks = _png_chunks(data)
+    return (chunks is not None
+            and sum(len(raw) for _, raw in chunks) + len(_PNG_MAGIC)
+            == len(data)
+            and all(kind in _PNG_KEEP for kind, _ in chunks))
 
 
 def image_dimensions(data: bytes) -> tuple[int, int] | None:
@@ -280,6 +339,14 @@ def fetch(host: str, http_port: int, image_key: str, dest: str,
                         "refusing it", image_key, dims[0], dims[1],
                         MAX_ART_DIMENSION)
             return False
+        # Within bounds is not yet safe for a PNG: its ancillary chunks are
+        # decoded too, and some of them are compressed. See _PNG_KEEP.
+        if data.startswith(_PNG_MAGIC):
+            data = sanitize_png(data)
+            if data is None:
+                LOG.warning("art for %s is a malformed PNG; refusing it",
+                            image_key)
+                return False
 
         # An unguessable name created O_EXCL|O_NOFOLLOW. The predictable
         # `dest + ".tmp"` this replaced was openable with a plain "wb",
@@ -336,8 +403,11 @@ def is_publishable(path: str, max_bytes: int = MAX_ART_BYTES) -> bool:
     fails the S_ISREG check instead of blocking this open until someone writes
     to it.
 
-    The header is re-read rather than trusted from fetch time, because the
-    threat is a file swapped after it was written.
+    The whole file is re-read rather than trusted from fetch time, because the
+    threat is a file swapped after it was written. That costs at most
+    `max_bytes` from the page cache. A PNG must also still contain only the
+    chunks fetch() keeps, and a text chunk can sit anywhere in the file, even
+    after the image data, so checking the header alone is not enough.
 
     A residual remains and is worth naming rather than papering over: the
     SHELL opens this path afterwards, by name, so a same-user race can still
@@ -355,7 +425,9 @@ def is_publishable(path: str, max_bytes: int = MAX_ART_BYTES) -> bool:
             return False
         with os.fdopen(fd, "rb") as handle:
             fd = None                       # the file object owns it now
-            header = handle.read(HEADER_WINDOW)
+            # One byte past the cap: a file that grew after the fstat above
+            # is refused, not truncated into something that looks clean.
+            data = handle.read(max_bytes + 1)
     except OSError:
         return False
     finally:
@@ -364,8 +436,12 @@ def is_publishable(path: str, max_bytes: int = MAX_ART_BYTES) -> bool:
                 os.close(fd)
             except OSError:
                 pass
-    dims = image_dimensions(header)
-    return dims is not None and _within_bounds(dims)
+    if len(data) > max_bytes:
+        return False
+    dims = image_dimensions(data)
+    if dims is None or not _within_bounds(dims):
+        return False
+    return not data.startswith(_PNG_MAGIC) or png_is_clean(data)
 
 
 def _prune(directory: str, keep: str, max_files: int = MAX_CACHED) -> None:
