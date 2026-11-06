@@ -36,6 +36,10 @@ class RecordingApi:
                   "state": "playing" if playing == DEN else "paused",
                   "outputs": [{"output_id": "o-den"}]},
         }
+        # These zones are loaded, so the listing is authoritative. The
+        # daemon's command path refuses to resolve a room from a listing
+        # that is not, and a generationless fake reads as one that is not.
+        self._zone_list_generation = 1
 
     def transfer_zone(self, from_id, to_id):
         self.transfers.append((from_id, to_id))

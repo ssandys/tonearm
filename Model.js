@@ -402,7 +402,8 @@ function faultText(state) {
 // nothing was playing. That reason lived only in the bar glyph's colour and
 // its tooltip, and an open popup covers the bar.
 function headerStatus(state) {
-  return faultText(state) || (missingPin(state) ? "Pinned output unavailable" : coreNameOf(state))
+  return faultText(state) || (missingPin(state) ? "Pinned output unavailable" :
+    waitingForZones(state) ? "Loading outputs\u2026" : coreNameOf(state))
 }
 
 function missingPin(state) {
@@ -411,12 +412,50 @@ function missingPin(state) {
             state.selection.availability === "missing")
 }
 
+// Cached-zone readiness: healthy, no displayed zone, and the daemon says the
+// output list is not authoritative yet (availability "unknown" while the
+// fresh list is still arriving). This is a WAIT -- rendering it as "Nothing
+// playing" invents an idle state, and as "Output unavailable" invents a
+// fault. barState stays severity "ok" here for the same reason: nothing is
+// broken, the list simply has not landed.
+function waitingForZones(state) {
+  return !!(state && state.status === "ok" && !state.zone && state.selection &&
+            state.selection.availability === "unknown")
+}
+
+// The empty card's title and detail. A connection or selection transition is
+// not evidence that playback is idle, so the copy names what is actually
+// happening. Legacy v1 snapshots (no `selection` key at all) keep their old
+// "Nothing playing" copy: those daemons have no readiness concept to report.
+function emptyTitle(state) {
+  if (!state) return "Waiting for Tonearm"
+  if (state.status === "connecting") return "Connecting to Roon\u2026"
+  if (state.status === "unpaired") return "Authorization required"
+  if (severityFor(state.status) !== "ok") return "Connection unavailable"
+  if (waitingForZones(state)) return "Loading outputs\u2026"
+  if (missingPin(state)) return "Output unavailable"
+  if (!state.zone && state.selection && state.selection.availability === "none") return "No output selected"
+  return "Nothing playing"
+}
+
+function emptyDetail(state) {
+  if (!state) return "The Tonearm service has not reported state yet."
+  if (state.status === "connecting") return "Waiting for the Roon connection."
+  if (state.status === "unpaired") return "Enable Tonearm in Roon \u2192 Settings \u2192 Extensions."
+  if (severityFor(state.status) !== "ok") return "Controls are unavailable until Roon reconnects."
+  if (waitingForZones(state)) return "Waiting for a fresh output list from Roon."
+  if (missingPin(state)) return "Choose an available output or wait for this one."
+  if (!state.zone && state.selection && state.selection.availability === "none") return "Choose an output from the list below."
+  return ""
+}
+
 function tooltipText(state) {
   var fault = faultText(state)
   if (fault) return fault
 
   var coreName = coreNameOf(state)
   if (missingPin(state)) return "Pinned output unavailable \u00b7 " + coreName
+  if (waitingForZones(state)) return "Loading outputs\u2026 \u00b7 " + coreName
   if (!state.zone) return "Nothing playing \u00b7 " + coreName
 
   var np = nowPlayingOf(state)
@@ -529,6 +568,310 @@ function nextRetryDelay(attempt) {
   if (n < 0) n = 0
   var ms = 1000 * Math.pow(2, n)
   return ms > 30000 ? 30000 : ms
+}
+
+// -- selected-output player -------------------------------------------------
+// Every transport decision is made here from the snapshot, synchronously
+// BEFORE any spawn, and never revisited: the route (modern `player_targeted`
+// request, older-daemon plain-verb CLI, or deny) is chosen from the snapshot
+// shape, and there is NO fallback after a targeted spawn -- an error, empty,
+// mismatched or timed-out reply reports PLAYER_UNKNOWN and stops.
+
+var PLAYER_UNKNOWN = "Player result unknown; no retry was sent."
+var PLAYER_UNAVAILABLE = "Control unavailable for the selected output."
+var PLAYER_BAD_REQUEST = "Invalid player command."
+
+// The full shared verb set -- not a pause-only client.
+var PLAYER_VERBS = ["play", "pause", "playpause", "next", "previous", "seek", "volume", "mute", "unmute"]
+
+function isPlayerVerb(verb) {
+  for (var i = 0; i < PLAYER_VERBS.length; i++) if (PLAYER_VERBS[i] === verb) return true
+  return false
+}
+
+// Wire caps mirroring the daemon's own: zone/output ids 128 chars, request
+// ids 64, a mute group of at most 32 outputs.
+var MAX_PLAYER_ID = 128
+var MAX_REQUEST_ID = 64
+var MAX_MUTE_IDS = 32
+
+function playerId(id) {
+  return typeof id === "string" && id.length > 0 && id.length <= MAX_PLAYER_ID
+}
+
+function isArray(value) {
+  return Object.prototype.toString.call(value) === "[object Array]"
+}
+
+function isPlainObject(value) {
+  return !!value && typeof value === "object" && !isArray(value)
+}
+
+function hasOwn(object, key) {
+  return isPlainObject(object) && Object.prototype.hasOwnProperty.call(object, key)
+}
+
+// An argument is a strict integer. `typeof` first, so "5" and true never
+// coerce; then finiteness (NaN and the infinities out); then integrality.
+function validArg(arg) {
+  return typeof arg === "number" && isFinite(arg) && Math.floor(arg) === arg
+}
+
+function validLength(length) {
+  return typeof length === "number" && isFinite(length) && length > 0
+}
+
+// A volume object as upstream state.py._volume_of actually emits it: finite
+// value/min/max, value inside min..max. min/max are coerced independently, so
+// a zero-width range (min === max) is real and still carries the mute flag;
+// an inverted range or out-of-range value is malformed -- denied, never
+// repaired with a fabricated default.
+function volumeShape(volume) {
+  return isPlainObject(volume) &&
+         typeof volume.value === "number" && isFinite(volume.value) &&
+         typeof volume.min === "number" && isFinite(volume.min) &&
+         typeof volume.max === "number" && isFinite(volume.max) &&
+         volume.min <= volume.max &&
+         volume.value >= volume.min && volume.value <= volume.max
+}
+
+// The mute fact: the shape above plus a real boolean `muted` (the field
+// _volume_of always emits). Legacy mute/unmute are bare CLI verbs and need no
+// range, so a true zero-width volume keeps muting while volume setting is
+// denied -- per verb, from actual upstream fields only.
+function validVolumeMute(volume) {
+  return volumeShape(volume) && typeof volume.muted === "boolean"
+}
+
+// The volume-SETTING fact: the shape plus a usable range (min < max). Panel
+// renders `value` and both routes range-check against min..max, so a
+// zero-width range denies volume setting; mute has its own predicate.
+function validVolume(volume) {
+  return volumeShape(volume) && volume.min < volume.max
+}
+
+// A selection is trusted only in the daemon's one produced shape
+// (state.py selection(): mode "pinned" or "auto", availability string,
+// zone_id null or a bounded id). A PRESENT but malformed selection (missing
+// mode, null, an array, a numeric id) is not an absent one: the daemon knows
+// the contract and sent garbage, so the snapshot gets no route at all
+// instead of a legacy guess.
+function validSelection(selection) {
+  return isPlainObject(selection) &&
+         (selection.mode === "pinned" || selection.mode === "auto") &&
+         typeof selection.availability === "string" &&
+         (selection.zone_id === null || playerId(selection.zone_id))
+}
+
+// A mute group: at most MAX_MUTE_IDS output ids, each valid and listed once
+// (Roon output groups are sets; a duplicate would address one output twice).
+function validMuteIds(ids) {
+  if (!isArray(ids) || ids.length === 0 || ids.length > MAX_MUTE_IDS) return false
+  for (var i = 0; i < ids.length; i++) {
+    if (!playerId(ids[i])) return false
+    for (var j = 0; j < i; j++) if (ids[j] === ids[i]) return false
+  }
+  return true
+}
+
+// The STRICT modern predicate: only the DISPLAYED zone, only when the daemon
+// confirms it is the selected, available target (selection.zone_id ===
+// zone.id) and advertised this verb's raw capability. Controls must be a
+// plain object; Panel gates via playerUsable, not this alone, because older
+// daemons advertise neither field.
+function canPlayer(state, verb) {
+  if (!isPlayerVerb(verb) || !isPlainObject(state) || state.status !== "ok") return false
+  var zone = state.zone
+  if (!isPlainObject(zone) || !playerId(zone.id)) return false
+  var selection = state.selection
+  if (!validSelection(selection) || selection.availability !== "available" ||
+      selection.zone_id !== zone.id) return false
+  var controls = zone.controls
+  if (!isPlainObject(controls) || controls.transport !== true) return false
+  if (verb === "seek") return controls.seek === true && validLength(zone.length)
+  if (verb === "volume") {
+    return controls.volume === true && playerId(controls.volume_output_id) && validVolume(zone.volume)
+  }
+  if (verb === "mute" || verb === "unmute") return validMuteIds(controls.mute_output_ids)
+  return true
+}
+
+// The muted fact by snapshot shape: modern controls.muted, else the legacy
+// volume object's real `muted` flag (validVolumeMute). Malformed => false.
+function playerMuted(state) {
+  if (!isPlainObject(state) || !isPlainObject(state.zone)) return false
+  var zone = state.zone
+  if (hasOwn(zone, "controls")) {
+    return isPlainObject(zone.controls) && zone.controls.muted === true
+  }
+  return validVolumeMute(zone.volume) && zone.volume.muted === true
+}
+
+// The captured modern request; ids and bounds come from the DISPLAYED
+// snapshot at click time, so a later selection change cannot retarget it.
+// Returns null rather than a partial envelope when validation fails.
+function playerRequest(state, verb, arg, requestId) {
+  if (!canPlayer(state, verb)) return null
+  if (typeof requestId !== "string" || requestId.length === 0 ||
+      requestId.length > MAX_REQUEST_ID) return null
+  var zone = state.zone
+  if (verb === "seek" || verb === "volume") {
+    if (!validArg(arg)) return null
+    if (verb === "seek" && !(arg >= 0 && arg <= zone.length)) return null
+    if (verb === "volume" && !(arg >= zone.volume.min && arg <= zone.volume.max)) return null
+  } else if (arg !== undefined && arg !== null) {
+    return null
+  }
+  return {
+    cmd: "player_targeted",
+    v: 1,
+    request_id: requestId,
+    zone_id: zone.id,
+    verb: verb,
+    arg: (arg === undefined || arg === null) ? null : arg,
+    output_id: verb === "volume" ? zone.controls.volume_output_id : null,
+    output_ids: (verb === "mute" || verb === "unmute") ? zone.controls.mute_output_ids.slice() : null
+  }
+}
+
+// The copy for one CORRELATED reply. A refused code gets its own sentence;
+// everything this cannot vouch for reads as the same honest
+// "unknown; no retry" -- never a claim of remote success.
+function playerReplyText(request, reply) {
+  if (!request || !reply || reply.v !== 1 || reply.type !== "command_result" ||
+      reply.request_id !== request.request_id || reply.zone_id !== request.zone_id ||
+      reply.verb !== request.verb) {
+    return PLAYER_UNKNOWN
+  }
+  if (reply.outcome === "attempted" && reply.error === null) return ""
+  if (reply.outcome === "refused") {
+    var messages = {
+      selection_changed: "Output selection changed; command refused.",
+      unavailable: "Selected output unavailable; command refused.",
+      disconnected: "Roon disconnected; command refused.",
+      zones_unknown: "Output list not ready; command refused.",
+      capability_unavailable: "Control unavailable for this output.",
+      output_changed: "Output group changed; command refused.",
+      out_of_range: "Requested value outside the output range.",
+      bad_request: "Invalid player command.",
+      unsupported: "This daemon does not support targeted player controls."
+    }
+    // hasOwnProperty, not messages[reply.error]: an error code of
+    // "constructor" would otherwise walk the prototype chain and render as a
+    // verdict instead of the unknown it is.
+    if (typeof reply.error === "string" && hasOwn(messages, reply.error)) return messages[reply.error]
+  }
+  return PLAYER_UNKNOWN
+}
+
+// The only situation a legacy route may be chosen from: the snapshot must
+// PREDATE the modern contract. Field presence is authoritative -- 092e950
+// (no selection, no controls) or 0.14.4 (valid available matching selection,
+// no controls). Anything present-but-malformed, partial, or a selection that
+// does not confirm the displayed zone DENIES: never guess the daemon's
+// "active" zone instead of what the user is looking at.
+function legacySnapshot(state) {
+  if (!isPlainObject(state) || state.status !== "ok") return false
+  var zone = state.zone
+  if (!isPlainObject(zone) || !playerId(zone.id)) return false
+  if (hasOwn(zone, "controls")) return false
+  if (!hasOwn(state, "selection")) return true
+  var selection = state.selection
+  return validSelection(selection) && selection.availability === "available" &&
+         selection.zone_id === zone.id
+}
+
+// The arg-free half of legacy legality, per verb, from actual upstream fields:
+// seek needs a real length; volume needs a usable range (validVolume);
+// mute/unmute need only the mute fact (validVolumeMute) -- they are bare CLI
+// verbs and take no range, so a true zero-width volume keeps muting.
+function legacyVerbUsable(state, verb) {
+  var zone = state.zone
+  if (verb === "seek") return validLength(zone.length)
+  if (verb === "volume") return validVolume(zone.volume)
+  if (verb === "mute" || verb === "unmute") return validVolumeMute(zone.volume)
+  return true
+}
+
+// The legacy plan: argv exactly as upstream send() builds it (`tonearmctl
+// <verb> [arg]`). Bounds come from the validated DISPLAYED length/volume:
+// bare verbs take no argument, seek 0..length, volume min..max, mute/unmute
+// only the mute fact.
+function legacyPlan(state, verb, arg) {
+  if (!legacyVerbUsable(state, verb)) return { route: "none", reason: PLAYER_UNAVAILABLE }
+  var argv = [verb]
+  if (verb === "seek") {
+    if (!validArg(arg) || arg < 0 || arg > state.zone.length) {
+      return { route: "none", reason: PLAYER_BAD_REQUEST }
+    }
+    argv.push(String(arg))
+  } else if (verb === "volume") {
+    if (!validArg(arg) || arg < state.zone.volume.min || arg > state.zone.volume.max) {
+      return { route: "none", reason: PLAYER_BAD_REQUEST }
+    }
+    argv.push(String(arg))
+  } else if (arg !== undefined && arg !== null) {
+    return { route: "none", reason: PLAYER_BAD_REQUEST }
+  }
+  return { route: "legacy", argv: argv }
+}
+
+// THE dispatch decision, captured synchronously BEFORE any spawn so a state
+// push cannot change the route mid-dispatch. Pure. A plan carries EITHER a
+// targeted request OR a legacy argv, never both, never a fallback:
+//   {route:"targeted", request:{...}}  modern daemon, capability proven
+//   {route:"legacy", argv:[...]}       older daemon, plain-verb CLI
+//   {route:"none", reason:"..."}       deny: nothing spawns
+function playerRoute(state, verb, arg, requestId) {
+  if (!isPlayerVerb(verb)) return { route: "none", reason: PLAYER_UNAVAILABLE }
+  if (canPlayer(state, verb)) {
+    var request = playerRequest(state, verb, arg, requestId)
+    return request ? { route: "targeted", request: request }
+                   : { route: "none", reason: PLAYER_BAD_REQUEST }
+  }
+  if (!legacySnapshot(state)) return { route: "none", reason: PLAYER_UNAVAILABLE }
+  return legacyPlan(state, verb, arg)
+}
+
+// Compatibility-aware enablement for Panel: is ANY route open for this verb?
+// canPlayer alone would kill older-daemon transport; legacySnapshot alone
+// would offer what a modern daemon just refused. Both, in route order.
+function playerUsable(state, verb) {
+  if (!isPlayerVerb(verb)) return false
+  if (canPlayer(state, verb)) return true
+  return legacySnapshot(state) && legacyVerbUsable(state, verb)
+}
+
+// The identity the feedback banner and pending replies are keyed to; Service
+// drops both when it changes (another zone or selection).
+function playerContext(state) {
+  if (!isPlainObject(state)) return ""
+  var zoneId = (isPlainObject(state.zone) && typeof state.zone.id === "string") ? state.zone.id : ""
+  var sel = "absent"
+  if (hasOwn(state, "selection")) {
+    sel = validSelection(state.selection)
+      ? String(state.selection.mode) + "/" + String(state.selection.zone_id) + "/" + state.selection.availability
+      : "malformed"
+  }
+  return zoneId + "|" + sel
+}
+
+// Correlate one targeted reply against the CURRENT context: "" (attempted,
+// clears the banner), the refusal copy, PLAYER_UNKNOWN for an empty/absent
+// reply (timeout, crash, failed parse), or null to IGNORE a foreign,
+// superseded or different-zone reply so it can never overwrite newer
+// feedback -- and never as permission to retry on the legacy route.
+function playerFeedback(latestId, request, state, reply) {
+  if (!isPlainObject(request)) return null
+  if (typeof latestId !== "string" || latestId !== request.request_id) return null
+  var zoneNow = (isPlainObject(state) && isPlainObject(state.zone) &&
+                 typeof state.zone.id === "string") ? state.zone.id : null
+  if (zoneNow !== request.zone_id) return null
+  if (reply === null || reply === undefined) return PLAYER_UNKNOWN
+  if (!isPlainObject(reply)) return null
+  if (reply.request_id !== request.request_id) return null
+  if (reply.zone_id !== request.zone_id) return null
+  return playerReplyText(request, reply)
 }
 
 // -- album art ---------------------------------------------------------------
@@ -748,7 +1091,27 @@ if (typeof module !== "undefined") {
     barState: barState,
     tooltipText: tooltipText,
     headerStatus: headerStatus,
+    emptyTitle: emptyTitle,
+    emptyDetail: emptyDetail,
+    waitingForZones: waitingForZones,
     zoneList: zoneList,
+    isPlayerVerb: isPlayerVerb,
+    playerId: playerId,
+    canPlayer: canPlayer,
+    playerUsable: playerUsable,
+    playerMuted: playerMuted,
+    playerRequest: playerRequest,
+    playerReplyText: playerReplyText,
+    playerRoute: playerRoute,
+    playerContext: playerContext,
+    playerFeedback: playerFeedback,
+    PLAYER_VERBS: PLAYER_VERBS,
+    PLAYER_UNKNOWN: PLAYER_UNKNOWN,
+    PLAYER_UNAVAILABLE: PLAYER_UNAVAILABLE,
+    PLAYER_BAD_REQUEST: PLAYER_BAD_REQUEST,
+    MAX_PLAYER_ID: MAX_PLAYER_ID,
+    MAX_REQUEST_ID: MAX_REQUEST_ID,
+    MAX_MUTE_IDS: MAX_MUTE_IDS,
     isZonePinned: isZonePinned,
     canTransferTo: canTransferTo,
     activatePlayed: activatePlayed,

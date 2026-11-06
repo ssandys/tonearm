@@ -67,6 +67,20 @@ Panel {
   // Model.js and node-tested rather than living only in a QML binding.
   readonly property real volumeFraction: Model.volumeFraction(root.volume)
 
+  // -- control gating ------------------------------------------------------
+  // Compatibility-aware, NOT Model.canPlayer alone: a running older daemon
+  // has no selection/controls snapshot fields, and its transport must stay
+  // usable (that is the whole point of the pre-dispatch route in
+  // Model.playerRoute). On a modern daemon these follow its per-verb raw
+  // capabilities exactly; a modern snapshot that fails them disables the
+  // control instead of falling back to anything. Every click still flows
+  // through Service.send, which re-decides the route -- these bindings only
+  // dim what cannot work.
+  readonly property bool transportUsable: Model.playerUsable(root.st, "playpause")
+  readonly property bool seekUsable: Model.playerUsable(root.st, "seek")
+  readonly property bool volumeUsable: Model.playerUsable(root.st, "volume")
+  readonly property bool muteUsable: Model.playerUsable(root.st, "mute")
+
   // Style.space(118), not a raw 118 and no longer a user setting. As a raw
   // pixel value it was the one measurement in the card that did NOT scale with
   // the theme's font, so a large base size grew the text and controls while
@@ -390,6 +404,21 @@ Panel {
           }
         }
 
+        // The targeted player command's result, in words. Plain text (every
+        // string here is Core/daemon-supplied -- see the textFormat note in
+        // the header above), and cleared on the next send or when the
+        // selected zone/state identity changes (Service.playerError).
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          visible: Service.playerError.length > 0
+          text: Service.playerError
+          color: Model.COLOR_ERROR
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+        }
+
         PanelSeparator { foreground: Commons.Color.foreground }
 
         Row {
@@ -455,7 +484,10 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 width: parent.width
-                text: root.np ? (root.np.title || "Nothing playing") : "Nothing playing"
+                // Without metadata the card says what is actually happening
+                // (waiting, pairing, outage, loading outputs, no selection)
+                // instead of a flat "Nothing playing" -- Model.emptyTitle.
+                text: root.np ? (root.np.title || "Nothing playing") : Model.emptyTitle(root.st)
                 color: Commons.Color.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.title
@@ -467,11 +499,14 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 width: parent.width
-                text: root.np ? (root.np.artist || "") : ""
+                text: root.np ? (root.np.artist || "") : Model.emptyDetail(root.st)
                 color: root.fgMid
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
-                elide: Text.ElideRight
+                // Fault guidance must remain readable beyond the short
+                // header; track metadata stays on one elided line.
+                wrapMode: root.np ? Text.NoWrap : Text.WordWrap
+                elide: root.np ? Text.ElideRight : Text.ElideNone
               }
               Text {
                 textFormat: Text.PlainText
@@ -528,7 +563,11 @@ Panel {
                   anchors.rightMargin: -Style.space(8)
                   anchors.topMargin: -Style.space(8)
                   anchors.bottomMargin: -Style.space(3)
-                  enabled: root.length > 0
+                  // Route-aware: seek is offered on a modern daemon only when
+                  // it advertises controls.seek (with a finite length), and on
+                  // an older daemon only when the displayed track has one --
+                  // the same length>0 gate upstream always had.
+                  enabled: root.seekUsable
                   onClicked: function (mouse) {
                     // mouse.x is relative to THIS MouseArea's origin, not
                     // seekTrack's: the left margin above puts that origin
@@ -575,6 +614,13 @@ Panel {
                   anchors.horizontalCenter: parent.horizontalCenter
                   anchors.verticalCenter: parent.verticalCenter
                   spacing: Style.space(18)
+                  // Transport stays usable on an older daemon and follows the
+                  // modern per-verb capability exactly (Model.playerUsable);
+                  // when no route exists the row dims instead of silently
+                  // swallowing clicks. Middle-click and every keyboard path
+                  // reach the same Service.send route this uses.
+                  enabled: root.transportUsable
+                  opacity: enabled ? 1 : 0.45
 
                   Text {
                     textFormat: Text.PlainText
@@ -659,8 +705,10 @@ Panel {
           // all, and a slider there would be a lie. That auto-hide is why the
           // `showVolume` setting was removed rather than kept: it was a second
           // mechanism for the same outcome, and the automatic one is the one
-          // that is always right.
-          visible: root.volume !== null
+          // that is always right. An incremental output with proper mute facts
+          // (a modern mute_output_ids group) still shows its mute glyph; the
+          // absolute slider below is hidden unless there is a real volume.
+          visible: root.volumeUsable || root.muteUsable
 
           Text {
             textFormat: Text.PlainText
@@ -668,7 +716,9 @@ Panel {
             // String.fromCodePoint in Model.js rather than a literal escape
             // here -- routed through the same constant-glyph convention as
             // every other Nerd Font icon in this file.
-            text: root.volume && root.volume.muted ? Model.GLYPH_VOLUME_MUTED : Model.GLYPH_VOLUME_HIGH
+            // Model.playerMuted reads the shape-appropriate fact: modern
+            // controls.muted, or the legacy volume object's muted flag.
+            text: Model.playerMuted(root.st) ? Model.GLYPH_VOLUME_MUTED : Model.GLYPH_VOLUME_HIGH
             color: root.fgFaint
             font.family: root.fontFamily
             font.pixelSize: Style.font.subtitle
@@ -680,12 +730,14 @@ Panel {
             MouseArea {
               anchors.fill: parent
               anchors.margins: -Style.space(4)
-              onClicked: Service.send(root.volume && root.volume.muted ? "unmute" : "mute")
+              enabled: root.muteUsable
+              onClicked: Service.send(Model.playerMuted(root.st) ? "unmute" : "mute")
             }
           }
 
           Rectangle {
             id: volTrack
+            visible: root.volumeUsable
             width: parent.width - Style.space(52)
             height: Style.space(3)
             radius: height / 2
@@ -721,6 +773,7 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
+            visible: root.volumeUsable
             text: root.volume ? String(root.volume.value) : ""
             color: root.fgFaint
             font.family: root.fontFamily

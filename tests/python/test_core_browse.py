@@ -32,6 +32,11 @@ def fake_api(levels=None, playing=None):
         DEN: {"zone_id": DEN, "display_name": "Den",
               "state": "playing" if playing == DEN else "paused"},
     }
+    # The listing here IS a fresh full list, and the daemon's command path
+    # only resolves a room from an authoritative one. A generationless fake
+    # would be treated as stale, which is the right default for production
+    # and the wrong one for a fake that has genuinely loaded zones.
+    api._zone_list_generation = 1
     return api
 
 

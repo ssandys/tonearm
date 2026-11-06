@@ -758,6 +758,21 @@ class CachingSession:
     def command(self, verb: str, arg=None) -> None:
         self._session.command(verb, arg)
 
+    def player_targeted(self, zone_id, verb, arg=None, output_id=None,
+                        output_ids=None) -> dict:
+        # Forwarded, and deliberately NOT under self._lock, for the same
+        # reasons `command()` is: it is a round-trip to the Core, and this
+        # lock is non-reentrant.
+        #
+        # The daemon wraps the session in this class BEFORE handing it to the
+        # server (scripts/tonearmd), so a route that is not forwarded here
+        # is not reachable at all: the server would answer "unsupported" for
+        # every request. The wrapper forwards `command()` and `browse()` for
+        # exactly this reason, and the player route is the third method the
+        # server drives.
+        return self._session.player_targeted(zone_id, verb, arg, output_id,
+                                              output_ids)
+
     def browse(self, key: str, op: str, **kwargs) -> dict:
         # Deliberately NOT under self._lock, for two independent reasons:
         #

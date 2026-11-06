@@ -94,6 +94,18 @@ wrong — the daemon isn't running, the extension isn't enabled yet, the Core is
 unreachable — the header says so in place of the Core's name, so you never
 have to guess why nothing is playing.
 
+## Player controls
+
+Controls follow the displayed output and its advertised capabilities. With a
+current daemon, each click captures that zone and refuses if selection, output
+membership or readiness changed before dispatch. During reconnect the popup
+shows **Loading outputs…** until a fresh full list arrives.
+
+An older running daemon keeps its existing transport route when the plugin
+updates first. Routes are chosen before sending; an uncertain targeted result
+never causes a second command. See [player controls](docs/player-controls.md)
+for compatibility, result meanings, group-mute limits and IPC details.
+
 ## What it does on your network
 
 Worth knowing before you install something that runs unsandboxed in your shell.

@@ -327,3 +327,58 @@ class TestEveryCoreSuppliedValueIsBounded(unittest.TestCase):
                             None, hostile)
         size = len(json.dumps(built))
         self.assertLess(size, 512 * 1024, "payload was %d bytes" % size)
+
+
+class TestPublishedControls(unittest.TestCase):
+    """`zone.controls` says what the zone can do; it grants nothing.
+
+    The facts come from the RAW Core payload. The sanitized values above
+    them are for display, and a display default must never become authority:
+    a widget that offers a slider the Core cannot set is worse than one that
+    offers no slider.
+    """
+
+    def setUp(self):
+        self.raw = fixture("zone_playing.json")
+
+    def test_the_zone_carries_the_capability_facts(self):
+        facts = state.normalize_zone(self.raw)["controls"]
+        self.assertEqual(set(facts), {"transport", "seek", "volume",
+                                      "volume_output_id", "mute_output_ids",
+                                      "muted"})
+        # The fixture's first output is the one the slider reads.
+        self.assertTrue(facts["transport"])
+        self.assertFalse(facts["seek"])       # the fixture has no seek permission
+        self.assertTrue(facts["volume"])
+        self.assertEqual(facts["volume_output_id"], "o1")
+        self.assertEqual(facts["mute_output_ids"], ["o1", "o2"])
+        self.assertFalse(facts["muted"])      # o1 is not muted
+
+    def test_the_facts_are_additive_to_the_zone(self):
+        zone = state.normalize_zone(self.raw)
+        self.assertEqual(set(zone), {"id", "name", "state", "pinned", "volume",
+                                     "controls", "position", "length",
+                                     "now_playing"})
+
+    def test_the_zone_listing_still_carries_only_id_name_and_state(self):
+        built = state.build("ok", None, None, [state.normalize_zone(self.raw)])
+        self.assertEqual(set(built["zones"][0]), {"id", "name", "state"})
+
+    def test_the_payload_key_set_is_unchanged(self):
+        built = state.build("ok", None, None, [])
+        self.assertEqual(set(built),
+                         {"v", "status", "core", "zone", "zones", "selection"})
+
+    def test_a_malformed_output_does_not_raise_and_shows_no_volume(self):
+        # `outputs[0].get("volume")` on a non-dict raised AttributeError out
+        # of normalize_zone, and the publish path does not catch it.
+        for outputs in ([7], ["not a dict"], [{"output_id": "o1"}],
+                        [{"output_id": "o1", "volume": "not a dict"}],
+                        "not a list", {}):
+            with self.subTest(outputs=outputs):
+                raw = json.loads(json.dumps(self.raw))
+                raw["outputs"] = outputs
+                zone = state.normalize_zone(raw)
+                self.assertIsNone(zone["volume"])
+                self.assertFalse(zone["controls"]["volume"])
+                self.assertEqual(zone["controls"]["mute_output_ids"], [])
