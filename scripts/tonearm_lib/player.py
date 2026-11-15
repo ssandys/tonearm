@@ -157,9 +157,8 @@ def controls(raw) -> dict:
     A missing fact is False / None / [], never a fabricated value, so a
     widget rendering from this cannot offer a control the Core lacks.
 
-    `transport` is deliberately weak: it says the zone has a body to
-    command, not that a command may be sent. The SELECTION and the
-    connection decide that, at dispatch.
+    Each transport fact requires Roon's per-verb flag to be literally True.
+    Selection and connection are checked separately at dispatch.
 
     `mute_output_ids` is the complete, unique list of output ids the zone
     advertises, and only when every one carries usable mute metadata: a
@@ -167,7 +166,10 @@ def controls(raw) -> dict:
     """
     raw = raw if isinstance(raw, dict) else {}
     result = {
-        "transport": bool(raw),
+        "play": raw.get("is_play_allowed") is True,
+        "pause": raw.get("is_pause_allowed") is True,
+        "next": raw.get("is_next_allowed") is True,
+        "previous": raw.get("is_previous_allowed") is True,
         "seek": False,
         "volume": False,
         "volume_output_id": None,

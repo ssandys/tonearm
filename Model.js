@@ -687,7 +687,13 @@ function canPlayer(state, verb) {
   if (!validSelection(selection) || selection.availability !== "available" ||
       selection.zone_id !== zone.id) return false
   var controls = zone.controls
-  if (!isPlainObject(controls) || controls.transport !== true) return false
+  if (!isPlainObject(controls)) return false
+  if (verb === "playpause") {
+    return controls[zone.state === "playing" ? "pause" : "play"] === true
+  }
+  if (verb === "play" || verb === "pause" || verb === "next" || verb === "previous") {
+    return controls[verb] === true
+  }
   if (verb === "seek") return controls.seek === true && validLength(zone.length)
   if (verb === "volume") {
     return controls.volume === true && playerId(controls.volume_output_id) && validVolume(zone.volume)

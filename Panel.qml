@@ -76,7 +76,9 @@ Panel {
   // control instead of falling back to anything. Every click still flows
   // through Service.send, which re-decides the route -- these bindings only
   // dim what cannot work.
-  readonly property bool transportUsable: Model.playerUsable(root.st, "playpause")
+  readonly property bool previousUsable: Model.playerUsable(root.st, "previous")
+  readonly property bool playPauseUsable: Model.playerUsable(root.st, "playpause")
+  readonly property bool nextUsable: Model.playerUsable(root.st, "next")
   readonly property bool seekUsable: Model.playerUsable(root.st, "seek")
   readonly property bool volumeUsable: Model.playerUsable(root.st, "volume")
   readonly property bool muteUsable: Model.playerUsable(root.st, "mute")
@@ -614,13 +616,8 @@ Panel {
                   anchors.horizontalCenter: parent.horizontalCenter
                   anchors.verticalCenter: parent.verticalCenter
                   spacing: Style.space(18)
-                  // Transport stays usable on an older daemon and follows the
-                  // modern per-verb capability exactly (Model.playerUsable);
-                  // when no route exists the row dims instead of silently
-                  // swallowing clicks. Middle-click and every keyboard path
-                  // reach the same Service.send route this uses.
-                  enabled: root.transportUsable
-                  opacity: enabled ? 1 : 0.45
+                  // Each button follows its own capability; an unavailable
+                  // play/pause action must not disable previous or next.
 
                   Text {
                     textFormat: Text.PlainText
@@ -629,6 +626,8 @@ Panel {
                     // deployed font and render as a colour block, not a
                     // monochrome glyph. Built with String.fromCodePoint in
                     // Model.js, same as the bar's own icon.
+                    enabled: root.previousUsable
+                    opacity: enabled ? 1 : 0.45
                     text: Model.GLYPH_PREV
                     color: root.fgMid
                     font.family: root.fontFamily
@@ -646,6 +645,8 @@ Panel {
                   }
 
                   Rectangle {
+                    enabled: root.playPauseUsable
+                    opacity: enabled ? 1 : 0.45
                     width: Style.space(36)
                     height: Style.space(36)
                     radius: width / 2
@@ -670,6 +671,8 @@ Panel {
 
                   Text {
                     textFormat: Text.PlainText
+                    enabled: root.nextUsable
+                    opacity: enabled ? 1 : 0.45
                     text: Model.GLYPH_NEXT
                     color: root.fgMid
                     font.family: root.fontFamily

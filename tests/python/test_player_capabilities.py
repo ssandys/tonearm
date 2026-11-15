@@ -21,6 +21,10 @@ def zone(**overrides) -> dict:
         "zone_id": "zone-a",
         "display_name": "Kitchen",
         "state": "playing",
+        "is_play_allowed": True,
+        "is_pause_allowed": True,
+        "is_next_allowed": True,
+        "is_previous_allowed": True,
         "is_seek_allowed": True,
         "now_playing": {"length": 240, "three_line": {"line1": "Track"}},
         "outputs": [{"output_id": "output-1",
@@ -44,17 +48,21 @@ class TestCapabilityFacts(unittest.TestCase):
     def test_a_well_formed_zone_advertises_exactly_what_it_has(self):
         facts = player.controls(zone())
         self.assertEqual(facts, {
-            "transport": True, "seek": True, "volume": True,
+            "play": True, "pause": True, "next": True, "previous": True, "seek": True, "volume": True,
             "volume_output_id": "output-1",
             "mute_output_ids": ["output-1"], "muted": False})
 
-    def test_transport_is_a_weak_fact_and_grants_nothing_by_itself(self):
-        # The real gate for a transport command is the SELECTION and the
-        # connection, both enforced at dispatch. The fact only says the zone
-        # has a body to command.
-        self.assertTrue(player.controls(zone())["transport"])
-        self.assertFalse(player.controls({})["transport"])
-        self.assertFalse(player.controls(None)["transport"])
+    def test_transport_facts_require_literal_true_per_verb(self):
+        for verb in ("play", "pause", "next", "previous"):
+            flag = "is_" + verb + "_allowed"
+            for value in (False, None, 0, 1, "true", [], {}):
+                with self.subTest(verb=verb, value=value):
+                    self.assertFalse(player.controls(zone(**{flag: value}))[verb])
+            raw = zone()
+            raw.pop(flag)
+            self.assertFalse(player.controls(raw)[verb])
+            self.assertTrue(player.controls(zone(**{flag: True}))[verb])
+            self.assertFalse(player.controls(None)[verb])
 
     def test_seek_needs_permission_and_a_real_length(self):
         self.assertTrue(player.controls(zone())["seek"])
@@ -192,7 +200,7 @@ class TestCapabilityFacts(unittest.TestCase):
         # fact is False/None/[], never a plausible-looking value.
         for raw in (None, {}, zone()):
             facts = player.controls(raw)
-            self.assertEqual(set(facts), {"transport", "seek", "volume",
+            self.assertEqual(set(facts), {"play", "pause", "next", "previous", "seek", "volume",
                                           "volume_output_id", "mute_output_ids",
                                           "muted"})
 

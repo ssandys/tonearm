@@ -23,6 +23,10 @@ def zone_payload(zid="zone-a", outputs=None, length=240, seek=True) -> dict:
         "zone_id": zid,
         "display_name": "Kitchen",
         "state": "playing",
+        "is_play_allowed": True,
+        "is_pause_allowed": True,
+        "is_next_allowed": True,
+        "is_previous_allowed": True,
         "is_seek_allowed": seek,
         "now_playing": {"length": length,
                         "three_line": {"line1": "Synthetic track"}},
@@ -249,6 +253,46 @@ class PlayerDispatchTest(unittest.TestCase):
         self.assertEqual(s.snapshot()["selection"],
                          {"mode": "pinned", "zone_id": "zone-a",
                           "availability": "available"})
+
+    def test_each_transport_permission_is_rechecked_before_dispatch(self):
+        for verb in ("play", "pause", "next", "previous"):
+            for value in (False, None, 1, "true", "absent"):
+                with self.subTest(verb=verb, value=value):
+                    s = self.session()
+                    raw = s._api.zones["zone-a"]
+                    flag = "is_" + verb + "_allowed"
+                    if value == "absent":
+                        raw.pop(flag, None)
+                    else:
+                        raw[flag] = value
+                    self.assertEqual(self.invoke(s, verb),
+                                     {"outcome": "refused", "error": "capability_unavailable"})
+                    self.assertEqual(s._api.calls, [])
+
+    def test_playpause_uses_the_current_state_permission(self):
+        for state, fact in (("playing", "pause"), ("paused", "play"),
+                            ("stopped", "play")):
+            for allowed in (False, True):
+                with self.subTest(state=state, allowed=allowed):
+                    s = self.session()
+                    raw = s._api.zones["zone-a"]
+                    raw.update(state=state, is_play_allowed=not allowed,
+                               is_pause_allowed=not allowed)
+                    raw["is_" + fact + "_allowed"] = allowed
+                    expected = ({"outcome": "attempted", "error": None} if allowed else
+                                {"outcome": "refused", "error": "capability_unavailable"})
+                    self.assertEqual(self.invoke(s, "playpause"), expected)
+                    self.assertEqual(s._api.calls,
+                                     [("playback", "zone-a", "playpause")] if allowed else [])
+
+    def test_changed_permission_refuses_a_previously_enabled_click(self):
+        s = self.session()
+        s._api.zones["zone-a"]["is_next_allowed"] = True
+        self.assertTrue(s.snapshot()["zone"]["controls"]["next"])
+        s._api.zones["zone-a"]["is_next_allowed"] = False
+        self.assertEqual(self.invoke(s, "next"),
+                         {"outcome": "refused", "error": "capability_unavailable"})
+        self.assertEqual(s._api.calls, [])
 
     # -- dispatch ------------------------------------------------------
     def test_each_verb_binds_its_own_target_and_never_the_legacy_route(self):

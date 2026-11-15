@@ -343,11 +343,13 @@ class TestPublishedControls(unittest.TestCase):
 
     def test_the_zone_carries_the_capability_facts(self):
         facts = state.normalize_zone(self.raw)["controls"]
-        self.assertEqual(set(facts), {"transport", "seek", "volume",
+        self.assertEqual(set(facts), {"play", "pause", "next", "previous", "seek", "volume",
                                       "volume_output_id", "mute_output_ids",
                                       "muted"})
         # The fixture's first output is the one the slider reads.
-        self.assertTrue(facts["transport"])
+        # This fixture has no per-verb permission flags; none are invented.
+        for verb in ("play", "pause", "next", "previous"):
+            self.assertFalse(facts[verb])
         self.assertFalse(facts["seek"])       # the fixture has no seek permission
         self.assertTrue(facts["volume"])
         self.assertEqual(facts["volume_output_id"], "o1")

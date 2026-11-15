@@ -1186,7 +1186,13 @@ class RoonSession:
                 return {"outcome": "refused", "error": "selection_changed"}
 
             caps = player.controls(raw)
-            if verb == "seek":
+            if verb in player.TRANSPORT:
+                fact = verb
+                if verb == "playpause":
+                    fact = "pause" if raw.get("state") == "playing" else "play"
+                if not caps[fact]:
+                    return {"outcome": "refused", "error": "capability_unavailable"}
+            elif verb == "seek":
                 if not caps["seek"]:
                     return {"outcome": "refused", "error": "capability_unavailable"}
                 length = player.seek_length(raw)

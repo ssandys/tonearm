@@ -31,7 +31,7 @@ function zone(overrides) {
 
 function controls(overrides) {
   return Object.assign({
-    transport: true, seek: true, volume: true,
+    play: true, pause: true, next: true, previous: true, seek: true, volume: true,
     volume_output_id: "fixture-output", mute_output_ids: ["fixture-output"], muted: false
   }, overrides || {})
 }

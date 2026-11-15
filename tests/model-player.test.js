@@ -40,7 +40,7 @@ function transitional() {
 function modern(controls) {
   const st = transitional()
   st.zone.controls = controls || {
-    transport: true, seek: true, volume: true,
+    play: true, pause: true, next: true, previous: true, seek: true, volume: true,
     volume_output_id: "out-a", mute_output_ids: ["out-a"], muted: false
   }
   return st
@@ -192,7 +192,7 @@ test("seek/volume permission and strict integer/range checks use no presentation
   assert.ok(M.playerRequest(modern(), "volume", 0, "x"))
   assert.ok(M.playerRequest(modern(), "volume", 100, "x"))
 
-  const fixed = modern({ transport: true, seek: true, volume: true,
+  const fixed = modern({ play: true, pause: true, next: true, previous: true, seek: true, volume: true,
     volume_output_id: "out-a", mute_output_ids: [], muted: false })
   fixed.zone.volume = null
   assert.equal(M.canPlayer(fixed, "volume"), false)
@@ -253,17 +253,20 @@ test("a modern snapshot routes to exactly one captured targeted request", () => 
 })
 
 test("modern capability failures deny with NO legacy fallback", () => {
-  const noSeek = modern({ transport: true, seek: false, volume: true,
+  const noSeek = modern({ play: true, pause: true, next: true, previous: true, seek: false, volume: true,
     volume_output_id: "out-a", mute_output_ids: ["out-a"], muted: false })
   assert.equal(M.playerRoute(noSeek, "seek", 10, "r").route, "none")
   assert.equal(M.playerRoute(noSeek, "playpause", null, "r").route, "targeted")
 
-  const noTransport = modern({ transport: false, seek: true, volume: true,
-    volume_output_id: "out-a", mute_output_ids: ["out-a"], muted: false })
-  for (const verb of ["playpause", "seek", "volume", "mute"]) {
-    assert.equal(M.playerRoute(noTransport, verb, 10, "r").route, "none", verb)
-    assert.equal(M.playerRoute(noTransport, verb, 10, "r").argv, undefined, verb)
+  const noTransport = modern({ play: false, pause: false, next: false, previous: false,
+    seek: true, volume: true, volume_output_id: "out-a", mute_output_ids: ["out-a"], muted: false })
+  for (const verb of ["play", "pause", "playpause", "next", "previous"]) {
+    assert.equal(M.playerRoute(noTransport, verb, null, "r").route, "none", verb)
+    assert.equal(M.playerRoute(noTransport, verb, null, "r").argv, undefined, verb)
   }
+  assert.equal(M.playerUsable(noTransport, "seek"), true)
+  assert.equal(M.playerUsable(noTransport, "volume"), true)
+  assert.equal(M.playerUsable(noTransport, "mute"), true)
 
   const badOutput = modern()
   badOutput.zone.controls.volume_output_id = ""
@@ -510,19 +513,19 @@ test("playerUsable keeps old-daemon transport alive and follows modern capabilit
   }
   // Modern per-verb.
   assert.equal(M.playerUsable(modern(), "seek"), true)
-  const noSeek = modern({ transport: true, seek: false, volume: true,
+  const noSeek = modern({ play: true, pause: true, next: true, previous: true, seek: false, volume: true,
     volume_output_id: "out-a", mute_output_ids: ["out-a"], muted: false })
   assert.equal(M.playerUsable(noSeek, "playpause"), true)
   assert.equal(M.playerUsable(noSeek, "seek"), false)
   // Fixed volume (no facts at all): transport and seek live, volume/mute do not.
-  const fixed = modern({ transport: true, seek: true, volume: false,
+  const fixed = modern({ play: true, pause: true, next: true, previous: true, seek: true, volume: false,
     volume_output_id: null, mute_output_ids: [], muted: false })
   fixed.zone.volume = null
   assert.equal(M.playerUsable(fixed, "playpause"), true)
   assert.equal(M.playerUsable(fixed, "volume"), false)
   assert.equal(M.playerUsable(fixed, "mute"), false)
   // Incremental output: mute without a fabricated absolute slider.
-  const incremental = modern({ transport: true, seek: true, volume: false,
+  const incremental = modern({ play: true, pause: true, next: true, previous: true, seek: true, volume: false,
     volume_output_id: null, mute_output_ids: ["out-a"], muted: true })
   incremental.zone.volume = null
   assert.equal(M.playerUsable(incremental, "volume"), false)
@@ -662,4 +665,48 @@ test("malformed snapshots answer false/null instead of throwing", () => {
     assert.equal(M.playerFeedback("r", { request_id: "r", zone_id: "zz" }, st, null), null,
       JSON.stringify(st))
   }
+})
+
+
+test("modern transport requires each literal per-verb fact without fallback", () => {
+  for (const verb of ["play", "pause", "next", "previous"]) {
+    for (const value of [false, undefined, null, 1, "true"]) {
+      const st = modern()
+      st.zone.controls[verb] = value
+      assert.equal(M.canPlayer(st, verb), false, verb + ": " + value)
+      assert.equal(M.playerUsable(st, verb), false)
+      assert.equal(M.playerRoute(st, verb, null, "r").route, "none")
+      assert.equal(M.playerRequest(st, verb, null, "r"), null)
+    }
+    const st = modern()
+    st.zone.controls[verb] = true
+    assert.equal(M.playerRoute(st, verb, null, "r").route, "targeted")
+  }
+})
+
+test("playpause checks pause while playing and play otherwise", () => {
+  for (const state of ["playing", "paused", "stopped"]) {
+    const fact = state === "playing" ? "pause" : "play"
+    for (const allowed of [true, false]) {
+      const st = modern()
+      st.zone.state = state
+      st.zone.controls.play = !allowed
+      st.zone.controls.pause = !allowed
+      st.zone.controls[fact] = allowed
+      assert.equal(M.playerUsable(st, "playpause"), allowed, state)
+      assert.equal(M.playerRoute(st, "playpause", null, "r").route,
+                   allowed ? "targeted" : "none", state)
+    }
+  }
+})
+
+test("an empty queue disables play independently of other controls", () => {
+  const st = modern()
+  st.zone.state = "stopped"
+  Object.assign(st.zone.controls, { play: false, pause: false, previous: false, next: true })
+  assert.equal(M.playerUsable(st, "playpause"), false)
+  assert.equal(M.playerUsable(st, "previous"), false)
+  assert.equal(M.playerUsable(st, "next"), true)
+  assert.equal(M.playerUsable(st, "volume"), true)
+  assert.equal(M.playerUsable(st, "mute"), true)
 })

@@ -7,7 +7,12 @@ output group refuses the request rather than sending it elsewhere.
 
 Controls are derived from raw Roon metadata:
 
-- Transport requires an available selected zone.
+- Transport requires an available selected zone and the command's own raw
+  permission: is_play_allowed, is_pause_allowed, is_next_allowed or
+  is_previous_allowed must be literally true. Missing or malformed flags
+  disable that command. The popup gates each button independently.
+  Play/pause checks pause permission while playing and play permission otherwise;
+  the daemon repeats that check against current state before dispatch.
 - Seek requires is_seek_allowed: true and a positive finite track length.
 - Absolute volume uses only the first output's raw scale and captured output ID.
   Fixed and incremental outputs do not receive an absolute slider.
