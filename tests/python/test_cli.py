@@ -1,3 +1,4 @@
+import json
 import os
 import select
 import socket
@@ -62,6 +63,51 @@ class TestArgParsing(unittest.TestCase):
     def test_no_arguments_is_rejected(self):
         with self.assertRaises(ValueError):
             cli.to_request([])
+
+
+class TestPlayerVerb(unittest.TestCase):
+    """`player` sends one envelope and reads one correlated reply.
+
+    The envelope names the room the caller saw, so it is validated before it
+    is sent: a request that does not parse exactly is a usage error, not
+    something to find out from the daemon's answer.
+    """
+
+    def envelope(self, **overrides):
+        request = {"cmd": "player_targeted", "v": 1, "request_id": "req-1",
+                   "zone_id": "zone-a", "verb": "play", "arg": None,
+                   "output_id": None, "output_ids": None}
+        request.update(overrides)
+        return request
+
+    def test_the_envelope_is_sent_as_it_was_given(self):
+        envelope = self.envelope()
+        self.assertEqual(cli.to_request(["player", json.dumps(envelope)]),
+                         envelope)
+
+    def test_an_envelope_it_cannot_send_is_a_usage_error(self):
+        for envelope in (self.envelope(verb="transfer"),
+                         self.envelope(arg=True),
+                         self.envelope(request_id=""),
+                         self.envelope(v=2),
+                         {"cmd": "playpause"}):
+            with self.subTest(envelope=envelope):
+                with self.assertRaises(ValueError):
+                    cli.to_request(["player", json.dumps(envelope)])
+
+    def test_a_malformed_envelope_exits_2(self):
+        proc = subprocess.run([CTL, "player", "{not json"],
+                              capture_output=True, timeout=15)
+        self.assertEqual(proc.returncode, 2)
+
+    def test_the_player_verb_exits_3_when_the_daemon_is_absent(self):
+        env = dict(os.environ)
+        with tempfile.TemporaryDirectory() as tmp:
+            env["XDG_RUNTIME_DIR"] = tmp
+            proc = subprocess.run(
+                [CTL, "player", json.dumps(self.envelope())], env=env,
+                capture_output=True, timeout=15)
+        self.assertEqual(proc.returncode, 3)
 
 
 class TestExitCodes(unittest.TestCase):

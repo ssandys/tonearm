@@ -177,7 +177,7 @@ test("missing pin copy differs from idle and Core failure, without selecting oth
   assert.strictEqual(M.barState(missing, 1, 1).severity, "warn")
   assert.strictEqual(M.barState(missing, 1, 1).glyph, M.GLYPH_FAULT)
   assert.deepStrictEqual(M.zoneList(missing).map((z) => z.id), ["other"])
-  assert.strictEqual(M.tooltipText({ ...missing, selection: { mode: "pinned", zone_id: "pin", availability: "unknown" } }), "Nothing playing · yavin")
+  assert.strictEqual(M.tooltipText({ ...missing, selection: { mode: "pinned", zone_id: "pin", availability: "unknown" } }), "Loading outputs… · yavin")
   assert.strictEqual(M.tooltipText({ ...missing, status: "unreachable" }), "Roon Core unreachable")
   assert.strictEqual(M.tooltipText({ v: 1, status: "ok", core: CORE, zone: null, zones: [] }), "Nothing playing · yavin")
   assert.strictEqual(M.headerStatus({ ...missing, zone: { id: "other", state: "playing" } }), "yavin")

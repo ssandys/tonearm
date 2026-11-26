@@ -7,6 +7,8 @@ iterated without restarting the service.
 
 from __future__ import annotations
 
+from . import player
+
 SCHEMA_VERSION = 1
 VALID_STATUS = ("connecting", "unpaired", "unreachable",
                 "no_network", "ok")
@@ -87,15 +89,25 @@ def _number(value, default=0):
 
 
 def _volume_of(roon_zone: dict) -> dict | None:
-    outputs = roon_zone.get("outputs") or []
-    if not outputs:
+    # Every step here is a shape check, because these dicts come off the
+    # Core: `outputs[0]` need not be a dict, and a "volume" need not be one
+    # either. `outputs[0].get("volume")` on a non-dict raised AttributeError
+    # out of normalize_zone -- which the publish path does not catch, so one
+    # malformed zone could take down every snapshot that carried it.
+    outputs = roon_zone.get("outputs")
+    if not isinstance(outputs, list) or not outputs:
         return None
-    raw = outputs[0].get("volume")
-    if not raw or raw.get("type") == "incremental" or raw.get("value") is None:
+    first = outputs[0]
+    if not isinstance(first, dict):
+        return None
+    raw = first.get("volume")
+    if not isinstance(raw, dict):
+        return None
+    if raw.get("type") == "incremental" or raw.get("value") is None:
         # Many streamers expose no volume object at all (a fixed-volume
-        # output) -- `not raw` -- or type "incremental", which has no
-        # absolute value/min/max at all, only relative up/down steps `raw
-        # can neither read nor set a slider position for. Previously only
+        # output) -- the shape check above -- or type "incremental", which
+        # has no absolute value/min/max at all, only relative up/down steps
+        # a slider can neither read nor set a position for. Previously only
         # the first case was handled, and an incremental output fell
         # through to the fabricated {"value": 0, "min": 0, "max": 100}
         # below -- a slider parked at zero for a zone whose real volume
@@ -164,6 +176,11 @@ def normalize_zone(roon_zone: dict | None) -> dict | None:
         "state": _state_word(roon_zone.get("state", "stopped")),
         "pinned": False,          # the daemon overwrites this; see zones.py
         "volume": _volume_of(roon_zone),
+        # What this zone's RAW payload supports, derived from that payload
+        # and never from the sanitized values above: a default is not a
+        # fact, and a fact published as a default would let the widget
+        # offer a control the Core does not have. See player.controls.
+        "controls": player.controls(roon_zone),
         "position": _seek_of(roon_zone, np),
         "length": _number(np.get("length"), 0),
         "now_playing": _now_playing_of(roon_zone),

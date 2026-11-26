@@ -21,7 +21,7 @@ import os
 import socket
 import threading
 
-from . import browse
+from . import browse, player
 
 LOG = logging.getLogger("tonearmd.server")
 
@@ -378,6 +378,38 @@ class Server:
             finally:
                 # In a finally so no later branch can be added that skips it.
                 conn.close()
+            return
+
+        if cmd == "player_targeted":
+            # The one command whose reply says what actually happened. It
+            # answers with EXACTLY one bounded line, always: a client that
+            # sent a request must be able to learn the outcome, because an
+            # empty read is indistinguishable from a lost reply -- and a
+            # lost reply must never be read as "the daemon refused".
+            #
+            # The envelope is validated here, before the session sees it, so
+            # a malformed request never becomes an SDK call.
+            if not player.valid_request(request):
+                reply = player.result(request, "refused", "bad_request")
+            elif not callable(getattr(self._session, "player_targeted", None)):
+                # A daemon that does not speak the protocol says so, rather
+                # than closing without a line.
+                reply = player.result(request, "refused", "unsupported")
+            else:
+                try:
+                    outcome = self._session.player_targeted(
+                        request["zone_id"], request["verb"], request["arg"],
+                        request["output_id"], request["output_ids"])
+                    reply = player.result(request, outcome["outcome"],
+                                          outcome["error"])
+                    if not player.valid_result(reply, request):
+                        raise ValueError("invalid player result")
+                except Exception:
+                    # The session may have dispatched before it failed. No
+                    # retry, and no claim that it was refused.
+                    LOG.warning("player dispatch failed; remote effect unknown")
+                    reply = player.result(request, "unknown", "internal_error")
+            self._reply_once(conn, reply)
             return
 
         if cmd == "browse":

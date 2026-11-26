@@ -1,17 +1,24 @@
 #!/usr/bin/python
 """tonearmctl -- talk to tonearmd over its unix socket.
 
-`subscribe` streams NDJSON state until killed; `status` and `browse` send one
-command and read exactly one reply line (Task 13's setup.sh --check uses
-`status` as its health probe); every other verb sends one command and exits.
-Exit codes: 0 ok, 2 usage, 3 daemon not running, 4 daemon accepted but did not
-answer in time -- except `browse`, which exits 1 rather than 0 when the reply's
-`ok` is false.
+`subscribe` streams NDJSON state until killed; `status`, `browse` and
+`player` send one command and read exactly one reply line (Task 13's
+setup.sh --check uses `status` as its health probe); every other verb sends
+one command and exits.
+Exit codes: 0 ok, 1 the daemon's answer says the command was not attempted
+(a refusal, or an unknown effect), 2 usage, 3 daemon not running, 4 daemon
+accepted but did not answer in time, 5 no correlated reply -- the effect is
+unknown and the command was NOT retried.
 
 `browse` takes an optional `--session <key>` before its op, naming which of the
 daemon's browse cursors to drive; it defaults to "cli" so that browsing from a
 terminal does not move the bar widget's own cursor. The flag must precede the
 op because `search` joins everything after its op into the search term.
+
+`player` takes one JSON envelope naming the zone the caller saw and the
+control to send, and prints the daemon's correlated reply verbatim. It never
+falls back to the plain verbs: after an uncertain dispatch, a second command
+is a second command.
 """
 
 import json
@@ -21,13 +28,26 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from tonearm_lib import cli, server, sood   # noqa: E402
+from tonearm_lib import cli, player, server, sood   # noqa: E402
 
 EXIT_USAGE = 2
 EXIT_NO_DAEMON = 3
 EXIT_TIMEOUT = 4
+# The daemon answered, but not with a result this request can be correlated
+# to: an empty read, a malformed line, or a reply for another request or
+# another room. The command's remote effect is unknown, and it is not retried.
+EXIT_NO_CORRELATED_REPLY = 5
+# The daemon answered, and the answer is correlated, and it says the command
+# was not attempted (a refusal) or that its effect is unknown.
+EXIT_NOT_ATTEMPTED = 1
 
 CONNECT_TIMEOUT = 5.0
+
+# Longest reply line read from the daemon. The daemon's own bound for one
+# line is server.MAX_PAYLOAD_BYTES (256 KiB); reading more than that is a
+# peer that is not speaking this protocol, and a reply that large is not a
+# player result.
+MAX_REPLY_BYTES = 256 * 1024
 
 # Per-verb, because the two verbs wait on different things. `status` is a
 # snapshot the daemon already holds and should answer in milliseconds. `browse`
@@ -37,7 +57,14 @@ CONNECT_TIMEOUT = 5.0
 # health probe hanging for twenty seconds.
 # Search input may wait 10 s plus five ordinary 2.5 s requests: 22.5 s
 # worst case inside this 25 s browse budget. Recheck both when changing the walk.
-REPLY_TIMEOUTS = {"status": 5.0, "browse": 25.0}
+#
+# `player_targeted` is the longest of the three: a group mute is a bounded
+# fan-out over up to 32 outputs, and each of those is an ordinary Roon
+# request that roonapi itself allows ~2.5s. 32 x 2.5s is 80s, so the budget
+# is 90s -- the fan-out plus its overhead. A shorter one would cut a
+# legitimate group mute off mid-way and leave the caller unable to tell a
+# slow Core from a lost reply.
+REPLY_TIMEOUTS = {"status": 5.0, "browse": 25.0, "player_targeted": 90.0}
 DEFAULT_REPLY_TIMEOUT = 5.0
 
 
@@ -95,6 +122,38 @@ def main(argv):
             sys.stdout.write(line)
             sys.stdout.flush()
             return 0
+
+        if request["cmd"] == "player_targeted":
+            # One bounded reply line, then exit -- and the reply is CHECKED,
+            # not assumed. This is the only verb whose answer says what
+            # actually happened, so an answer that cannot be correlated to
+            # this request is not an answer: it may belong to another room
+            # or another request, or it may be nothing at all.
+            #
+            # An empty read is NOT "unsupported, try the legacy verb". It is
+            # an unknown effect: the daemon may have dispatched and lost the
+            # reply, or it may not speak this protocol at all. Either way
+            # the command is not retried and never falls back -- a second
+            # attempt after an uncertain one is a second command.
+            line = sock.makefile("rb").readline(MAX_REPLY_BYTES + 1)
+            if not line or len(line) > MAX_REPLY_BYTES or not line.endswith(b"\n"):
+                print("no correlated reply; the command's effect is unknown"
+                      " and it was not retried", file=sys.stderr)
+                return EXIT_NO_CORRELATED_REPLY
+            try:
+                reply = json.loads(line)
+            except ValueError:
+                print("malformed reply; the command's effect is unknown"
+                      " and it was not retried", file=sys.stderr)
+                return EXIT_NO_CORRELATED_REPLY
+            if not player.valid_result(reply, request):
+                print("reply does not correlate with this request; the"
+                      " command's effect is unknown and it was not retried",
+                      file=sys.stderr)
+                return EXIT_NO_CORRELATED_REPLY
+            sys.stdout.write(line.decode("utf-8", "replace"))
+            sys.stdout.flush()
+            return 0 if reply["outcome"] == "attempted" else EXIT_NOT_ATTEMPTED
 
         if request["cmd"] == "browse":
             # The first verb with a reply payload callers actually parse:

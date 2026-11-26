@@ -43,3 +43,11 @@ Review follow-up: missing `_zone_list_generation` defaults to zero, so an API
 without an authoritative full-list marker remains unknown. Test doubles that
 represent a loaded list explicitly set their marker. Rebased on 0.14.2 with its
 local-art-only security fix preserved. No player-control or queue feature change.
+
+## Player command follow-up
+
+[Selected-output player controls](player-controls.md) now applies the same
+fail-closed generation gate to commands, including the existing CLI/MPRIS path.
+It adds zone-level capability facts and a captured-target result protocol while
+retaining a pre-dispatch legacy route for older running daemons. The snapshot-only
+limitations above describe the original selection-identity checkpoint.

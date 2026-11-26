@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+
+from . import player
+
 BARE_VERBS = ("playpause", "play", "pause", "next", "previous",
               "mute", "unmute", "subscribe", "status")
 INT_VERBS = ("seek", "volume")
@@ -19,6 +23,21 @@ def to_request(argv: list[str]) -> dict:
     if not argv:
         raise ValueError("usage: tonearmctl <verb> [arg]")
     verb = argv[0]
+
+    if verb == "player":
+        # One JSON envelope, validated HERE, before anything is sent. The
+        # envelope names the room the caller saw, so a request that does not
+        # parse exactly is a usage error rather than something to discover
+        # from the daemon's answer.
+        if len(argv) != 2:
+            raise ValueError("usage: tonearmctl player '<request JSON>'")
+        try:
+            request = json.loads(argv[1])
+        except ValueError:
+            raise ValueError("invalid player request") from None
+        if not player.valid_request(request):
+            raise ValueError("invalid player request")
+        return request
 
     if verb in BARE_VERBS:
         return {"cmd": verb}
