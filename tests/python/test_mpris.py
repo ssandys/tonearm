@@ -191,3 +191,146 @@ class TestConnectingThroughTheProxy(unittest.TestCase):
         with mock.patch.object(mpris, "MessageBus", BrokenBus):
             with self.assertRaises(PermissionError):
                 self.asyncio.run(mpris.MprisAdapter(session=None).start())
+
+
+def transport_payload(state="playing", **controls):
+    """A snapshot whose zone carries the daemon's per-verb transport facts.
+
+    Shaped as state.normalize_zone publishes it: `controls` comes from
+    player.controls(), which is True only where Roon's is_*_allowed is True.
+    """
+    facts = {"play": False, "pause": False, "next": False, "previous": False}
+    facts.update(controls)
+    zone = dict(PLAYING["zone"], state=state, controls=facts)
+    return dict(PLAYING, zone=zone)
+
+
+class FakeSession:
+    def __init__(self):
+        self.calls = []
+
+    def command(self, verb, arg=None):
+        self.calls.append((verb, arg))
+
+
+def call(player, name, *args):
+    """Run a D-Bus method the way dbus_next dispatches it.
+
+    The decorated attribute is a sync wrapper that drops the coroutine;
+    dbus_next itself awaits the original function, kept on __DBUS_METHOD.
+    """
+    import asyncio
+    fn = getattr(player, name).__dict__["__DBUS_METHOD"].fn
+    asyncio.run(fn(player, *args))
+
+
+TRANSPORT_PROPS = ("CanPlay", "CanPause", "CanGoNext", "CanGoPrevious")
+
+
+class TestTransportCapabilities(unittest.TestCase):
+    """Media keys follow Roon's per-verb permissions, like the popup.
+
+    omarchy's media service asks the property matching the action it is about
+    to take (CanPause while playing, CanPlay otherwise, CanGoNext/
+    CanGoPrevious for skips) and hands the key to another player when it is
+    false. Reporting True for any zone sent play to an empty queue, where
+    Roon silently ignores it.
+    """
+
+    def player(self, payload):
+        p = mpris._Player(FakeSession())
+        p.apply(payload)
+        return p
+
+    def test_each_property_reads_its_own_roon_permission(self):
+        for prop, fact in (("CanPlay", "play"), ("CanPause", "pause"),
+                           ("CanGoNext", "next"), ("CanGoPrevious", "previous")):
+            with self.subTest(prop=prop):
+                self.assertTrue(getattr(self.player(transport_payload(**{fact: True})), prop))
+                self.assertFalse(getattr(self.player(transport_payload(**{fact: False})), prop))
+
+    def test_a_normal_zone_keeps_its_keys(self):
+        # The regression that matters: what works today must keep working.
+        playing = self.player(transport_payload("playing", pause=True, next=True, previous=True))
+        self.assertTrue(playing.CanPause)
+        self.assertTrue(playing.CanGoNext)
+        self.assertTrue(playing.CanGoPrevious)
+        paused = self.player(transport_payload("paused", play=True, next=True, previous=True))
+        self.assertTrue(paused.CanPlay)
+
+    def test_an_empty_queue_offers_nothing(self):
+        p = self.player(transport_payload("stopped"))
+        for prop in TRANSPORT_PROPS:
+            self.assertFalse(getattr(p, prop), prop)
+
+    def test_missing_or_malformed_controls_are_false(self):
+        zone_without = {k: v for k, v in PLAYING["zone"].items() if k != "controls"}
+        payloads = [None, {}, {"zone": None}, dict(PLAYING, zone=zone_without)]
+        for bad in (None, "yes", [], {"play": 1}, {"play": "true"}):
+            payloads.append(dict(PLAYING, zone=dict(PLAYING["zone"], controls=bad)))
+        for payload in payloads:
+            p = self.player(payload)
+            for prop in TRANSPORT_PROPS:
+                with self.subTest(payload=payload, prop=prop):
+                    self.assertFalse(getattr(p, prop))
+
+    def test_a_flip_is_announced(self):
+        # Without a PropertiesChanged for the name, a client that cached
+        # CanPlay keeps the old answer forever.
+        p = self.player(transport_payload("paused", play=True, next=True))
+        changed = p.apply(transport_payload("stopped", next=True))
+        self.assertIn("CanPlay", changed)
+        self.assertNotIn("CanGoNext", changed)
+
+    def test_the_announced_value_is_the_value_read(self):
+        # update() diffs _tracked_values() but emits the property getters;
+        # the two must never disagree.
+        for payload in (transport_payload("playing", pause=True, next=True),
+                        transport_payload("paused", play=True, previous=True),
+                        transport_payload("stopped"), {}):
+            p = self.player(payload)
+            for name, value in p._tracked_values().items():
+                if name == "Metadata":
+                    continue    # the getter wraps it in D-Bus Variants
+                with self.subTest(name=name):
+                    self.assertEqual(getattr(p, name), value)
+
+
+class TestTransportMethodsHonourTheirPermission(unittest.TestCase):
+    """The MPRIS spec: calling a method whose Can* is false has no effect.
+
+    These go through session.command(), which has none of player_targeted's
+    capability checks, so the gate is here.
+    """
+
+    def run_method(self, payload, name):
+        session = FakeSession()
+        p = mpris._Player(session)
+        p.apply(payload)
+        call(p, name)
+        return session.calls
+
+    def test_each_method_is_refused_without_its_permission(self):
+        for name, verb, fact in (("Play", "play", "play"), ("Pause", "pause", "pause"),
+                                 ("Stop", "pause", "pause"), ("Next", "next", "next"),
+                                 ("Previous", "previous", "previous")):
+            with self.subTest(method=name):
+                self.assertEqual(self.run_method(transport_payload(), name), [])
+                self.assertEqual(self.run_method(transport_payload(**{fact: True}), name),
+                                 [(verb, None)])
+
+    def test_playpause_asks_the_permission_for_the_current_state(self):
+        cases = (("playing", "pause"), ("loading", "play"), ("paused", "play"),
+                 ("stopped", "play"))
+        for state, fact in cases:
+            for allowed in (True, False):
+                with self.subTest(state=state, allowed=allowed):
+                    other = "play" if fact == "pause" else "pause"
+                    payload = transport_payload(state, **{fact: allowed, other: not allowed})
+                    self.assertEqual(self.run_method(payload, "PlayPause"),
+                                     [("playpause", None)] if allowed else [])
+
+    def test_no_zone_sends_nothing(self):
+        for name in ("Play", "Pause", "Stop", "Next", "Previous", "PlayPause"):
+            with self.subTest(method=name):
+                self.assertEqual(self.run_method({}, name), [])

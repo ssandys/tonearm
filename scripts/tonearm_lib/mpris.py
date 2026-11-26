@@ -98,6 +98,29 @@ def local_art_url(path) -> str | None:
     return "file://" + path
 
 
+def transport_allowed(payload, fact: str) -> bool:
+    """Roon's own permission for one transport verb on the followed zone.
+
+    `fact` is "play", "pause", "next" or "previous": the per-verb facts
+    player.controls() derives from is_*_allowed, True only when Roon said
+    True. A missing zone, missing or malformed controls, or anything but a
+    literal True is False -- the same rule the popup's buttons follow.
+    """
+    zone = payload.get("zone") if isinstance(payload, dict) else None
+    controls = zone.get("controls") if isinstance(zone, dict) else None
+    return isinstance(controls, dict) and controls.get(fact) is True
+
+
+def playpause_fact(payload) -> str:
+    """The permission PlayPause needs now: pause while playing, else play.
+
+    The same rule core.player_targeted applies before dispatch.
+    """
+    zone = payload.get("zone") if isinstance(payload, dict) else None
+    state = zone.get("state") if isinstance(zone, dict) else None
+    return "pause" if state == "playing" else "play"
+
+
 def _variants(md: dict) -> dict:
     out = {}
     for key, value in md.items():
@@ -159,15 +182,16 @@ class _Player(ServiceInterface):
                 "CanGoNext", "CanGoPrevious", "CanSeek")
 
     def _tracked_values(self) -> dict:
+        # One source for both the diff in apply() and the property getters,
+        # which update() emits: they must never disagree.
         zone = self._payload.get("zone") or {}
-        has_zone = bool(self._payload.get("zone"))
         return {
             "PlaybackStatus": playback_status(zone.get("state")),
             "Metadata": metadata_for(self._payload),
-            "CanPlay": has_zone,
-            "CanPause": has_zone,
-            "CanGoNext": has_zone,
-            "CanGoPrevious": has_zone,
+            "CanPlay": transport_allowed(self._payload, "play"),
+            "CanPause": transport_allowed(self._payload, "pause"),
+            "CanGoNext": transport_allowed(self._payload, "next"),
+            "CanGoPrevious": transport_allowed(self._payload, "previous"),
             "CanSeek": bool(zone.get("length")),
         }
 
@@ -184,7 +208,7 @@ class _Player(ServiceInterface):
         against a real paused zone until this diff included CanPlay/CanPause.
         """
         before = self._tracked_values()
-        self._payload = payload or {}
+        self._payload = payload if isinstance(payload, dict) else {}
         after = self._tracked_values()
         return [name for name in self._TRACKED if before[name] != after[name]]
 
@@ -203,23 +227,23 @@ class _Player(ServiceInterface):
 
     @dbus_property(access=PropertyAccess.READ)
     def CanPlay(self) -> "b":             # noqa: F821
-        return bool(self._payload.get("zone"))
+        return self._tracked_values()["CanPlay"]
 
     @dbus_property(access=PropertyAccess.READ)
     def CanPause(self) -> "b":            # noqa: F821
-        return bool(self._payload.get("zone"))
+        return self._tracked_values()["CanPause"]
 
     @dbus_property(access=PropertyAccess.READ)
     def CanGoNext(self) -> "b":           # noqa: F821
-        return bool(self._payload.get("zone"))
+        return self._tracked_values()["CanGoNext"]
 
     @dbus_property(access=PropertyAccess.READ)
     def CanGoPrevious(self) -> "b":       # noqa: F821
-        return bool(self._payload.get("zone"))
+        return self._tracked_values()["CanGoPrevious"]
 
     @dbus_property(access=PropertyAccess.READ)
     def CanSeek(self) -> "b":             # noqa: F821
-        return bool((self._payload.get("zone") or {}).get("length"))
+        return self._tracked_values()["CanSeek"]
 
     @dbus_property(access=PropertyAccess.READ)
     def CanControl(self) -> "b":          # noqa: F821
@@ -242,29 +266,37 @@ class _Player(ServiceInterface):
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._session.command, verb, arg)
 
+    async def _transport(self, verb: str, fact: str) -> None:
+        # The MPRIS spec: a method whose Can* is false has no effect. These
+        # reach session.command(), which has none of player_targeted's
+        # capability checks, so the gate is here, on the same facts the
+        # Can* properties publish.
+        if transport_allowed(self._payload, fact):
+            await self._run_command(verb)
+
     @method()
     async def PlayPause(self):
-        await self._run_command("playpause")
+        await self._transport("playpause", playpause_fact(self._payload))
 
     @method()
     async def Play(self):
-        await self._run_command("play")
+        await self._transport("play", "play")
 
     @method()
     async def Pause(self):
-        await self._run_command("pause")
+        await self._transport("pause", "pause")
 
     @method()
     async def Stop(self):
-        await self._run_command("pause")
+        await self._transport("pause", "pause")
 
     @method()
     async def Next(self):
-        await self._run_command("next")
+        await self._transport("next", "next")
 
     @method()
     async def Previous(self):
-        await self._run_command("previous")
+        await self._transport("previous", "previous")
 
     @method()
     async def SetPosition(self, track_id: "o", position: "x"):   # noqa: F821
