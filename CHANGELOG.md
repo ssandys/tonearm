@@ -4,6 +4,26 @@ Notable changes to tonearm. Versions follow [semantic versioning](https://semver
 while the major version is 0, the minor version carries changes that would
 otherwise be breaking.
 
+## 0.14.6 — 2026-11-26
+
+### Added
+
+- **Player controls act on the room you are looking at, and say what
+  happened.** Play/pause, next, previous, seek, volume and mute in the popup
+  now send a request naming the zone the popup shows, so a selection change
+  mid-click can no longer redirect it to another room. If Roon refuses, or
+  the room went away, the popup says so instead of doing nothing. A daemon
+  still running an older version keeps the previous behaviour until it
+  restarts. (#52)
+
+### Fixed
+
+- **Buttons that would do nothing are greyed out.** Previous, play/pause and
+  next each follow Roon's own permission for that command, so a zone with an
+  empty queue greys out play rather than silently ignoring the click, without
+  greying out the others. The daemon checks the same permission again before
+  sending. (#52)
+
 ## 0.14.5 — 2026-11-05
 
 ### Security

@@ -92,6 +92,14 @@ name is refused. The proxy unit is itself sandboxed (`PrivateNetwork`,
 The widget runs inside `omarchy-shell`, so everything it reads is bounded
 producer-side.
 
+Commands leave the shell only as an argv array to `tonearmctl`, never
+through a shell. Since 0.14.6 the popup's player controls send one JSON
+envelope (`tonearmctl player '<json>'`) naming the zone the user saw; the
+CLI and the socket each validate it with `player.valid_request` before the
+session sees it, and the daemon refuses a command the selected zone's Roon
+flags do not allow (`is_play_allowed` and its siblings) before any SDK call.
+The reply is one bounded line. See `docs/player-controls.md`.
+
 The shell makes no network requests. Every cover the popup shows — now
 playing and every browse row — is fetched by `tonearmd` through
 `art.fetch()` and reaches QML only as `art_path`, a file in the 0700 cache,
