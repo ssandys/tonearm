@@ -226,6 +226,7 @@ def build(status: str, core: dict | None, zone: dict | None,
         }
     return {
         "v": SCHEMA_VERSION,
+        "features": {"browse_actions": 1},
         "status": status,
         "core": trimmed_core,
         "zone": zone,

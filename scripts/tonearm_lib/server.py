@@ -21,7 +21,7 @@ import os
 import socket
 import threading
 
-from . import browse, player
+from . import browse, player, browse_play
 
 LOG = logging.getLogger("tonearmd.server")
 
@@ -409,6 +409,28 @@ class Server:
                     # retry, and no claim that it was refused.
                     LOG.warning("player dispatch failed; remote effect unknown")
                     reply = player.result(request, "unknown", "internal_error")
+            self._reply_once(conn, reply)
+            return
+
+        if cmd == "browse" and request.get("op") == "play_selected":
+            if not browse_play.valid_request(request):
+                reply = browse_play.result(request, "refused", "bad_request")
+            elif not callable(getattr(self._session, "browse", None)):
+                reply = browse_play.result(request, "refused", "unsupported")
+            else:
+                try:
+                    reply = dict(self._session.browse(
+                        request["session"], "play_selected", index=request["index"],
+                        level_id=request["level_id"], zone_id=request["zone_id"],
+                        request_id=request["request_id"], action=request["action"]))
+                    reply["v"] = 1
+                    if not browse_play.valid_result(reply, request):
+                        raise ValueError("invalid selected browse result")
+                    # Serialization is guarded: never retry a failed dispatch.
+                    _bounded_blob(reply)
+                except Exception:
+                    LOG.warning("selected browse result unknown; no retry sent")
+                    reply = browse_play.result(request, "unknown", "internal_error")
             self._reply_once(conn, reply)
             return
 

@@ -18,6 +18,12 @@ def fixture(name):
 
 
 class TestNormalizeZone(unittest.TestCase):
+    def test_synthetic_feature_advertisement_is_exact_numeric_version(self):
+        for status in state.VALID_STATUS:
+            features=state.build(status,None,None,[])['features']
+            self.assertEqual(features,{'browse_actions':1})
+            self.assertIs(type(features['browse_actions']),int)
+
     def setUp(self):
         self.raw = fixture("zone_playing.json")
 
@@ -369,7 +375,7 @@ class TestPublishedControls(unittest.TestCase):
     def test_the_payload_key_set_is_unchanged(self):
         built = state.build("ok", None, None, [])
         self.assertEqual(set(built),
-                         {"v", "status", "core", "zone", "zones", "selection"})
+                         {"v", "status", "core", "zone", "zones", "selection", "features"})
 
     def test_a_malformed_output_does_not_raise_and_shows_no_volume(self):
         # `outputs[0].get("volume")` on a non-dict raised AttributeError out
