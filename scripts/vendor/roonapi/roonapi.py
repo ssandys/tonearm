@@ -463,6 +463,14 @@ class RoonApi:  # pylint: disable=too-many-instance-attributes, too-many-lines
             id_filter = [id_filter]
         self._state_callbacks.append((callback, event_filter, id_filter))
 
+    # LOCAL PATCH (tonearm queue 1): an owned, bounded queue consumer API.
+    def subscribe_queue(self, callback, zone_id, max_item_count=100):
+        """Return one owned handle; callback receives (name, body, MOO verb)."""
+        socket = getattr(self, '_roonsocket', None)
+        if socket is None:
+            raise ConnectionError('queue_disconnected')
+        return socket.subscribe_owned_queue(callback, zone_id, max_item_count)
+
     def register_queue_callback(self, callback, zone_or_output_id=""):
         """
         Subscribe to queue change events.

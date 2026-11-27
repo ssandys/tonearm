@@ -360,7 +360,7 @@ class TestPublishedControls(unittest.TestCase):
         zone = state.normalize_zone(self.raw)
         self.assertEqual(set(zone), {"id", "name", "state", "pinned", "volume",
                                      "controls", "position", "length",
-                                     "now_playing"})
+                                     "now_playing", "queue_time_remaining"})
 
     def test_the_zone_listing_still_carries_only_id_name_and_state(self):
         built = state.build("ok", None, None, [state.normalize_zone(self.raw)])

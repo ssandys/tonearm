@@ -141,7 +141,8 @@ class SelectionIdentityTest(unittest.TestCase):
         self.assertEqual(snap["v"], 1)
         self.assertEqual(snap["zone"]["id"], "other")
         self.assertEqual(snap["selection"], {"mode": "pinned", "zone_id": "pin", "availability": "missing"})
-        self.assertEqual(set(snap) - {"selection"}, {"v", "status", "core", "zone", "zones"})
+        self.assertEqual(set(snap) - {"selection", "queue"}, {"v", "status", "core", "zone", "zones"})
+        self.assertEqual(set(snap['queue']), {'status', 'error', 'zone_id', 'items', 'revision', 'limit'})
 
     def test_reconnect_requires_new_full_list_before_missing(self):
         s = session("pin", zones=[zone("other", "playing")], generation=1)

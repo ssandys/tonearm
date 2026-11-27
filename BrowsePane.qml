@@ -94,6 +94,10 @@ Item {
   // reserve contentColumn's inter-item spacing before it, growing the popup
   // permanently for every user even if they never search.
   visible: root.hasContent
+  // Panel overlays can temporarily hide the pane while a level's artwork is
+  // still arriving. A retry that fires while hidden returns before sending;
+  // restart the bounded chain when the pane becomes visible again.
+  onVisibleChanged: if (visible) root._scheduleArt()
 
   // Sets `editing` synchronously so `hasContent`/`visible` above flip true in
   // this same pass, then defers the actual focus grab. This mirrors

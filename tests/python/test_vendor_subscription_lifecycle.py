@@ -1,4 +1,4 @@
-"""General vendor lifecycle regressions: fake websocket, no owned queue APIs."""
+"""Vendor lifecycle regressions using synthetic fake websocket frames only."""
 import json
 import sys
 import threading
@@ -319,8 +319,8 @@ class SubscriptionLifecycleTests(unittest.TestCase):
         seen = []
         self.assertIsNone(api.register_queue_callback(seen.append, 'synthetic-zone'))
         self.assertEqual(sock._socket.sent[0][0], 'MOO/1 REQUEST ' + SERVICE_TRANSPORT + '/subscribe_queue')
-        self.assertFalse(hasattr(api, 'subscribe_queue'))
-        self.assertFalse(hasattr(sock, 'subscribe_owned_queue'))
+        self.assertTrue(callable(api.subscribe_queue))
+        self.assertTrue(callable(sock.subscribe_owned_queue))
         sock.subscribe('synthetic', 'limited', seen.append, {'max_item_count': 100})
         self.assertEqual(sock._socket.sent[-1][1]['max_item_count'], 100)
         frame(sock, 11, {'items': list(range(137))})
