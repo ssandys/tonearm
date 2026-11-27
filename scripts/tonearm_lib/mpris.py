@@ -158,16 +158,26 @@ class _Player(ServiceInterface):
     _TRACKED = ("PlaybackStatus", "Metadata", "CanPlay", "CanPause",
                 "CanGoNext", "CanGoPrevious", "CanSeek")
 
+    def _can_transport(self, verb: str) -> bool:
+        # These are the same per-verb facts the popup reads, not guesses
+        # based on a zone's presence or playback state (including loading).
+        # Snapshots normally withhold disconnected zones; also refuse any
+        # stale facts if a non-ok payload does carry one.
+        if self._payload.get("status") != "ok":
+            return False
+        zone = self._payload.get("zone")
+        controls = zone.get("controls") if isinstance(zone, dict) else None
+        return isinstance(controls, dict) and controls.get(verb) is True
+
     def _tracked_values(self) -> dict:
         zone = self._payload.get("zone") or {}
-        has_zone = bool(self._payload.get("zone"))
         return {
             "PlaybackStatus": playback_status(zone.get("state")),
             "Metadata": metadata_for(self._payload),
-            "CanPlay": has_zone,
-            "CanPause": has_zone,
-            "CanGoNext": has_zone,
-            "CanGoPrevious": has_zone,
+            "CanPlay": self.CanPlay,
+            "CanPause": self.CanPause,
+            "CanGoNext": self.CanGoNext,
+            "CanGoPrevious": self.CanGoPrevious,
             "CanSeek": bool(zone.get("length")),
         }
 
@@ -203,19 +213,19 @@ class _Player(ServiceInterface):
 
     @dbus_property(access=PropertyAccess.READ)
     def CanPlay(self) -> "b":             # noqa: F821
-        return bool(self._payload.get("zone"))
+        return self._can_transport("play")
 
     @dbus_property(access=PropertyAccess.READ)
     def CanPause(self) -> "b":            # noqa: F821
-        return bool(self._payload.get("zone"))
+        return self._can_transport("pause")
 
     @dbus_property(access=PropertyAccess.READ)
     def CanGoNext(self) -> "b":           # noqa: F821
-        return bool(self._payload.get("zone"))
+        return self._can_transport("next")
 
     @dbus_property(access=PropertyAccess.READ)
     def CanGoPrevious(self) -> "b":       # noqa: F821
-        return bool(self._payload.get("zone"))
+        return self._can_transport("previous")
 
     @dbus_property(access=PropertyAccess.READ)
     def CanSeek(self) -> "b":             # noqa: F821

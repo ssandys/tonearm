@@ -1,3 +1,4 @@
+import copy
 import os
 import sys
 import unittest
@@ -94,6 +95,160 @@ class TestPlaybackStatus(unittest.TestCase):
     def test_an_unknown_state_is_stopped_rather_than_an_exception(self):
         self.assertEqual(mpris.playback_status("constructor"), "Stopped")
         self.assertEqual(mpris.playback_status(None), "Stopped")
+
+
+class FakeSession:
+    """Publish snapshots offline; no bus, Core or command dispatch."""
+
+    def __init__(self):
+        self.payload = copy.deepcopy(PLAYING)
+        self.payload["zone"]["controls"] = {
+            "play": True, "pause": False, "next": False, "previous": True,
+        }
+
+    def snapshot(self):
+        return copy.deepcopy(self.payload)
+
+
+class TestTransportCapabilities(unittest.TestCase):
+    PROPERTIES = {
+        "CanPlay": "play", "CanPause": "pause",
+        "CanGoNext": "next", "CanGoPrevious": "previous",
+    }
+
+    def setUp(self):
+        from unittest import mock
+        self.session = FakeSession()
+        self.adapter = mpris.MprisAdapter(self.session)
+        self.player = self.adapter._player
+        # Only enable the adapter's notification branch. Never start a bus.
+        self.adapter._bus = object()
+        self.emitted = mock.Mock()
+        self.player.emit_properties_changed = self.emitted
+
+    def update(self):
+        self.adapter.update(self.session.snapshot())
+
+    def assert_capabilities(self, expected):
+        tracked = self.player._tracked_values()
+        for name, verb in self.PROPERTIES.items():
+            with self.subTest(property=name):
+                self.assertIn(name, self.player._TRACKED)
+                self.assertIs(getattr(self.player, name), expected[verb])
+                self.assertIs(tracked[name], expected[verb])
+
+    def test_permissions_are_independent_of_each_other_and_playback_state(self):
+        for state in ("playing", "paused", "stopped", "loading"):
+            for allowed_verb in self.PROPERTIES.values():
+                with self.subTest(state=state, allowed_verb=allowed_verb):
+                    controls = {verb: verb == allowed_verb
+                                for verb in self.PROPERTIES.values()}
+                    self.session.payload["zone"].update(state=state, controls=controls)
+                    self.update()
+                    self.assert_capabilities(controls)
+
+    def test_each_permission_requires_literal_true(self):
+        for verb in self.PROPERTIES.values():
+            for value in (False, None, 0, 1, 1.0, "true", "false", [], {}, [True]):
+                with self.subTest(verb=verb, value=value):
+                    controls = dict.fromkeys(self.PROPERTIES.values(), True)
+                    controls[verb] = value
+                    self.session.payload["zone"]["controls"] = controls
+                    self.update()
+                    self.assert_capabilities({v: v != verb for v in controls})
+
+    def test_missing_permission_does_not_borrow_another_verbs_fact(self):
+        for verb in self.PROPERTIES.values():
+            with self.subTest(verb=verb):
+                controls = dict.fromkeys(self.PROPERTIES.values(), True)
+                del controls[verb]
+                self.session.payload["zone"]["controls"] = controls
+                self.update()
+                self.assert_capabilities({v: v != verb for v in self.PROPERTIES.values()})
+
+    def test_missing_or_malformed_controls_deny_all_four_verbs(self):
+        zone = self.session.payload["zone"]
+        del zone["controls"]
+        self.update()
+        self.assert_capabilities(dict.fromkeys(self.PROPERTIES.values(), False))
+        for controls in (None, False, 1, "true", [], [True], {}):
+            with self.subTest(controls=controls):
+                zone["controls"] = controls
+                self.update()
+                self.assert_capabilities(dict.fromkeys(self.PROPERTIES.values(), False))
+
+    def test_disconnected_status_cannot_advertise_cached_permissions(self):
+        for status in ("connecting", "unpaired", "unreachable", "no_network", None):
+            with self.subTest(status=status):
+                self.session.payload["status"] = status
+                self.session.payload["zone"]["controls"] = dict.fromkeys(
+                    self.PROPERTIES.values(), True)
+                self.update()
+                self.assert_capabilities(dict.fromkeys(self.PROPERTIES.values(), False))
+
+    def test_no_zone_or_initial_payload_advertises_no_permissions(self):
+        self.assert_capabilities(dict.fromkeys(self.PROPERTIES.values(), False))
+        for payload in ({}, {"status": "ok"}, {"status": "ok", "zone": None},
+                        {"status": "ok", "zone": {}}):
+            with self.subTest(payload=payload):
+                self.session.payload = payload
+                self.update()
+                self.assert_capabilities(dict.fromkeys(self.PROPERTIES.values(), False))
+
+    def test_capability_only_flips_emit_exactly_the_changed_property(self):
+        self.update()
+        for name, verb in self.PROPERTIES.items():
+            for _ in range(2):  # Both enabling and disabling each permission.
+                with self.subTest(property=name):
+                    controls = self.session.payload["zone"]["controls"]
+                    controls[verb] = not controls[verb]
+                    self.emitted.reset_mock()
+                    self.update()
+                    self.emitted.assert_called_once_with({name: controls[verb]})
+                    self.assert_capabilities(controls)
+
+    def test_unchanged_payload_and_position_ticks_emit_nothing(self):
+        self.update()
+        self.emitted.reset_mock()
+        self.update()
+        self.session.payload["zone"]["position"] += 1
+        self.update()
+        self.emitted.assert_not_called()
+
+    def test_zone_loss_and_recovery_notify_permissions(self):
+        zone = self.session.payload["zone"]
+        zone["controls"] = dict.fromkeys(self.PROPERTIES.values(), True)
+        self.update()
+        self.emitted.reset_mock()
+        self.session.payload["zone"] = None
+        self.update()
+        changes = self.emitted.call_args.args[0]
+        for name in self.PROPERTIES:
+            self.assertIs(changes[name], False)
+        self.assertEqual(changes["PlaybackStatus"], "Stopped")
+        self.assertEqual(changes["Metadata"], {})
+        self.emitted.reset_mock()
+        self.session.payload["zone"] = zone
+        self.update()
+        changes = self.emitted.call_args.args[0]
+        for name in self.PROPERTIES:
+            self.assertIs(changes[name], True)
+
+    def test_metadata_status_and_seek_behavior_are_preserved(self):
+        self.update()
+        self.emitted.reset_mock()
+        zone = self.session.payload["zone"]
+        zone["state"] = "paused"
+        zone["now_playing"]["title"] = "Next track"
+        self.update()
+        self.emitted.assert_called_once_with({
+            "PlaybackStatus": "Paused", "Metadata": self.player.Metadata,
+        })
+        self.assertEqual(self.player.Metadata["xesam:title"].value, "Next track")
+        self.assertEqual(self.player.Metadata["mpris:length"].value, 585_000_000)
+        self.assertEqual(self.player.Position, 271_000_000)
+        self.assertIs(self.player.CanSeek, True)
+        self.assert_capabilities(zone["controls"])
 
 
 if __name__ == "__main__":
