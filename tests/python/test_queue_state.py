@@ -62,6 +62,16 @@ class CacheTests(unittest.TestCase):
         self.assertEqual([x['id'] for x in self.cache.snapshot()['items']], [2])
         self.assertNotIn('schema', self.pushed[-1])
 
+    def test_optional_queue_row_fields_are_ignored_without_losing_labels(self):
+        row = item()
+        row.update({'image_key': 'synthetic-image-key', 'length': 123,
+                    'one_line': {'line1': 'synthetic'},
+                    'two_line': {'line1': 'synthetic', 'line2': 'synthetic'}})
+        row['three_line']['line3'] = 'synthetic album'
+        self.bind()('Subscribed', {'items': [row]})
+        self.assertEqual(self.cache.snapshot()['items'], [
+            {'id': 1, 'title': 'Synthetic title', 'subtitle': 'Synthetic artist'}])
+
     def test_invalid_contracts_clear_and_allow_only_one_fresh_bind(self):
         bad = [('Changed', {'changes': []}), ('Subscribed', {'items': [item(), item()]}),
                ('Subscribed', {'items': [item(i) for i in range(101)]}),

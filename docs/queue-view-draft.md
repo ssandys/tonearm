@@ -22,9 +22,10 @@ selection hides it. Radio/repeat totals are not inferred.
 ## Evidence boundary
 
 Retained batch 7 proves only one paused iFi initial `Subscribed` with `items`,
-integer `queue_item_id` and string `three_line.line1`/`line2`. It does not record
-the initial frame's MOO verb. No live Core, playback, queue, D-Bus or installed
-action was performed while preparing this draft.
+integer `queue_item_id` and string `three_line.line1`/`line2`. A new sanitized
+read-only observation on 2026-11-27 additionally checked the user-identified
+iFi and alc outputs while paused; details follow below. No playback, queue,
+D-Bus or installed action was performed.
 
 Official [transport lib.js](https://github.com/RoonLabs/node-roon-api-transport/blob/master/lib.js)
 confirms `zone_or_output_id`, `max_item_count`, forwarded response/body and the
@@ -35,8 +36,8 @@ These sources do not establish consumer delta bodies. The owned callback keeps
 the event name and explicitly supplies the MOO verb as its third argument;
 legacy callbacks remain body-only and return None.
 
-All new offline frames are explicitly synthetic. Empty `items`, string IDs,
-`Changed.changes` ordered insert `{operation,index,items}` and remove
+All new offline event frames remain explicitly synthetic. Empty `items`, string
+IDs, `Changed.changes` ordered insert `{operation,index,items}` and remove
 `{operation,index,count}` are defensive contract assumptions, not live schemas.
 Other operations, malformed indices, duplicate IDs, deltas before a snapshot,
 oversized windows and unsupported responses fail closed. Labels are clipped to
@@ -44,20 +45,48 @@ oversized windows and unsupported responses fail closed. Labels are clipped to
 at 60 KiB, and normalized rows below 60 KiB including snapshot field overhead.
 The existing 256 KiB server envelope cap and degradation rules remain in force.
 
-This remains **DRAFT** pending separately authorized sanitized live checks of:
+### Sanitized live observation — 2026-11-27
 
-- Initial MOO CONTINUE versus COMPLETE and optional nested item fields.
+The user confirmed iFi and alc could be heard and left both paused. A temporary
+SDK session subscribed to each user-named output for 45 seconds with
+`max_item_count=100`, then cancelled both owned handles and stopped. The probe
+printed only event/verb names, field names/types, row counts, numeric-time
+sample counts/trend and cancellation-response metadata. It did not print or
+persist row text, item IDs, image keys, Core address, token or raw frames.
+
+- iFi: one `Subscribed/CONTINUE`, `items` count 1, integer
+  `queue_item_id`; row keys `image_key`, `length`, `one_line`,
+  `queue_item_id`, `three_line`, `two_line`; `three_line` keys include
+  `line1`, `line2`, `line3`; line1/line2 are strings. The line3 value type was
+  not recorded.
+- alc: one `Subscribed/CONTINUE` with the same field/type shape and `items`
+  count 2.
+- Both paused zones produced 9 finite numeric cached
+  `queue_time_remaining` samples; each value was unchanged during the window.
+- No empty queue, `Changed`, error/end/Unsubscribed event occurred. No matching
+  unsubscribe reply frame was seen in the two-second post-cancel observation;
+  this does not prove the Core never acknowledged cancellation.
+- No playback, volume, output-selection or queue mutation was sent.
+
+The consumer already ignores optional row fields and uses only line1/line2;
+`test_optional_queue_row_fields_are_ignored_without_losing_labels` pins the
+observed additional metadata shape with synthetic values. This sample resolves
+the initial MOO verb and basic item shape for these two paused outputs only.
+
+This remains **DRAFT** pending further sanitized live checks of:
+
 - Empty queue acknowledgement distinguished from an error.
 - Ordered Changed insert/remove and rolling window behavior beyond 100 rows;
   whether `max_item_count` is honored.
 - Error, end and Unsubscribed frames, plus wire-level remote cancellation
   acknowledgement (local cancellation is not that proof).
-- Any output beyond the single paused iFi sample.
-- A finite numeric queue-time sample and actual countdown behavior, including
-  unknown totals for radio/repeat where applicable.
+- Any other outputs in addition to iFi and alc.
+- Actual countdown behavior while playback is already active, including unknown
+  totals for radio/repeat where applicable.
 
 Synthetic tests and mocked Qt renders do not satisfy the maintainer's live-schema
-gate. No schema probe or new public RPC is included in this consumer.
+gate. No live probe code or new public RPC is included in this consumer; the
+one-off sanitized probe was kept under `/tmp` and is not part of the PR.
 
 ## Independent composition with Library PR 55
 
@@ -83,5 +112,7 @@ semantic helpers.
 Focused synthetic regression commands and mocked visual/click results are
 recorded in `/tmp/10p-queue-worker-report.md`. Coordinator review found and
 fixed the hidden-pane art-retry interaction; the focused offscreen Qt regression
-passes. Full offline suite passes, but live-schema acceptance remains pending.
-The coordinator owns draft publication; no live probe is part of this change.
+passes. Full `./bin/test` after the live-shape fixture passes725Python/152JS
+(`/tmp/10p-queue-full-live-update.log`), plus manifest/Bash checks. The focused
+queue/vendor/state set passes157Python. Live delta/empty/window/error/cancel/
+countdown schema acceptance remains pending.
