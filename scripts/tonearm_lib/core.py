@@ -1092,11 +1092,65 @@ class RoonSession:
                          evicted)
             return existing
 
+    def browse_play_selected(self, key, index, level_id, zone_id, request_id,
+                             action=None):
+        """Opt-in selected Play Now, Play Next, or Add to Queue.
+
+        No global/server lock spans browse I/O. Every caller must name its token; an
+        unknown token is refused before a browse session is used.
+        """
+        if (not isinstance(key, str) or not 0 < len(key) <= 64
+                or type(index) is not int or not 0 <= index < 100
+                or type(level_id) is not int or not 0 <= level_id <= 9007199254740991
+                or not isinstance(zone_id, str) or not 0 < len(zone_id) <= 128
+                or not isinstance(request_id, str) or not 0 < len(request_id) <= 64
+                or type(action) is not str or action not in browse.SELECTED_ACTIONS):
+            return {"ok": False, "request_id": None, "zone_id": None,
+                    "action": None, "outcome": "refused", "error": "bad_request"}
+        session = self.browse_session(key)
+        api = session._api
+
+        def validate():
+            # Existing lock excludes local pin commands during this check,
+            # not SDK callbacks or unseen remote changes. Recheck each call;
+            # never hold it while waiting for Roon.
+            with self._lock:
+                if self._api is not api:
+                    return "core_changed"
+                if (not api or self._status != "ok"
+                        or not getattr(getattr(api, "_roonsocket", None), "connected", False)):
+                    return "disconnected"
+                if not self._zones_ready():
+                    return "zones_unknown"
+                listing, selected = self._zones()
+                raw = api.zones.get(zone_id) if isinstance(api.zones, dict) else None
+                if (not any(z["id"] == zone_id for z in listing)
+                        or not isinstance(raw, dict) or raw.get("zone_id") != zone_id):
+                    return "unavailable"
+                pinned = self._arbiter.pinned_id
+                if ((pinned is not None and pinned != zone_id)
+                        or not selected or selected["id"] != zone_id):
+                    return "selection_changed"
+                return None
+
+        return session.play_selected(index, level_id, zone_id, request_id, validate, action)
+
     def browse(self, key: str, op: str, **kwargs) -> dict:
         """Dispatch one browse op. Never takes Server._lock (spec 7.5)."""
+        if op == "play_selected":
+            return self.browse_play_selected(key, kwargs.get("index"), kwargs.get("level_id"),
+                                             kwargs.get("zone_id"), kwargs.get("request_id"), kwargs.get("action"))
         if self._status != "ok":
             raise browse.BrowseError("unreachable", "Roon Core unreachable")
         session = self.browse_session(key)
+        if op == "library":
+            return session.library()
+        if op == "enter_nav":
+            return session.enter(kwargs.get("index"), kwargs.get("level_id"), navigation_only=True)
+        if op == "back_nav":
+            return session.back_navigation(kwargs.get("offset"), kwargs.get("level_id"))
+        if op == "page_nav":
+            return session.page_navigation(kwargs.get("offset"), kwargs.get("level_id"))
         if op == "search":
             return session.search(kwargs.get("term") or "")
         if op == "enter":

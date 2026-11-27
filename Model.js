@@ -465,6 +465,115 @@ function tooltipText(state) {
   return head + " \u00b7 " + (state.zone.name || coreName)
 }
 
+// Versioned advertisement chooses the route BEFORE dispatch; never retry.
+function browseActionsSupported(state) {
+  return isPlainObject(state) && isPlainObject(state.features) && state.features.browse_actions === 1
+}
+function browseNavRoute(state, op) {
+  if (op !== "enter" && op !== "back" && op !== "page") return null
+  return browseActionsSupported(state) ? op + "_nav" : op
+}
+var BROWSE_ACTIONS = {
+  play_now:{attempted:"Play requested; check Now Playing.",
+    missing:"No Play Now action is available here.",
+    unknown:"Play result unknown; no retry was sent.", refused:"Play request refused."},
+  play_next:{attempted:"Play Next requested; check the queue.",
+    missing:"No Play Next action is available here.",
+    unknown:"Play Next result unknown; no retry was sent.", refused:"Play Next request refused."},
+  add_to_queue:{attempted:"Add to Queue requested; check the queue.",
+    missing:"No Add to Queue action is available here.",
+    unknown:"Add to Queue result unknown; no retry was sent.", refused:"Add to Queue request refused."}
+}
+function browseAction(action) { return typeof action === "string" && Object.prototype.hasOwnProperty.call(BROWSE_ACTIONS, action) }
+function browsePlayRequest(state, row, index, level, requestId, action) {
+  if (!browseActionsSupported(state) || !validSelection(state && state.selection) || !browseAction(action) || !state || state.status !== "ok" || !state.zone || !state.selection ||
+      state.selection.availability !== "available" || state.selection.zone_id !== state.zone.id ||
+      !playerId(state.zone.id) || !row || row.can_play !== true || (row.can_navigate === false && row.can_descend === true) ||
+      !browseInteger(index) || index >= 100 || !browseInteger(level) ||
+      typeof requestId !== "string" || !requestId.length || requestId.length > 64) return null
+  return {index:index,level_id:level,zone_id:state.zone.id,request_id:requestId,action:action}
+}
+function validBrowsePlayReply(request, reply) {
+  var required = ["v", "ok", "request_id", "zone_id", "action", "outcome", "error"]
+  if (!isPlainObject(reply)) return false
+  for (var i = 0; i < required.length; i++) if (!hasOwn(reply, required[i])) return false
+  return !!request && browseAction(request.action) && reply.v === 1 && typeof reply.ok === "boolean" &&
+    typeof reply.request_id === "string" && reply.request_id.length > 0 && reply.request_id.length <= 64 &&
+    playerId(reply.zone_id) &&
+    reply.request_id === request.request_id && reply.zone_id === request.zone_id &&
+    reply.action === request.action && ((reply.outcome === "attempted" && reply.ok === true && reply.error === null) ||
+    ((reply.outcome === "refused" || reply.outcome === "unknown") && reply.ok === false &&
+     typeof reply.error === "string" && reply.error.length > 0 && reply.error.length <= 64))
+}
+function browsePlayReplyText(request, reply) {
+  var copy = request && browseAction(request.action) ? BROWSE_ACTIONS[request.action] : null
+  var unknown = copy ? copy.unknown : "Browse action result unknown; no retry was sent."
+  if (!validBrowsePlayReply(request,reply)) return unknown
+  if (reply.outcome === "attempted" && reply.error === null) return copy.attempted
+  if (reply.outcome === "refused" && typeof reply.error === "string" && reply.error.length) {
+    var play = request.action === "play_now"
+    var messages = {unsupported_prompt:"This action needs unsupported input or confirmation.",
+      unsupported_action:"This action is not supported here.", no_action:copy.missing,
+      unavailable:play ? "Selected output unavailable; play refused." : "Selected output unavailable; request refused.",
+      selection_changed:play ? "Output selection changed; play refused." : "Output selection changed; request refused.",
+      core_changed:play ? "Roon connection changed; play refused." : "Roon connection changed; request refused.",
+      disconnected:play ? "Roon disconnected; play refused." : "Roon disconnected; request refused.",
+      zones_unknown:play ? "Output list not ready; play refused." : "Output list not ready; request refused.",
+      stale:play ? "Browse view changed; reload before playing." : "Browse view changed; reload before trying again.",
+      unsupported:play ? "This daemon does not support selected-output browse playback." : "This daemon does not support selected browse actions."}
+    return Object.prototype.hasOwnProperty.call(messages,reply.error) ? messages[reply.error] : copy.refused
+  }
+  return unknown
+}
+// One page owns one backend row-key window; never append across levels.
+var BROWSE_PAGE_SIZE = 100
+function browseInteger(n) { return typeof n === "number" && isFinite(n) && n >= 0 && Math.floor(n) === n && n <= 9007199254740991 }
+function browsePage(reply, cursor) {
+  if (!reply || !browseInteger(reply.level_id) || !browseInteger(reply.count) ||
+      !browseInteger(reply.offset) || !Array.isArray(reply.rows) || reply.rows.length > BROWSE_PAGE_SIZE ||
+      !Array.isArray(reply.path)) return null
+  for (var i=0;i<reply.rows.length;i++) if (!reply.rows[i] || typeof reply.rows[i] !== "object" || Array.isArray(reply.rows[i])) return null
+  if (reply.offset > reply.count) return null
+  if (reply.rows.length && reply.count < reply.offset+reply.rows.length) return null
+  return {rows:reply.rows.slice(), levelId:reply.level_id, count:reply.count, offset:reply.offset,
+    path:reply.path.slice(), cursor:moveCursor(cursor,0,reply.rows.length)}
+}
+function browsePageForRequest(reply, args, view, desiredCursor) {
+  var next = browsePage(reply, reply && reply.level_id === view.levelId ? view.cursor : -1)
+  if (!next) return null
+  var op = args[0], success = reply.ok !== false
+  var page = success && (op === "page_nav" || op === "back_nav")
+  var expected = op === "back_nav" ? view.path.slice(0,-1) : view.path
+  if (page && (next.offset !== Number(args[1]) || next.levelId <= Number(args[2]) ||
+               JSON.stringify(next.path) !== JSON.stringify(expected))) return null
+  if (success && op === "enter_nav") {
+    var row = view.rows[Number(args[1])]
+    if (!row || next.offset !== 0 || next.levelId <= Number(args[2]) ||
+        JSON.stringify(next.path) !== JSON.stringify(view.path.concat([row.title]))) return null
+  }
+  if (success && op === "library" && (next.offset !== 0 || JSON.stringify(next.path) !== '["Library"]')) return null
+  if (page && desiredCursor !== undefined)
+    next.cursor = moveCursor(desiredCursor === -2 ? next.rows.length-1 : desiredCursor,0,next.rows.length)
+  return next
+}
+function browsePaging(offset, length, count) {
+  var previous = offset > 0 ? Math.max(0,offset-BROWSE_PAGE_SIZE) : null
+  var next = length > 0 && offset+length < count ? offset+length : null
+  return {previous:previous, next:next,
+    label:length ? String(offset+1)+"\u2013"+String(offset+length)+" of "+String(count) : "0 results"}
+}
+function browseContext(state, session) {
+  var core=state && state.core ? state.core : {}, s=state && state.selection ? state.selection : {}
+  return JSON.stringify([session || "",state ? state.status : "",core.host || "",core.http_port || "",core.name || "",
+    s.mode || "",s.zone_id || "",state && state.zone ? state.zone.id : "",s.availability || "",
+    browseActionsSupported(state)])
+}
+function browseReplyCurrent(token, active, view, context) {
+  return !!(token && active && token.request === active.request && token.view === view &&
+    token.view === active.view && token.context === context && token.context === active.context)
+}
+function canNavigateRow(row) { return !!(row && row.can_navigate === true) }
+
 function zoneList(state) {
   if (!state || !state.zones) return []
   var pinnedId = (state.zone && state.zone.pinned) ? state.zone.id : null
@@ -1076,6 +1185,19 @@ function browseArgv(session, args) {
 
 if (typeof module !== "undefined") {
   module.exports = {
+    browseActionsSupported: browseActionsSupported,
+    browseNavRoute: browseNavRoute,
+    browseAction: browseAction,
+    browsePlayRequest: browsePlayRequest,
+    validBrowsePlayReply: validBrowsePlayReply,
+    browsePlayReplyText: browsePlayReplyText,
+    browseInteger: browseInteger,
+    browsePage: browsePage,
+    browsePageForRequest: browsePageForRequest,
+    browsePaging: browsePaging,
+    browseContext: browseContext,
+    browseReplyCurrent: browseReplyCurrent,
+    canNavigateRow: canNavigateRow,
     normalizeHex: normalizeHex,
     contrastRatio: contrastRatio,
     saturation: saturation,

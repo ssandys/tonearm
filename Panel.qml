@@ -831,6 +831,25 @@ Panel {
               font.pixelSize: Style.font.caption
             }
 
+            Text {
+              id: libraryHint
+              textFormat: Text.PlainText
+              anchors.right: searchHint.left
+              anchors.rightMargin: Style.space(16)
+              anchors.baseline: zonesLabel.baseline
+              // Keep both painting and the click target inside the caption gap.
+              width: Math.min(implicitWidth, Math.max(0, searchHint.x - zonesLabel.width - Style.space(24)))
+              visible: width >= Math.min(implicitWidth, Style.space(40))
+              elide: Text.ElideRight
+              text: "Library"
+              enabled: Model.browseActionsSupported(root.st) && root.st.status === "ok"
+              opacity: enabled ? 1 : 0.5
+              color: root.fgFaint
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              MouseArea { anchors.fill: parent; onClicked: browsePane.openLibrary() }
+            }
+
             // Clicking the hint does what it advertises. It is a hint first --
             // the keyboard is the real path -- but a label naming a key the
             // user cannot click is a smaller affordance than one they can.

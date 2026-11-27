@@ -72,6 +72,13 @@ class TestRowFromItem(unittest.TestCase):
         self.assertEqual(row["image_key"], "48f5b5fe1ee1dcd0f89bf0f6babcc93a")
         self.assertTrue(row["can_descend"])
         self.assertTrue(row["can_play"])
+        self.assertTrue(row["can_navigate"])
+        self.assertEqual(set(row), {"title", "subtitle", "image_key", "can_descend", "can_play", "can_navigate"})
+
+    def test_synthetic_navigation_flag_refuses_prompt_and_terminal_rows(self):
+        for hint,prompt in [('list',{'prompt':'Synthetic input'}),('action',None),('action_list',None)]:
+            row=browse.row_from_item({'title':'Synthetic row','hint':hint,'input_prompt':prompt})
+            self.assertIs(row['can_navigate'],False)
 
     def test_never_leaks_item_key(self):
         # spec 5.3 invariant. This is the guard that makes the stale-key

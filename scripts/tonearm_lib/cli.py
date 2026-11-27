@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from . import player
+from . import player, browse_play
 
 BARE_VERBS = ("playpause", "play", "pause", "next", "previous",
               "mute", "unmute", "subscribe", "status")
@@ -74,7 +74,9 @@ def to_request(argv: list[str]) -> dict:
                 "usage: tonearmctl browse [--session <key>] search <term>"
                 " | enter <i> <level_id> | activate <i> <level_id>"
                 " | play <i> <level_id> | back | page <offset> | reset"
-                " | current")
+                " | current | library | enter_nav <index> <level_id>"
+                " | back_nav <offset> <level_id> | page_nav <offset> <level_id>"
+                " | play_selected <index> <level_id> <zone_id> <request_id> <action>")
         return request
 
     raise ValueError("unknown verb %r" % verb)
@@ -115,6 +117,21 @@ def browse_request(argv):
     op = tokens[0]
     base = {"cmd": "browse", "session": session, "op": op}
     rest = tokens[1:]
+    if op == "enter_nav":
+        if len(rest) != 2:
+            return None
+        index, level = _int(rest[0]), _int(rest[1])
+        if index is None or not 0 <= index < 100 or level is None or not 0 <= level <= 9007199254740991:
+            return None
+        return dict(base, index=index, level_id=level)
+    if op == "play_selected":
+        # The action token is required. Omitting it must not default to Play
+        # Now, and a Core menu title such as "Queue" is not a token.
+        if len(rest) != 5:
+            return None
+        req = dict(base, index=_int(rest[0]), level_id=_int(rest[1]),
+                   zone_id=rest[2], request_id=rest[3], action=rest[4])
+        return req if browse_play.valid_request(req) else None
     if op == "search":
         # Joined, so an unquoted multi-word term works from a shell.
         return dict(base, term=" ".join(rest))
@@ -126,6 +143,15 @@ def browse_request(argv):
             return None
         return dict(base, index=index, level_id=level)
 
+    if op in ("page_nav", "back_nav"):
+        if len(rest) != 2:
+            return None
+        offset, level = _int(rest[0]), _int(rest[1])
+        if offset is None or not 0 <= offset <= 9007199254740991 or level is None or not 0 <= level <= 9007199254740991:
+            return None
+        return dict(base, offset=offset, level_id=level)
+    if op == "library" and not rest:
+        return base
     if op == "page":
         offset = _int(rest[0]) if rest else None
         if offset is None:

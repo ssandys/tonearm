@@ -1,5 +1,21 @@
 # tonearm
 
+Open **Library** to browse from the root, or use the existing search field.
+Enter still plays playable rows and descends into categories; Right/Left
+navigate. Previous/Next page through results and navigation restores the
+parent page and cursor. Select one track or an album, then click **Play Now**,
+**Play Next**, or **Add to Queue** to request that row's native Core menu action
+on the displayed selected output. Albums use the whole album action, with no
+track loop or multiple selection. These buttons do not remove, clear, reorder,
+or display the queue, and a missing action is reported without substituting
+another action. An uncertain result is never retried automatically.
+
+The Library shortcut and selected action buttons require a daemon advertising
+`features: {browse_actions: 1}`. With an older daemon, search, arrows, paging
+and Enter remain available through their existing operations; the new shortcut
+and buttons stay disabled. This Library feature is independent of MPRIS and
+any queue viewer.
+
 Roon now-playing and transport, in the Omarchy shell bar.
 
 Tonearm shows what's playing on your Roon system — album art, artist, and
@@ -224,10 +240,12 @@ Playing a row clears the search and leaves the popup open, so you can pick
 something else without reopening it. The now-playing card above updates to
 whatever just started, which is your confirmation it worked.
 
-**Play Now is the only action.** There's no Queue button and no queue key,
-because the popup has no way to show you a queue — so queuing would be a
-control whose effect you could never see. It isn't in the daemon either: Play
-Now is the only action tonearm invokes.
+The selected row also has explicit **Play Now**, **Play Next**, and **Add to
+Queue** buttons when the daemon advertises selected browse actions. Use the
+arrow keys to choose a row; clicking a result retains its existing activation
+behavior. The buttons request the selected track or whole album's native Core
+action. Check Now Playing or Roon's queue for the effect; the popup does not
+display a queue.
 
 ## Settings
 
