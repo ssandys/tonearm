@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vendor"))
 
 from roonapi import RoonApi              # noqa: E402  (vendored, path-inserted)
 
-from . import browse, config, net, server, sood, state, zones, player  # noqa: E402
+from . import browse, config, net, server, sood, state, zones, player, queue_state  # noqa: E402
 
 LOG = logging.getLogger("tonearmd.core")
 
@@ -529,6 +529,7 @@ class RoonSession:
         # Set by `_apply`, cleared by `_save_cfg`: an address taken in memory
         # that no Core has answered on yet.
         self._cfg_dirty = False
+        self._queue = queue_state.QueueCache(self._queue_context, self._publish)
 
     @property
     def status(self) -> str:
@@ -559,7 +560,43 @@ class RoonSession:
         generation = getattr(self._api, "_zone_list_generation", 0)
         return generation >= self._required_zone_generation
 
+    def _queue_context(self):
+        api = self._api
+        sock = getattr(api, '_roonsocket', None)
+        generation = getattr(api, '_zone_list_generation', 0)
+        required = self._required_zone_generation
+        status, zid = 'disconnected', None
+        if self._status == 'ok' and sock is not None and getattr(sock, 'connected', False):
+            status = 'unknown'
+            if self._zones_ready():
+                listing, selected = self._zones()
+                selection = state.selection(self._arbiter.pinned_id, selected, listing, True)
+                if selection['availability'] == 'available' and selected:
+                    zid = selected['id']
+                    if zid == selection['zone_id']:
+                        status = 'available'
+                elif selection['availability'] in ('missing', 'none'):
+                    status = 'unavailable'
+        if (api is not self._api or sock is not getattr(api, '_roonsocket', None)
+                or generation != getattr(api, '_zone_list_generation', 0)
+                or required != self._required_zone_generation):
+            status, zid = 'unknown', None
+        return queue_state.Context(status, api, sock, zid, generation, required)
+
     def snapshot(self) -> dict:
+        payload = self._state_snapshot()
+        # Cache-only; socket I/O belongs exclusively to the existing watcher.
+        if hasattr(self, '_queue'):
+            payload['queue'] = self._queue.snapshot()
+            zid = (payload.get('zone') or {}).get('id')
+            if (payload['queue']['zone_id'] != zid
+                    or payload.get('selection', {}).get('availability') != 'available'):
+                payload['queue']['items'] = []
+                if payload['queue']['status'] in ('ready', 'loading', 'error'):
+                    payload['queue'].update(status='unknown', error=None, zone_id=None)
+        return payload
+
+    def _state_snapshot(self) -> dict:
         core = None
         if self._cfg.get("host"):
             core = {"host": self._cfg["host"],
@@ -806,6 +843,7 @@ class RoonSession:
             time.sleep(POLL_INTERVAL)
             try:
                 self._check_connection()
+                self._queue.drain()
             except Exception:
                 LOG.exception("connection check failed")
 
@@ -1031,6 +1069,7 @@ class RoonSession:
         return api
 
     def stop(self) -> None:
+        self._queue.stop()
         if self._api:
             self._api.stop()
             self._api = None

@@ -182,7 +182,7 @@ Panel {
   // whole pane into every subsequent popup open and silently undid R13/R14's
   // idle height. `opened` is Ui/Panel.qml's own readonly property; this is
   // the closing edge it exists for.
-  onOpenedChanged: if (!root.opened) browsePane.resetPane()
+  onOpenedChanged: if (!root.opened) { browsePane.resetPane(); queuePane.expanded = false }
 
   // BarIconButton, not a hand-rolled Item + MouseArea: it paints the glyph
   // through OpticalGlyph, which centers on the painted ink rather than the
@@ -277,12 +277,18 @@ Panel {
       // Unblocked while typing, every letter would be swallowed as a shortcut.
       blocked: browsePane.editing
 
-      onMoveRequested: function (dx, dy) { browsePane.handleMove(dx, dy) }
-      onActivateRequested: browsePane.handleActivate()
+      onMoveRequested: function (dx, dy) {
+        if (queuePane.expanded) queuePane.moveCursor(dy)
+        else browsePane.handleMove(dx, dy)
+      }
+      onActivateRequested: if (!queuePane.expanded) browsePane.handleActivate()
 
       // Esc backs out one level and only closes at the top (spec 7.2). One
       // stray Esc must not discard a whole navigation.
-      onCloseRequested: { if (!browsePane.handleBack()) root.close() }
+      onCloseRequested: {
+        if (queuePane.expanded) queuePane.expanded = false
+        else if (!browsePane.handleBack()) root.close()
+      }
 
       // `/` is explicit; everything else printable starts a search SEEDED with
       // that character, so typing goes straight into the field without a
@@ -940,17 +946,38 @@ Panel {
           }
         }
 
+        QueuePane {
+          id: queuePane
+          width: parent.width
+          roonState: root.st
+          fontFamily: root.fontFamily
+          foreground: root.fgMid
+          faint: root.fgFaint
+          highlight: root.rowHighlight
+          onOpening: browsePane.releaseSearch()
+        }
+
+        Connections {
+          target: browsePane
+          // Library shortcut and search both expose these existing signals.
+          // A later Library merge therefore reveals its pane immediately.
+          function onHasContentChanged() { if (browsePane.hasContent) queuePane.expanded = false }
+          function onEditingChanged() { if (browsePane.editing) queuePane.expanded = false }
+          function onBusyChanged() { if (browsePane.busy) queuePane.expanded = false }
+        }
+
         PanelSeparator {
           width: parent.width
           // Bound to the same property BrowsePane uses for its own `visible`
           // (BrowsePane.qml's `hasContent`), so the separator and the pane
           // can never disagree about whether there is anything to show.
-          visible: browsePane.hasContent
+          visible: browsePane.hasContent && !queuePane.expanded
         }
 
         BrowsePane {
           id: browsePane
           width: parent.width
+          visible: browsePane.hasContent && !queuePane.expanded
           service: Service
           session: root.browseSession
           state: root.st

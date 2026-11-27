@@ -183,8 +183,15 @@ def normalize_zone(roon_zone: dict | None) -> dict | None:
         "controls": player.controls(roon_zone),
         "position": _seek_of(roon_zone, np),
         "length": _number(np.get("length"), 0),
+        "queue_time_remaining": _queue_time(roon_zone.get("queue_time_remaining")),
         "now_playing": _now_playing_of(roon_zone),
     }
+
+
+def _queue_time(value):
+    if (type(value) not in (int, float) or not 0 <= value <= MAX_NUMBER):
+        return None
+    return value
 
 
 def selection(pinned_id, selected: dict | None, zones: list[dict],

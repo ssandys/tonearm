@@ -5,6 +5,10 @@ import threading
 import websocket
 
 from .constants import LOGGER, REGISTERED, SERVICE_PING, CONTROL_VOLUME
+from .constants import SERVICE_TRANSPORT
+
+# LOCAL PATCH (tonearm queue 1): an owned queue frame has a local input cap.
+MAX_QUEUE_FRAME_BYTES = 64 * 1024
 
 try:
     import simplejson as json
@@ -15,6 +19,21 @@ try:
     import thread
 except ImportError:
     import _thread as thread
+
+
+class QueueSubscription:
+    """One exact local route; cancellation does not prove remote acknowledgement."""
+
+    def __init__(self, socket, entry):
+        self._socket, self._entry = socket, entry
+
+    def cancel(self):
+        socket, entry = self._socket, self._entry
+        with socket._request_lock:
+            if socket._subscriptions.get(entry['request_id']) is not entry:
+                return
+            del socket._subscriptions[entry['request_id']]
+        socket._cancel_entry(entry)
 
 
 class RoonApiWebSocket(
@@ -84,6 +103,7 @@ class RoonApiWebSocket(
         self._results = {}
         self._requestid = 10  # initial request_id of 10 to prevent confusion with the requests that are sent by the server at initialization
         self._subkey = 0
+        self._queue_epoch = 0
         self._exit = False
         self._subscriptions = {}
         self.connected = False
@@ -129,10 +149,41 @@ class RoonApiWebSocket(
             raise
         return None
 
+    # LOCAL PATCH (tonearm queue 1): owned queue routing beside the legacy path.
+    def subscribe_owned_queue(self, callback, zone_id, max_item_count):
+        """callback(event_name, body, moo_verb); COMPLETE is terminal by protocol."""
+        if (not callable(callback) or not isinstance(zone_id, str)
+                or not 1 <= len(zone_id) <= 128
+                or any(ord(c) < 33 or ord(c) > 126 for c in zone_id)
+                or type(max_item_count) is not int or not 1 <= max_item_count <= 100):
+            raise ValueError('invalid_queue_subscription')
+        with self._request_lock:
+            if not self.connected or self._socket is None:
+                raise ConnectionError('queue_disconnected')
+            request_id, subkey = self._requestid, self._subkey
+            self._requestid += 1
+            self._subkey += 1
+            entry = {'service': SERVICE_TRANSPORT, 'endpoint': 'queue',
+                     'request_id': request_id, 'subkey': subkey,
+                     'callback': callback, 'owned_queue': True, 'epoch': self._queue_epoch}
+            self._subscriptions[request_id] = entry
+        handle = QueueSubscription(self, entry)
+        try:
+            self._send_allocated(SERVICE_TRANSPORT + '/subscribe_queue', request_id,
+                                 {'subscription_key': subkey, 'zone_or_output_id': zone_id,
+                                  'max_item_count': max_item_count})
+        except Exception:
+            with self._request_lock:
+                if self._subscriptions.get(request_id) is entry:
+                    del self._subscriptions[request_id]
+            raise
+        return handle
+
     # LOCAL PATCH (tonearm #47): cancellation replies have no ordinary result owner.
     def _cancel_entry(self, entry):
         with self._request_lock:
-            if not self.connected:
+            if (not self.connected or
+                    (entry.get('owned_queue') and entry['epoch'] != self._queue_epoch)):
                 return
             request_id = self._requestid
             self._requestid += 1
@@ -171,6 +222,14 @@ class RoonApiWebSocket(
             if line_with_request_id:
                 request_id = int(line_with_request_id[0].split("Request-Id: ")[1])
 
+            with self._request_lock:
+                owned = self._subscriptions.get(request_id)
+                if owned is not None and not owned.get('owned_queue'):
+                    owned = None
+            if owned is not None and len(message.encode('utf-8')) > MAX_QUEUE_FRAME_BYTES:
+                owned['callback']('Invalid', None, 'INVALID')
+                return
+
             if "Content-Type:" in message:
                 # Roon uses a blank line after the header to indicate body.
                 # See https://github.com/RoonLabs/node-roon-api/blob/master/moomsg.js#L45
@@ -178,7 +237,13 @@ class RoonApiWebSocket(
             elif "Logging:" not in message:
                 body = header
             if body and "{" in body:
-                body = json.loads(body)
+                try:
+                    body = json.loads(body)
+                except (ValueError, RecursionError):
+                    if owned is None:
+                        raise
+                    owned['callback']('Invalid', None, 'INVALID')
+                    return
             # handle message
             if SERVICE_PING in header:
                 # reply to incoming ping from server
@@ -196,10 +261,22 @@ class RoonApiWebSocket(
                 # ordinary requests already in flight may receive a result.
                 with self._request_lock:
                     entry = self._subscriptions.get(request_id)
-                    if entry is None and request_id in self._results:
+                    if ((owned is not None or (entry is not None and entry.get('owned_queue')))
+                            and entry is not owned):
+                        entry = None  # close/reuse while parsing cannot steal this frame
+                    if entry is not None and entry.get('owned_queue'):
+                        parts = header.split(' ', 2)
+                        verb = parts[1] if len(parts) == 3 else ''
+                        name = parts[2] if len(parts) == 3 else ''
+                        if verb == 'COMPLETE':
+                            del self._subscriptions[request_id]
+                    if entry is None and owned is None and request_id in self._results:
                         self._results[request_id] = body
                 if entry is not None:
-                    entry["callback"](body)
+                    if entry.get('owned_queue'):
+                        entry['callback'](name, body, verb)
+                    else:
+                        entry["callback"](body)
         except websocket.WebSocketConnectionClosedException:
             # This can happen while closing a connection - so ignore
             pass
@@ -221,6 +298,7 @@ class RoonApiWebSocket(
         LOGGER.debug("session closed (%s) %s", close_msg, close_status_code)
         with self._request_lock:
             self.connected = False
+            self._queue_epoch += 1
             self._requestid = 10
             self._subkey = 0
             self._subscriptions = {}

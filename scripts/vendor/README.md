@@ -96,8 +96,8 @@ so an admitted late reply cannot reinsert a result after its waiter removes it.
 
 Regression pins: `test_vendor_patches.py` and `test_vendor_subscription_lifecycle.py`.
 On vendor refresh, reapply or deliberately retire this patch after these tests
-and the full suite. This PR adds no `subscribe_queue`/`subscribe_owned_queue` or
-owned cancellation API; those unused APIs are deferred to a queue-consumer PR.
+and the full suite. The separate queue-consumer patch below adds an owned
+queue path; these generic lifecycle and legacy callback guarantees still apply.
 
 `max_item_count` in an optional subscription payload is only a server-side
 request. The vendor does not locally enforce it or bound the incoming body.
@@ -108,3 +108,28 @@ The generic callback remains body-only and does not validate live queue schemas.
 This is not a complete ordinary-request socket-ownership (#30) or synchronous
 fanout (#38) fix. An already admitted callback may finish after unsubscribe;
 callers must reject stale state. No remote cancellation acknowledgment is claimed.
+
+### Queue consumer patch (local marker `tonearm queue 1`, DRAFT)
+
+`RoonApi.subscribe_queue(callback, zone_id, max_item_count)` returns one
+idempotent handle over `subscribe_owned_queue`. It accepts an ASCII identifier
+of 1..128 visible characters and an integer count of 1..100 (not bool).
+Disconnected or missing sockets refuse before sending. The route is registered
+before send; cancellation removes only that exact entry before sending outside
+the per-instance lock. No ordinary cancellation result owner is allocated.
+The owned callback receives `(event_name, body, moo_verb)`; the third argument
+allows the consumer to treat COMPLETE as terminal independently of the event
+name. Legacy `subscribe` and `register_queue_callback` remain body-only/None.
+
+Verified against official [transport lib.js](https://github.com/RoonLabs/node-roon-api-transport/blob/master/lib.js)
+and [moo.js](https://github.com/RoonLabs/node-roon-api/blob/master/moo.js): queue
+arguments are `zone_or_output_id`/`max_item_count`, unsubscribe uses its allocated
+`subscription_key`, and COMPLETE ends a request. These sources do not validate
+Changed bodies for consumers. The retained paused iFi initial Subscribed sample
+does not record its MOO verb. Empty/window/delta/error/end/remote cancellation
+and live numeric queue time remain unproven; see `docs/queue-view-draft.md`.
+
+Refresh pins: `test_queue_state.py` (synthetic contracts and races), existing
+`test_vendor_subscription_lifecycle.py` (legacy shape), and the numbered marker
+pin in the queue tests. The consumer independently enforces 100 rows, clipped
+256-character labels, bounded IDs, encoded-body and cache budgets of 60 KiB.
